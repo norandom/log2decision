@@ -15,6 +15,7 @@ pub use polars;
 pub mod adapters;
 pub mod error;
 pub mod input;
+pub mod memory;
 pub mod paths;
 pub mod runrecord;
 pub mod types;
@@ -22,11 +23,12 @@ pub mod types;
 pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
 pub use adapters::lines::LinesAdapter;
-pub use input::{Accepted, Dedup, InputAdapter};
+pub use input::{Accepted, Dedup, InputAdapter, Source};
+pub use memory::{BatchChange, BatchPlan, MemoryBudget, MemorySettings};
 
 pub use error::{
     EXIT_INVALID_INPUT, EXIT_MISSING, EXIT_REFUSED, EXIT_RUNTIME, EXIT_SUCCESS, L2dError,
 };
 pub use paths::ProjectPaths;
-pub use runrecord::{Device, Placement, PlacementSource, RunKind, RunRecord};
+pub use runrecord::{BATCH_PLAN_KEY, Device, Placement, PlacementSource, RunKind, RunRecord};
 pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, LogsFrame, SkippedRecord};

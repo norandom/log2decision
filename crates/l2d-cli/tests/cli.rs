@@ -147,6 +147,85 @@ fn json_flag_puts_a_machine_readable_error_on_stdout() {
     }
 }
 
+// --- 12.2: the analyst's batch size and memory limit ---------------------------------------
+
+#[test]
+fn every_help_shows_the_batch_size_and_memory_limit_options() {
+    let mut helps: Vec<Vec<&str>> = vec![vec!["--help"]];
+    for operation in OPERATIONS {
+        let mut args = operation.to_vec();
+        args.push("--help");
+        helps.push(args);
+    }
+    for args in helps {
+        let output = l2d(&args);
+        assert_eq!(output.status.code(), Some(0), "l2d {}", args.join(" "));
+        let help = stdout(&output);
+        for option in ["--batch-rows <N>", "--memory-limit <SIZE>"] {
+            assert!(
+                help.contains(option),
+                "`{option}` missing in the help of l2d {}:\n{help}",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+#[test]
+fn batch_size_and_memory_limit_are_accepted_before_and_after_the_operation() {
+    for args in [
+        &["--batch-rows", "10000", "ingest"][..],
+        &["ingest", "--batch-rows", "10000"][..],
+        &["--memory-limit", "2GB", "ingest"][..],
+        &["ingest", "--memory-limit", "536870912"][..],
+        &["--memory-limit=512MB", "--batch-rows=1024", "store", "add"][..],
+        &["store", "--batch-rows", "1", "add", "--memory-limit", "64k"][..],
+        &[
+            "--json",
+            "--batch-rows",
+            "65536",
+            "eval",
+            "--memory-limit",
+            "1GiB",
+        ][..],
+    ] {
+        let output = l2d(args);
+        // The options are read; the operation itself is still a stub.
+        assert_eq!(output.status.code(), Some(4), "l2d {}", args.join(" "));
+        assert!(
+            stderr(&output).contains("not implemented"),
+            "l2d {}",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn an_unusable_batch_size_or_memory_limit_is_an_analyst_error() {
+    for (args, named) in [
+        (&["--memory-limit", "0", "ingest"][..], "--memory-limit"),
+        (&["--memory-limit", "0MB", "ingest"][..], "--memory-limit"),
+        (&["--memory-limit", "lots", "ingest"][..], "--memory-limit"),
+        (&["--memory-limit", "5XB", "ingest"][..], "--memory-limit"),
+        (&["--memory-limit", "1.5GB", "ingest"][..], "--memory-limit"),
+        (&["ingest", "--memory-limit=-1"][..], "--memory-limit"),
+        (&["ingest", "--memory-limit"][..], "--memory-limit"),
+        (&["--batch-rows", "0", "ingest"][..], "--batch-rows"),
+        (&["--batch-rows", "many", "ingest"][..], "--batch-rows"),
+        (&["--batch-rows", "1.5", "ingest"][..], "--batch-rows"),
+        (&["triage", "--batch-rows=-3"][..], "--batch-rows"),
+        (&["triage", "--batch-rows", "1k"][..], "--batch-rows"),
+    ] {
+        let output = l2d(args);
+        assert_eq!(output.status.code(), Some(2), "l2d {}", args.join(" "));
+        assert_eq!(stdout(&output), "", "l2d {}", args.join(" "));
+        let err = stderr(&output);
+        let line = single_line(&err);
+        assert!(line.starts_with("error: invalid input: "), "{line}");
+        assert!(line.contains(named), "l2d {}: {line}", args.join(" "));
+    }
+}
+
 #[test]
 fn unknown_subcommand_is_an_analyst_error_with_one_line() {
     let output = l2d(&["frobnicate"]);

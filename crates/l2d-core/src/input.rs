@@ -1,8 +1,17 @@
-//! The input contract shared by all adapters: reading a source, the validation pass,
-//! parsing with Polars, exact-text deduplication as frame operations, and the input
-//! summary with its content hash.
+//! The input contract shared by all adapters: reading a source in batches, the
+//! validation pass, parsing with Polars, exact-text deduplication as frame operations,
+//! and the input summary with its content hash.
 //!
 //! # How a source becomes a logs frame
+//!
+//! The source is read front to back in small pieces ([`Source`]) and processed in
+//! batches of records. A [`Batcher`] sizes the batches to the free memory
+//! (requirement 12): it samples the first records for the bytes per row, plans the
+//! batch size within the [`MemoryBudget`], and has the free memory read again before
+//! every batch. Steps 1 to 3 below happen once per batch, in source order; the
+//! deduplication of step 4 keeps its state across batches. Record boundaries never
+//! depend on where a read or a batch ends, so frame and summary are the same for any
+//! batch size.
 //!
 //! 1. **Validation pass.** The adapter walks the raw records in source order. A record
 //!    that cannot be read is reported to [`Dedup::skip`] with its position and the
@@ -41,68 +50,433 @@
 //! Log text, labels and group keys are data only. Nothing here executes them or uses
 //! them to build paths or commands; the only path touched is the one the caller passed.
 
-use std::io::Cursor;
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Cursor, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polars::prelude::{
-    Column, CsvEncoding, CsvReadOptions, DataFrame, DataType, Field, IntoLazy, JsonLineReader,
-    PolarsError, Schema, SerReader, col, lit, when,
+    Column, CsvEncoding, CsvReadOptions, DataFrame, DataType, Field, IntoColumn, IntoLazy,
+    JsonLineReader, PolarsError, Schema, SerReader, StringChunkedBuilder, col, lit, when,
 };
 use sha2::{Digest, Sha256};
 
 use crate::error::L2dError;
+use crate::memory::{BatchCost, BatchPlan, Batcher, MemoryBudget, MemorySettings, RecordLimit};
 use crate::types::{InputSummary, Label, LogsFrame, SkippedRecord};
+
+/// How many bytes of memory reading needs per byte of source while it processes one
+/// batch: the expansion factor the adapters declare for
+/// [`estimate_rows`](crate::memory::estimate_rows).
+///
+/// A batch is in memory several times before it is merged into the deduplicated rows:
+/// the accepted records copied for Polars (in a buffer that doubles as it grows), the
+/// columns Polars parsed, the text, label and group columns derived from them, the
+/// rows grouped by text, and the copy that lets go of the parse buffers.
+///
+/// The three figures of [`PARSE_COST`] were set together from the heap a batch really
+/// takes (counting allocator, lines of 1 to 5,000 bytes, all distinct, in batches of
+/// 1,024 to 65,536 rows): with them the peak of every batch stayed below what was
+/// held before it plus `rows * (PARSE_ROW_BYTES + PARSE_EXPANSION * source bytes per
+/// row)` by more than the batch needed in all shapes but the smallest batches, which
+/// exceeded it by at most 1.9 MB; [`PARSE_BATCH_BYTES`] covers that. The test
+/// `tests/memory_limit.rs` holds the result to the limit.
+pub const PARSE_EXPANSION: f64 = 6.0;
+
+/// The fixed cost of a row while its batch is parsed and deduplicated, in bytes:
+/// string views of text, label and group, position, digest, occurrences, the grouping,
+/// and, for a row that cannot be read, its record in the list of skipped records with
+/// a reason of up to about 350 bytes.
+pub const PARSE_ROW_BYTES: u64 = 500;
+
+/// The fixed cost of a batch while it is parsed and grouped, in bytes: buffers of the
+/// data layer that do not follow the size of the batch.
+pub const PARSE_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+
+/// What the adapters declare to the [`Batcher`] for reading.
+pub const PARSE_COST: BatchCost = BatchCost {
+    expansion: PARSE_EXPANSION,
+    row_bytes: PARSE_ROW_BYTES,
+    batch_bytes: PARSE_BATCH_BYTES,
+};
+
+/// From this many bytes on, a batch is parsed on all threads of the data layer.
+const PARALLEL_PARSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a skipped record is counted as besides its reason, in bytes: the record three
+/// times over, because its list doubles when it is full and holds the old and the new
+/// room for a moment, and the bookkeeping of the allocation of its reason.
+const SKIPPED_RECORD_BYTES: u64 = 3 * size_of::<SkippedRecord>() as u64 + 16;
+
+/// What merging costs per row besides the frames, in bytes: see [`Dedup::held_bytes`].
+///
+/// Measured (counting allocator): the peak of a merge of all rows is 239 bytes per row
+/// for texts of 7 bytes (26 bytes per row estimated by Polars), 278 for 30 bytes (49
+/// estimated) and 516 for 120 bytes (139 estimated). `200 + 2.6 * estimated` is above
+/// all three by 8 to 12 percent.
+const HELD_ROW_BYTES: u64 = 200;
+
+/// How many times the estimated size of the frames a merge takes: the rows before the
+/// merge, the merged rows, and room the string buffers have beyond their content.
+const HELD_FACTOR: f64 = 2.6;
+
+/// How many bytes are asked of the file in one read.
+pub const READ_BYTES: usize = 64 * 1024;
 
 /// Turns one local file into the logs frame and a summary of what was read.
 ///
-/// - Precondition: `path` exists and is readable; otherwise [`L2dError::Missing`].
+/// The source is read in batches sized by a [`MemoryBudget`]; it is never in memory as
+/// a whole. An adapter implements [`InputAdapter::read_from`]; the other two methods
+/// open the source and observe the memory of the host.
+///
+/// - Precondition: the path exists and is readable; otherwise [`L2dError::Missing`].
 /// - Postconditions: every text in the frame is unique; rows are in order of first
 ///   occurrence; `InputSummary::records` equals the sum of occurrences plus the number
-///   of skipped records. The source is never modified.
+///   of skipped records. Frame and summary are the same for any batch size and any
+///   read size. The source is never modified.
+/// - [`L2dError::Refused`] when the smallest batch, or a single record, does not fit the
+///   memory limit; nothing is returned then.
 pub trait InputAdapter {
-    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError>;
-}
+    /// Reads an opened source in batches within `budget` and also returns the batch
+    /// plan: what was observed and chosen, and how the batch size moved.
+    fn read_from(
+        &self,
+        source: Source,
+        budget: &mut MemoryBudget,
+    ) -> Result<(LogsFrame, InputSummary, BatchPlan), L2dError>;
 
-/// Reads the whole source file, opened read-only.
-///
-/// Any failure to read reports [`L2dError::Missing`] with the path as expected location.
-pub fn read_source(path: &Path) -> Result<Vec<u8>, L2dError> {
-    std::fs::read(path).map_err(|error| {
-        let item = if error.kind() == std::io::ErrorKind::NotFound {
-            "input file".to_string()
-        } else {
-            format!("readable input file ({error})")
-        };
-        L2dError::Missing {
-            item,
-            expected_at: path.to_path_buf(),
-        }
-    })
+    /// Reads the file at `path` in batches within `budget`.
+    fn read_with(
+        &self,
+        path: &Path,
+        budget: &mut MemoryBudget,
+    ) -> Result<(LogsFrame, InputSummary, BatchPlan), L2dError> {
+        self.read_from(Source::open(path)?, budget)
+    }
+
+    /// Reads the file at `path` with the default budget: the free memory of the host
+    /// is read now, and the batch plan is not returned.
+    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError> {
+        let mut budget = MemoryBudget::observe(&MemorySettings::default())?;
+        self.read_with(path, &mut budget)
+            .map(|(logs, summary, _)| (logs, summary))
+    }
 }
 
 /// The lower-case hexadecimal SHA-256 of `bytes`.
 pub fn content_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
 }
 
-/// `bytes` without a leading UTF-8 byte-order mark.
-pub fn strip_bom(bytes: &[u8]) -> &[u8] {
-    bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// The lines of `bytes` without their `\n` or `\r\n` terminators.
+// --- The source --------------------------------------------------------------------------
+
+const BYTE_ORDER_MARK: &[u8] = b"\xef\xbb\xbf";
+
+/// A source file opened read-only and read front to back in small pieces.
 ///
-/// A final terminator does not start another line; an empty input has no lines.
-pub fn split_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    let has_lines = !bytes.is_empty();
-    body.split(|byte| *byte == b'\n')
-        .filter(move |_| has_lines)
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+/// As a [`Read`] it gives the content without a leading UTF-8 byte-order mark. Every
+/// byte of the file, the mark included, goes into the SHA-256 that [`Source::finish`]
+/// returns, so the hash is that of the raw file although the file is never in memory
+/// as a whole.
+pub struct Source {
+    path: PathBuf,
+    file: File,
+    size: u64,
+    hasher: Sha256,
+    started: bool,
+    /// Bytes read while looking for the byte-order mark that are content.
+    head: Vec<u8>,
+    read_size: usize,
+    window: Option<Window>,
+    failure: Option<SourceFailure>,
+}
+
+enum SourceFailure {
+    /// The file could not be read.
+    Read(L2dError),
+    /// The record being read is larger than the [`RecordLimit`].
+    RecordTooLarge,
+}
+
+impl Source {
+    /// Opens the file at `path`.
+    ///
+    /// Any failure to open or read it reports [`L2dError::Missing`] with the path as
+    /// expected location.
+    pub fn open(path: &Path) -> Result<Self, L2dError> {
+        let file = File::open(path).map_err(|error| missing(path, &error))?;
+        let size = file
+            .metadata()
+            .map_err(|error| missing(path, &error))?
+            .len();
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            size,
+            hasher: Sha256::new(),
+            started: false,
+            head: Vec::new(),
+            read_size: READ_BYTES,
+            window: None,
+            failure: None,
+        })
+    }
+
+    /// Hands out at most `bytes` bytes per read (at least one). The result of a read
+    /// does not depend on it; tests use small values to put the end of a read inside a
+    /// record, a line end or the byte-order mark.
+    pub fn with_read_size(mut self, bytes: usize) -> Self {
+        self.read_size = bytes.max(1);
+        self
+    }
+
+    /// The path the source was opened at.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The size of the file in bytes when it was opened.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The source as lines; a line longer than `limit` allows is refused.
+    pub fn lines(self, limit: RecordLimit) -> Lines {
+        Lines {
+            reader: BufReader::with_capacity(READ_BYTES, self),
+            limit,
+            position: 0,
+        }
+    }
+
+    /// Reads what is left of the file and returns the lower-case hexadecimal SHA-256 of
+    /// all its bytes.
+    pub fn finish(mut self) -> Result<String, L2dError> {
+        self.window = None;
+        let mut rest = [0u8; 4096];
+        loop {
+            match self.read(&mut rest) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) => return Err(self.failed(&error, None)),
+            }
+        }
+        Ok(hex(&self.hasher.finalize()))
+    }
+
+    /// The error for a failed read: what the source noted, or `error` itself.
+    /// `record` is the limit and the position of the record that was being read.
+    fn failed(&mut self, error: &std::io::Error, record: Option<(RecordLimit, u64)>) -> L2dError {
+        match (self.failure.take(), record) {
+            (Some(SourceFailure::Read(failure)), _) => failure,
+            (Some(SourceFailure::RecordTooLarge), Some((limit, position))) => {
+                limit.refusal(position)
+            }
+            _ => missing(&self.path, error),
+        }
+    }
+
+    fn read_file(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.file.read(out) {
+                Ok(count) => {
+                    self.hasher.update(&out[..count]);
+                    return Ok(count);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    self.failure = Some(SourceFailure::Read(missing(&self.path, &error)));
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Reads the first three bytes and drops them when they are the byte-order mark.
+    fn start(&mut self) -> std::io::Result<()> {
+        let mut head = [0u8; BYTE_ORDER_MARK.len()];
+        let mut filled = 0;
+        while filled < head.len() {
+            match self.read_file(&mut head[filled..])? {
+                0 => break,
+                count => filled += count,
+            }
+        }
+        if &head[..filled] != BYTE_ORDER_MARK {
+            self.head = head[..filled].to_vec();
+        }
+        self.started = true;
+        Ok(())
+    }
+}
+
+impl Read for Source {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if !self.started {
+            self.start()?;
+        }
+        let wanted = out.len().min(self.read_size);
+        let count = if self.head.is_empty() {
+            self.read_file(&mut out[..wanted])?
+        } else {
+            let count = wanted.min(self.head.len());
+            out[..count].copy_from_slice(&self.head[..count]);
+            self.head.drain(..count);
+            count
+        };
+        if let Some(window) = &mut self.window
+            && !window.push(&out[..count])
+        {
+            self.failure = Some(SourceFailure::RecordTooLarge);
+            return Err(std::io::Error::other("a record is larger than allowed"));
+        }
+        Ok(count)
+    }
+}
+
+fn missing(path: &Path, error: &std::io::Error) -> L2dError {
+    let item = if error.kind() == std::io::ErrorKind::NotFound {
+        "input file".to_string()
+    } else {
+        format!("readable input file ({error})")
+    };
+    L2dError::Missing {
+        item,
+        expected_at: path.to_path_buf(),
+    }
+}
+
+/// The bytes a reader has taken from a [`Source`] and may still ask for: from the start
+/// of the record being read to the end of what the reader read ahead.
+struct Window {
+    bytes: Vec<u8>,
+    /// The offset of `bytes[0]` in the content.
+    base: u64,
+    /// The offset before which nothing is asked for any more.
+    keep_from: u64,
+    /// How many bytes may be kept.
+    limit: u64,
+}
+
+impl Window {
+    /// Appends `bytes`; `false` when more than the limit would have to be kept.
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        let done = (self.keep_from - self.base) as usize;
+        if done >= READ_BYTES || done == self.bytes.len() {
+            self.bytes.drain(..done);
+            self.base = self.keep_from;
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.base + self.bytes.len() as u64 - self.keep_from <= self.limit
+    }
+
+    /// The content from offset `start` to offset `end`.
+    fn get(&self, start: u64, end: u64) -> &[u8] {
+        let at = |offset: u64| offset.saturating_sub(self.base) as usize;
+        self.bytes.get(at(start)..at(end)).unwrap_or_default()
+    }
+
+    /// Lets go of everything before offset `end`.
+    fn done_before(&mut self, end: u64) {
+        let read = self.base + self.bytes.len() as u64;
+        self.keep_from = end.clamp(self.keep_from, read);
+    }
+}
+
+/// The lines of a [`Source`], without their `\n` or `\r\n` terminators.
+///
+/// A final terminator does not start another line; an empty source has no lines.
+pub struct Lines {
+    reader: BufReader<Source>,
+    limit: RecordLimit,
+    position: u64,
+}
+
+impl Lines {
+    /// Reads the next line into `line` and returns how many source bytes it took, its
+    /// terminator included; `None` at the end of the source.
+    ///
+    /// A line longer than the record limit is [`L2dError::Refused`], naming its
+    /// position; it is not read to its end.
+    pub fn next_line(&mut self, line: &mut Vec<u8>) -> Result<Option<u64>, L2dError> {
+        line.clear();
+        self.position += 1;
+        let mut taken = 0u64;
+        loop {
+            let buffer = match self.reader.fill_buf() {
+                Ok(buffer) => buffer,
+                Err(error) => return Err(self.reader.get_mut().failed(&error, None)),
+            };
+            if buffer.is_empty() {
+                if taken == 0 {
+                    return Ok(None);
+                }
+                break;
+            }
+            let end = buffer.iter().position(|byte| *byte == b'\n');
+            let used = end.map_or(buffer.len(), |end| end + 1);
+            line.extend_from_slice(&buffer[..end.unwrap_or(used)]);
+            self.reader.consume(used);
+            taken += used as u64;
+            if line.len() as u64 > self.limit.max_bytes {
+                return Err(self.limit.refusal(self.position));
+            }
+            if end.is_some() {
+                break;
+            }
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Ok(Some(taken))
+    }
+
+    /// The source, once all lines are read.
+    pub fn into_source(self) -> Source {
+        self.reader.into_inner()
+    }
+}
+
+// --- Batches -----------------------------------------------------------------------------
+
+/// Notes one source record of `source_bytes` bytes, read or skipped, and processes the
+/// batch with `process` when the record completes it.
+///
+/// `batch` is whatever the adapter collects for one batch; it is taken and left empty.
+/// `process` must accept a batch without accepted records.
+pub fn batch_step<B: Default>(
+    batcher: &mut Batcher<'_>,
+    source_bytes: u64,
+    dedup: &mut Dedup,
+    batch: &mut B,
+    process: &mut impl FnMut(&mut Dedup, B) -> Result<(), L2dError>,
+) -> Result<(), L2dError> {
+    if batcher.record(source_bytes)? {
+        process(dedup, std::mem::take(batch))?;
+        batcher.processed(dedup.held_bytes())?;
+    }
+    Ok(())
+}
+
+/// Processes the last, partial batch at the end of the source.
+pub fn batch_end<B>(
+    batcher: &mut Batcher<'_>,
+    dedup: &mut Dedup,
+    batch: B,
+    process: &mut impl FnMut(&mut Dedup, B) -> Result<(), L2dError>,
+) -> Result<(), L2dError> {
+    if batcher.end()? {
+        process(dedup, batch)?;
+        batcher.processed(dedup.held_bytes())?;
+    }
+    Ok(())
 }
 
 // --- The accepted batch ------------------------------------------------------------------
@@ -270,7 +644,12 @@ pub fn parse_csv_records(
     let mut projection = used.to_vec();
     projection.sort_unstable();
     projection.dedup();
+    // Polars splits its input among its threads and gives every part buffers of a fixed
+    // size, megabytes for a batch of a few kilobytes. A small batch is parsed on one
+    // thread, where the memory follows the size of the batch.
+    let threads = (raw.len() < PARALLEL_PARSE_BYTES).then_some(1);
     CsvReadOptions::default()
+        .with_n_threads(threads)
         .with_has_header(false)
         .with_schema(Some(Arc::new(schema)))
         .with_projection(Some(Arc::new(projection)))
@@ -339,31 +718,47 @@ fn frame_error(doing: &str, error: &PolarsError) -> L2dError {
 // --- The CSV validation pass -------------------------------------------------------------
 
 /// A CSV source with a header row, opened for the validation pass.
-pub struct CsvSource<'a> {
-    content: &'a [u8],
-    reader: csv::Reader<&'a [u8]>,
+pub struct CsvSource {
+    reader: csv::Reader<Source>,
     headers: csv::ByteRecord,
+    limit: RecordLimit,
 }
 
-impl<'a> CsvSource<'a> {
-    /// Reads the header row of `content`, which must not start with a byte-order mark.
-    pub fn open(content: &'a [u8]) -> Result<Self, L2dError> {
+impl CsvSource {
+    /// Reads the header row of `source`. A record larger than `limit` allows is
+    /// refused instead of read.
+    pub fn open(mut source: Source, limit: RecordLimit) -> Result<Self, L2dError> {
+        // The raw bytes of a record are taken from what the CSV reader has read: at
+        // most one record and one buffer of the reader ahead of it.
+        source.window = Some(Window {
+            bytes: Vec::new(),
+            base: 0,
+            keep_from: 0,
+            limit: limit.max_bytes.saturating_add(READ_BYTES as u64),
+        });
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
             // Rows of any length are read so that a wrong field count is reported as a
             // skipped record with its position instead of ending the read.
             .flexible(true)
-            .from_reader(content);
-        let headers = reader
-            .byte_headers()
-            .map_err(|error| L2dError::InvalidInput {
-                detail: format!("unreadable CSV header: {error}"),
-            })?
-            .clone();
+            .buffer_capacity(READ_BYTES)
+            .from_reader(source);
+        let headers = match reader.byte_headers() {
+            Ok(headers) => headers.clone(),
+            Err(error) => {
+                return Err(match reader.get_mut().failure.take() {
+                    Some(SourceFailure::Read(failure)) => failure,
+                    Some(SourceFailure::RecordTooLarge) => limit.refusal(0),
+                    None => L2dError::InvalidInput {
+                        detail: format!("unreadable CSV header: {error}"),
+                    },
+                });
+            }
+        };
         Ok(Self {
-            content,
             reader,
             headers,
+            limit,
         })
     }
 
@@ -372,34 +767,52 @@ impl<'a> CsvSource<'a> {
         &self.headers
     }
 
-    /// Walks all data rows in source order.
+    /// Walks all data rows in source order, in batches, and returns the source once it
+    /// is read to its end.
     ///
     /// A row whose field count differs from the header is skipped; `line_in_reason`
     /// adds the file line to that reason. Every other row is handed to `check`, which
     /// returns the [`row_digest`] of what it read in the row and the row's label, or
-    /// the reason the row cannot be read. Accepted rows are copied for Polars as they stand in the
-    /// source; a row that is not in the standard form (see [`standard_record_end`]) is
-    /// rewritten into it, so that Polars splits it into the same fields.
+    /// the reason the row cannot be read. Accepted rows are copied for Polars as they
+    /// stand in the source; a row that is not in the standard form (see
+    /// [`standard_record_end`]) is rewritten into it, so that Polars splits it into the
+    /// same fields.
+    ///
+    /// Whenever `batcher` finds a batch complete, and at the end of the source, the
+    /// accepted rows of the batch are handed to `process`, which parses them and pushes
+    /// them into the deduplication. `process` is also called for a batch without
+    /// accepted rows.
     pub fn validate(
         mut self,
         line_in_reason: bool,
         dedup: &mut Dedup,
+        batcher: &mut Batcher<'_>,
         mut check: impl FnMut(&csv::ByteRecord) -> Result<(u64, Label), String>,
-    ) -> Result<Accepted, L2dError> {
+        mut process: impl FnMut(&mut Dedup, Accepted) -> Result<(), L2dError>,
+    ) -> Result<Source, L2dError> {
         let mut accepted = Accepted::new();
         let mut row = csv::ByteRecord::new();
         let mut position = 0u64;
         loop {
-            let more =
-                self.reader
-                    .read_byte_record(&mut row)
-                    .map_err(|error| L2dError::Runtime {
-                        detail: format!("reading CSV data row {}: {error}", position + 1),
-                    })?;
+            let more = match self.reader.read_byte_record(&mut row) {
+                Ok(more) => more,
+                Err(error) => {
+                    return Err(match self.reader.get_mut().failure.take() {
+                        Some(SourceFailure::Read(failure)) => failure,
+                        Some(SourceFailure::RecordTooLarge) => self.limit.refusal(position + 1),
+                        None => L2dError::Runtime {
+                            detail: format!("reading CSV data row {}: {error}", position + 1),
+                        },
+                    });
+                }
+            };
             if !more {
-                return Ok(accepted);
+                batch_end(batcher, dedup, accepted, &mut process)?;
+                return Ok(self.reader.into_inner());
             }
             position += 1;
+            let start = row.position().map_or(0, csv::Position::byte);
+            let end = self.reader.position().byte();
             if row.len() != self.headers.len() {
                 let line = row
                     .position()
@@ -414,22 +827,35 @@ impl<'a> CsvSource<'a> {
                         row.len()
                     ),
                 );
-                continue;
-            }
-            match check(&row) {
-                Ok((digest, label)) => {
-                    accepted.record(position, digest, label);
-                    let start = row.position().map_or(0, |at| at.byte() as usize);
-                    let end = self.reader.position().byte() as usize;
-                    let raw = self.content.get(start..end).unwrap_or_default();
-                    match standard_record_end(raw, &row) {
-                        Some(end) => accepted.push_raw(&raw[..end]),
-                        None => push_standard_record(&mut accepted, &row),
+            } else {
+                match check(&row) {
+                    Ok((digest, label)) => {
+                        accepted.record(position, digest, label);
+                        let raw = self
+                            .reader
+                            .get_ref()
+                            .window
+                            .as_ref()
+                            .map_or(&[][..], |window| window.get(start, end));
+                        match standard_record_end(raw, &row) {
+                            Some(end) => accepted.push_raw(&raw[..end]),
+                            None => push_standard_record(&mut accepted, &row),
+                        }
+                        accepted.push_raw(b"\n");
                     }
-                    accepted.push_raw(b"\n");
+                    Err(reason) => dedup.skip(position, reason),
                 }
-                Err(reason) => dedup.skip(position, reason),
             }
+            if let Some(window) = &mut self.reader.get_mut().window {
+                window.done_before(end);
+            }
+            batch_step(
+                batcher,
+                end.saturating_sub(start),
+                dedup,
+                &mut accepted,
+                &mut process,
+            )?;
         }
     }
 }
@@ -514,12 +940,26 @@ const SEEN_BAD: &str = "seen_bad";
 /// `unknown` and is counted once in `InputSummary::label_conflicts`; an unlabelled
 /// occurrence never conflicts with a labelled one.
 ///
-/// The state between pushes is a frame with one row per distinct text in order of first
-/// occurrence, so batches pushed in source order give the same result as one batch.
+/// The state between pushes is kept as frames with one row per distinct text in order of
+/// first occurrence, so batches pushed in source order give the same result as one
+/// batch. Every batch is deduplicated in itself when it is pushed. It is merged with the
+/// earlier rows only when the rows waiting for a merge are as many as the rows already
+/// merged, and at the end; so the work of all merges together grows with the number of
+/// rows, not with the number of batches times the number of rows.
 #[derive(Default)]
 pub struct Dedup {
+    /// The merged rows: one row per distinct text of the batches merged so far.
     state: Option<DataFrame>,
+    /// The batches pushed since the last merge, each deduplicated in itself, in source
+    /// order.
+    waiting: Option<DataFrame>,
     skipped: Vec<SkippedRecord>,
+    /// What the skipped records are counted as in [`Dedup::held_bytes`].
+    skipped_bytes: u64,
+    /// What the merged rows and the waiting rows are counted as in
+    /// [`Dedup::held_bytes`]; kept up to date by `push`, so that asking is cheap.
+    state_held: u64,
+    waiting_held: u64,
     records: u64,
     good: u64,
     bad: u64,
@@ -532,11 +972,11 @@ impl Dedup {
 
     /// Records that the record at `position` could not be read, and why.
     pub fn skip(&mut self, position: u64, reason: impl Into<String>) {
+        let mut reason: String = reason.into();
+        reason.shrink_to_fit();
         self.records += 1;
-        self.skipped.push(SkippedRecord {
-            position,
-            reason: reason.into(),
-        });
+        self.skipped_bytes += SKIPPED_RECORD_BYTES + reason.capacity() as u64;
+        self.skipped.push(SkippedRecord { position, reason });
     }
 
     /// Adds the accepted records of one batch.
@@ -555,15 +995,27 @@ impl Dedup {
         group: Column,
     ) -> Result<(), L2dError> {
         let (records, good, bad) = (accepted.len() as u64, accepted.good, accepted.bad);
-        let batch = combine(accepted.rows(text, label, group)?)?;
-        self.state = Some(match self.state.take() {
-            None => batch,
-            Some(state) => combine(
-                state
-                    .vstack(&batch)
-                    .map_err(|error| frame_error("appending a batch", &error))?,
-            )?,
-        });
+        let batch = own_strings(combine(accepted.rows(text, label, group)?)?)?;
+        let batch_held = held_for(&batch);
+        let waiting = append(self.waiting.take(), batch)?;
+        match self.state.take() {
+            // The first batch; rows wait only behind merged rows.
+            None => {
+                self.state = Some(waiting);
+                self.state_held = batch_held;
+            }
+            Some(state) if waiting.height() >= state.height() => {
+                let merged = combine(append(Some(state), waiting)?)?;
+                self.state_held = held_for(&merged);
+                self.waiting_held = 0;
+                self.state = Some(merged);
+            }
+            Some(state) => {
+                self.state = Some(state);
+                self.waiting = Some(waiting);
+                self.waiting_held += batch_held;
+            }
+        }
         self.records += records;
         self.good += good;
         self.bad += bad;
@@ -576,6 +1028,18 @@ impl Dedup {
         (self.good, self.bad)
     }
 
+    /// An estimate of the memory a read needs between batches for what it has collected
+    /// so far, in bytes ([`MemoryBudget::hold`]).
+    ///
+    /// For the rows it is the peak of merging all of them, which happens at the latest
+    /// when the read ends: the rows before the merge, the grouping, and the merged rows
+    /// (`HELD_ROW_BYTES` per row and `HELD_FACTOR` times the size Polars estimates for
+    /// the frames). The skipped records are counted with their reasons and the room
+    /// their list takes while it grows.
+    pub fn held_bytes(&self) -> u64 {
+        self.state_held + self.waiting_held + self.skipped_bytes
+    }
+
     /// The logs frame in order of first occurrence, and the summary of the source at
     /// `source_path` whose raw content is `source_bytes`.
     pub fn finish(
@@ -583,8 +1047,22 @@ impl Dedup {
         source_path: &Path,
         source_bytes: &[u8],
     ) -> Result<(LogsFrame, InputSummary), L2dError> {
+        self.finish_hashed(source_path, content_sha256(source_bytes))
+    }
+
+    /// Like [`Dedup::finish`] for a source that was not kept in memory:
+    /// `content_sha256` is the hash of its raw content ([`Source::finish`]).
+    pub fn finish_hashed(
+        self,
+        source_path: &Path,
+        content_sha256: String,
+    ) -> Result<(LogsFrame, InputSummary), L2dError> {
         let failed = |error: PolarsError| frame_error("building the logs frame", &error);
-        let (logs, label_conflicts) = match self.state {
+        let state = match (self.state, self.waiting) {
+            (state, Some(waiting)) => Some(combine(append(state, waiting)?)?),
+            (state, None) => state,
+        };
+        let (logs, label_conflicts) = match state {
             None => (LogsFrame::empty(), 0),
             Some(state) => {
                 let conflicts = col(SEEN_GOOD).and(col(SEEN_BAD));
@@ -620,16 +1098,53 @@ impl Dedup {
         // An adapter may report a skipped record after later ones; the report is in
         // source order.
         let mut skipped = self.skipped;
-        skipped.sort_by_key(|record| record.position);
+        if !skipped.is_sorted_by_key(|record| record.position) {
+            skipped.sort_by_key(|record| record.position);
+        }
         let summary = InputSummary {
             source_path: source_path.to_path_buf(),
             records: self.records,
             distinct_texts: logs.len() as u64,
-            content_sha256: content_sha256(source_bytes),
+            content_sha256,
             skipped,
             label_conflicts,
         };
         Ok((logs, summary))
+    }
+}
+
+/// What keeping and merging the rows of `frame` is counted as: see
+/// [`Dedup::held_bytes`].
+fn held_for(frame: &DataFrame) -> u64 {
+    frame.height() as u64 * HELD_ROW_BYTES + (frame.estimated_size() as f64 * HELD_FACTOR) as u64
+}
+
+/// `frame` with text and group columns that own their bytes.
+///
+/// The columns of a parsed batch point into the buffers of the parse, which are larger
+/// than the strings they hold and stay allocated as long as one string is in use.
+/// Copying the strings of the deduplicated batch lets go of those buffers.
+fn own_strings(mut frame: DataFrame) -> Result<DataFrame, L2dError> {
+    let failed = |error: PolarsError| frame_error("copying the strings of a batch", &error);
+    for name in [LogsFrame::TEXT, LogsFrame::GROUP] {
+        let strings = frame.column(name).and_then(Column::str).map_err(failed)?;
+        let mut owned = StringChunkedBuilder::new(name.into(), strings.len());
+        for value in strings.iter() {
+            owned.append_option(value);
+        }
+        let owned = owned.finish().into_column();
+        frame.with_column(owned).map_err(failed)?;
+    }
+    Ok(frame)
+}
+
+/// `batch` appended to `rows`, without copying either.
+fn append(rows: Option<DataFrame>, batch: DataFrame) -> Result<DataFrame, L2dError> {
+    match rows {
+        None => Ok(batch),
+        Some(rows) => rows
+            .vstack(&batch)
+            .map_err(|error| frame_error("appending a batch", &error)),
     }
 }
 

@@ -75,6 +75,9 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Only the call that reports the free physical memory (requirement 12.1). The crate is
+# already in the dependency tree through Polars; no other feature is enabled here.
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 
 # Numerical solver of the baseline logistic regression (requirement 2.7). `argmin` is the
 # optimizer `linfa-logistic` itself is built on; it is used directly because

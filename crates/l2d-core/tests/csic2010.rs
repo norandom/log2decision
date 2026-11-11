@@ -373,6 +373,47 @@ fn one_text_with_both_labels_is_a_conflict_and_counts_keep_both() {
 }
 
 #[test]
+fn excerpt_reads_the_same_for_any_batch_size_and_read_size() {
+    use l2d_core::{MemoryBudget, MemorySettings, Source};
+
+    // The excerpt with a byte-order mark and CRLF line ends, so that reads end inside
+    // the mark, between carriage return and line feed, and inside quoted fields.
+    let content = format!("\u{feff}{}", excerpt().replace('\n', "\r\n"));
+    let scratch = Scratch::new("batches");
+    let path = scratch.file(CSIC2010_FILE_NAME, &content);
+    let adapter = Csic2010Adapter::new();
+    let (logs, summary, counts) = adapter.read_counted(&path).unwrap();
+    assert_eq!(summary.records, 10);
+    assert_eq!(
+        (logs, summary.clone()),
+        adapter.read(&path).unwrap(),
+        "read and read_counted agree"
+    );
+    let (logs, _) = adapter.read(&path).unwrap();
+
+    for rows in [1, 2, 3, 4, 9, 10, 1_024] {
+        let settings = MemorySettings {
+            max_batch_rows: Some(rows),
+            ..MemorySettings::default()
+        };
+        let budget = || MemoryBudget::observe_with(&settings, || Ok(8 << 30)).unwrap();
+        let (logs_again, summary_again, counts_again, plan) =
+            adapter.read_counted_with(&path, &mut budget()).unwrap();
+        assert_eq!(logs_again, logs, "batches of {rows} rows");
+        assert_eq!(summary_again, summary, "batches of {rows} rows");
+        assert_eq!(counts_again, counts, "batches of {rows} rows");
+        assert_eq!(plan.batch_rows, rows);
+
+        for read_size in [1, 2, 3, 5, 64] {
+            let source = Source::open(&path).unwrap().with_read_size(read_size);
+            let (logs_again, summary_again, _) = adapter.read_from(source, &mut budget()).unwrap();
+            assert_eq!(logs_again, logs, "{rows} rows, reads of {read_size} bytes");
+            assert_eq!(summary_again, summary, "{rows} rows, reads of {read_size}");
+        }
+    }
+}
+
+#[test]
 fn unreadable_rows_are_skipped_with_position_and_reason() {
     let content = format!(
         "{HEADER}\n{}\n{}\nNormal,,{AGENT},JSESSIONID=S3,,close,,,0,http://localhost:8080/a HTTP/1.1\n{}\n",

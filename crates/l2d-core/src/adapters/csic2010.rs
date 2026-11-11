@@ -43,8 +43,8 @@
 //!
 //! # Reading
 //!
-//! A validation pass over the raw rows finds the unreadable ones; Polars parses the
-//! accepted rows. One function (`text_and_label`) both judges a raw row in the
+//! The file is read in batches sized to the free memory. In every batch a validation
+//! pass over the raw rows finds the unreadable ones and Polars parses the accepted rows. One function (`text_and_label`) both judges a raw row in the
 //! validation pass and builds the text and label from the fields Polars parsed.
 //!
 //! # Untrusted data
@@ -58,9 +58,10 @@ use polars::prelude::Column;
 
 use crate::error::L2dError;
 use crate::input::{
-    CsvSource, Dedup, InputAdapter, csv_field_name, parse_csv_records, read_source, row_digest,
-    string_column, strip_bom,
+    Accepted, CsvSource, Dedup, InputAdapter, PARSE_COST, Source, csv_field_name,
+    parse_csv_records, row_digest, string_column,
 };
+use crate::memory::{BatchPlan, Batcher, MemoryBudget, MemorySettings};
 use crate::paths::ProjectPaths;
 use crate::types::{InputSummary, Label, LogsFrame};
 
@@ -186,24 +187,40 @@ impl Csic2010Adapter {
         &self,
         path: &Path,
     ) -> Result<(LogsFrame, InputSummary, Csic2010Counts), L2dError> {
-        let bytes = read_source(path)?;
-        let mut dedup = Dedup::new();
-        read_rows(strip_bom(&bytes), &mut dedup)?;
-        let (good, bad) = dedup.label_counts();
-        let (logs, summary) = dedup.finish(path, &bytes)?;
-        Ok((logs, summary, Csic2010Counts { good, bad }))
+        let mut budget = MemoryBudget::observe(&MemorySettings::default())?;
+        self.read_counted_with(path, &mut budget)
+            .map(|(logs, summary, counts, _)| (logs, summary, counts))
+    }
+
+    /// Reads the dataset like [`InputAdapter::read_with`] and also returns the label
+    /// counts before deduplication.
+    pub fn read_counted_with(
+        &self,
+        path: &Path,
+        budget: &mut MemoryBudget,
+    ) -> Result<(LogsFrame, InputSummary, Csic2010Counts, BatchPlan), L2dError> {
+        read_batches(Source::open(path)?, budget)
     }
 }
 
 impl InputAdapter for Csic2010Adapter {
-    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError> {
-        self.read_counted(path)
-            .map(|(logs, summary, _)| (logs, summary))
+    fn read_from(
+        &self,
+        source: Source,
+        budget: &mut MemoryBudget,
+    ) -> Result<(LogsFrame, InputSummary, BatchPlan), L2dError> {
+        read_batches(source, budget).map(|(logs, summary, _, plan)| (logs, summary, plan))
     }
 }
 
-fn read_rows(content: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
-    let source = CsvSource::open(content)?;
+fn read_batches(
+    source: Source,
+    budget: &mut MemoryBudget,
+) -> Result<(LogsFrame, InputSummary, Csic2010Counts, BatchPlan), L2dError> {
+    let path = source.path().to_path_buf();
+    let mut dedup = Dedup::new();
+    let mut batcher = Batcher::new(budget, source.size(), PARSE_COST);
+    let source = CsvSource::open(source, batcher.record_limit())?;
     let headers = source.headers().clone();
     let column = |name: &str| {
         headers
@@ -224,35 +241,60 @@ fn read_rows(content: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
     // The unnamed first column, `Normal` / `Anomalous`.
     let status_at = headers.get(0).filter(|name| name.is_empty()).map(|_| 0);
 
-    // Validation pass: every raw row is judged by `text_and_label`.
-    let accepted = source.validate(false, dedup, |row| {
-        let (text, label) = text_and_label(|field| {
-            let (at, name) = match field {
-                Field::Method => (method_at, "method"),
-                Field::Url => (url_at, "URL"),
-                Field::Class => (class_at, "classification"),
-                Field::Body => (body_at, "body"),
-                Field::Status => match status_at {
-                    Some(at) => (at, "first column"),
-                    None => return Ok(None),
-                },
-            };
-            std::str::from_utf8(&row[at])
-                .map(Some)
-                .map_err(|_| format!("{name} is not valid UTF-8"))
-        })?;
-        Ok((row_digest(&text, label, Some(&group_key(&text))), label))
-    })?;
+    let source = source.validate(
+        false,
+        &mut dedup,
+        &mut batcher,
+        // Validation pass: every raw row is judged by `text_and_label`.
+        |row| {
+            let (text, label) = text_and_label(|field| {
+                let (at, name) = match field {
+                    Field::Method => (method_at, "method"),
+                    Field::Url => (url_at, "URL"),
+                    Field::Class => (class_at, "classification"),
+                    Field::Body => (body_at, "body"),
+                    Field::Status => match status_at {
+                        Some(at) => (at, "first column"),
+                        None => return Ok(None),
+                    },
+                };
+                std::str::from_utf8(&row[at])
+                    .map(Some)
+                    .map_err(|_| format!("{name} is not valid UTF-8"))
+            })?;
+            Ok((row_digest(&text, label, Some(&group_key(&text))), label))
+        },
+        |dedup, accepted| {
+            push_rows(
+                dedup,
+                accepted,
+                headers.len(),
+                [method_at, url_at, body_at, class_at],
+            )
+        },
+    )?;
+
+    let plan = batcher.into_plan()?;
+    let (good, bad) = dedup.label_counts();
+    let (logs, summary) = dedup.finish_hashed(&path, source.finish()?)?;
+    Ok((logs, summary, Csic2010Counts { good, bad }, plan))
+}
+
+/// Has Polars parse the accepted rows of one batch and pushes them into the
+/// deduplication. `text_and_label` builds text and label from the fields Polars
+/// parsed; the first column was checked by the validation pass and is not read again.
+fn push_rows(
+    dedup: &mut Dedup,
+    accepted: Accepted,
+    fields: usize,
+    [method_at, url_at, body_at, class_at]: [usize; 4],
+) -> Result<(), L2dError> {
     if accepted.is_empty() {
         return Ok(());
     }
-
-    // Polars parses the accepted rows; the same function builds text and label from
-    // its fields. The first column was checked by the validation pass and is not read
-    // again.
     let parsed = parse_csv_records(
         accepted.raw(),
-        headers.len(),
+        fields,
         &[method_at, url_at, body_at, class_at],
         b',',
         Some(b'"'),
