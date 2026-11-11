@@ -59,14 +59,28 @@
   - Add `polars` to `l2d-core` with default features off and only the CSV, JSON, lazy and `ndarray`-conversion features; confirm with the dependency tree that no cloud or HTTP client is linked, and record the added packages and the clean build time
   - Rework the line, labelled CSV/JSONL and CSIC 2010 adapters so that parsing uses Polars and each returns the logs frame of the design's "Data frames" section plus the `InputSummary`; keep `LogRecord` as the row view
   - Keep skipped-record reporting with position and reason through a validation pass before Polars reads the accepted rows; deduplication, occurrence counts, first positions and label conflicts become frame operations in first-occurrence order
-  - Done when every existing input test passes unchanged in its expectations: fixture 200 records, 1 skipped at position 121, 169 distinct, 1 conflict; CSIC 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts, 1,648 group keys, the same content hashes; and the frames have the documented schema and row order
+  - Change the CSIC group key to the URL path alone (no method), so GET and POST copies of a payload share a group; `group_key` and the routing split are updated to match
+  - Done when every existing input test passes unchanged in its expectations except the CSIC group key: fixture 200 records, 1 skipped at position 121, 169 distinct, 1 conflict; CSIC 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts, 1,632 path groups of which 8 hold both labels, the same content hashes; and the frames have the documented schema and row order
   - _Boundary: Input adapters and dedup_
   - _Depends: 1.3, 1.4_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.6, 9.7, 10.2, 10.4_
 
+- [ ] 1.15 Size batches to the free memory before loading a dataset (runs after 1.14, before 1.7)
+  - Read the host's free physical memory once before loading and derive a memory limit: the analyst's limit if given, otherwise a share of the free memory (default one half)
+  - Estimate bytes per row from the file size and a sample of the first rows, and choose the batch size from the limit; the analyst's batch size overrides it
+  - Read datasets through Polars' batched readers in file order, with deduplication state kept across batches, so that the logs frame and the input summary are identical for any batch size
+  - Scale dynamically: start from the maximum batch size, read the free memory again before every batch, halve the next batch when free memory is below the reserve and double it (up to the maximum) when memory has recovered; record each change with the free memory that caused it, and report the smallest and largest batch used
+  - Make the free-memory reading injectable so tests can simulate memory falling and recovering during a run
+  - Refuse when the smallest allowed batch does not fit; provide the whole-dataset check for operations that need all rows at once, refusing before loading with the estimate and the limit
+  - Print the plan (free memory observed, limit, bytes per row, batch size, whether overridden) and make it available for run records; add the global `--batch-rows` and `--memory-limit` options to the command-line skeleton
+  - Done when reading the fixture and CSIC 2010 with batch sizes of 1,024 rows, 10,000 rows and the whole file gives identical frames and summaries, an artificially low memory limit triggers both refusals with the stated figures, a simulated drop and recovery of free memory shrinks and regrows the batch with the changes recorded and the results unchanged, and the plan shows the free memory read from the host
+  - _Boundary: MemoryBudget, Input adapters and dedup_
+  - _Depends: 1.14_
+  - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8, 12.9_
+
 - [ ] 1.13 Conformal calibration layer over any scorer (runs after 1.7, before 1.10)
   - Add the `conformal-prediction` crate and wrap it in `l2d-decide` (`conformal.rs`) behind the design's contract; confirm it links no network client and gives identical results on repeat, and record in Implementation Notes which parts of the method the crate covers and which the wrapper adds
-  - Label-conditional split conformal calibration on scorer ratios: p-value per label, label set (good, bad, both, neither) at a chosen error rate, no randomization
+  - Label-conditional split conformal calibration on scorer ratios: p-value per label, label set (good, bad, both, neither) at a chosen error rate (default 0.05), no randomization
   - Per-group strata where a group holds at least `min_per_group` calibration logs of a label, pooled otherwise; each decision names its stratum
   - Refuse an error rate that the calibration counts do not support, stating the counts and the smallest supported rate
   - Save and load under `models/calibrations/<name>-<rev12>/` with scorer kind and revision
@@ -112,11 +126,12 @@
   - _Requirements: 1.1, 1.2, 1.6, 2.1, 2.2, 6.4, 6.5, 10.6, 10.7, 11.1, 11.6, 11.7, 11.9_
 
 - [ ] 1.12 Baseline validation: Grouped cross-validation on CSIC 2010
-  - Run 5-fold grouped cross-validation (grouped by endpoint/URL path) using the baseline scorer on CSIC 2010
+  - Run 5-fold grouped cross-validation (grouped by URL path alone) using the baseline scorer on CSIC 2010
+  - Compute the cross-endpoint ROC AUC on the 8 path groups that hold both labels; report the logs of single-label groups (about 1,600 bad-only paths) separately with their count and the share ranked within the review budget
   - Verify that the baseline achieves cross-endpoint ROC AUC >= 0.90 without memorizing static URLs
   - In each fold, calibrate on a part of the fitting side the scorer did not see, and report the achieved error rate against the chosen rate per label, overall and per group, and the share of each label set
   - Done when baseline cross-endpoint benchmark is completed and results, including the calibration coverage, are recorded in `reports/`
-  - _Requirements: 2.1, 9.1, 9.2, 9.7, 11.8_
+  - _Requirements: 2.1, 9.1, 9.2, 9.7, 9.8, 11.8_
 
 ---
 
@@ -247,7 +262,7 @@
   - Done when small synthetic test ensures no group key crosses fold boundaries and hand-calculated metrics match output
   - _Boundary: GroupedSplit, Metrics, Cost_
   - _Depends: 1.10, 2.8_
-  - _Requirements: 9.1, 9.2, 9.3, 9.4, 11.8_
+  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.8, 11.8_
 
 - [ ] 3.8 Write evaluation reports and comparison
   - Generate evaluation reports in JSON and Markdown under `reports/<date>-<dataset>-<encoder>.json` and `.md`
@@ -298,6 +313,7 @@
 ## Implementation Notes
 
 - Data layer (decision of 2026-11-11): Polars is the one tabular data layer. From task 1.14 on, tabular data crosses crate boundaries as Polars frames with the schemas in the design's "Data frames" section; tasks written before that decision that speak of records or lists (1.7, 1.9, 1.10, 1.12, 2.7, 3.7) take and return those frames. Numeric code gets slices, arrays or sparse rows from the frames in row order and stays out of Polars' thread pool.
+- Memory-aware batching (decision of 2026-11-11): requirement 12, task 1.15. Every operation that loads a dataset plans its batch size from the free memory first; operations that need all rows at once (baseline fit, calibration, shift test, pairwise assessments) call the whole-dataset check before loading. Later tasks (1.7, 1.12, 2.6, 2.7, 3.x) use it; encoding batches for the NPU stay at the model's fixed 32 and are fed from these data batches.
 - Conformal layer (decision of 2026-11-11): the `conformal-prediction` crate is adopted and wrapped in `l2d-decide` (task 1.13, requirement 11).
 
 - 1.1: Build output relies on the host's `CARGO_TARGET_DIR`; `l2d-core/build.rs` only warns if output lands in the repo. Run `cargo fmt --all` before each commit.
@@ -318,7 +334,7 @@
 - 1.4: CSIC text is `METHOD URL` plus a line feed and the body when the body is non-empty; the URL keeps `http://localhost:8080` and drops ` HTTP/1.1`. Group key is `METHOD /path`; paths are not normalized or case-folded. `l2d_core::adapters::csic2010::{split_routing, group_key}` split a text at the first `?` or line feed into routing and payload; valid for this layout only (the mini fixture puts a space before the body). `Csic2010Adapter::read_counted` gives label counts before deduplication.
 - 1.4: CSIC totals on the real file: 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts (9,644 good, 15,964 bad), 1,648 group keys, no skipped rows, read in about 2 s (debug).
 - 1.4: Group distribution (distinct texts): 16 groups hold both labels (9,624 good, 14,082 bad) and are 8 endpoints under GET and POST; 20 good-only groups with one text each; 1,612 bad-only groups (1,882 texts), 1,605 of them singletons. So nearly all good texts sit in 16 groups, and about 1,600 bad paths never occur as good.
-- 1.4: OPEN DECISION for 1.12: 11,853 of 12,094 distinct (path, payload) pairs occur under more than one method (same parameters as GET query and as POST body). Folds grouped by `METHOD /path` leak payloads between fitting and testing; grouping by path alone gives 1,632 groups, 8 of them mixed. The group definition for cross-endpoint evaluation must be decided before 1.12.
+- 1.4: DECIDED 2026-11-11: the CSIC group key becomes the URL path alone (task 1.14 changes the adapter); single-label groups are reported separately (requirement 9.8); default conformal error rate 0.05. Background: 11,853 of 12,094 distinct (path, payload) pairs occur under more than one method (same parameters as GET query and as POST body). Folds grouped by `METHOD /path` leak payloads between fitting and testing; grouping by path alone gives 1,632 groups, 8 of them mixed. The group definition for cross-endpoint evaluation must be decided before 1.12.
 - 1.5: `l2d_baseline::hashing`: `CharHasher::row(&str) -> SparseRow` (strictly ascending `u32` indices, `f64` values, unit L2 norm, empty text gives an empty row). FNV-1a 64-bit per n-gram; bucket = low 32 bits modulo `buckets`; sign = parity of the high 32 bits. `HashingSettings { buckets, ngram_max, routing }` with `RoutingMode::{Keep, Strip, Isolate}`.
 - 1.5: Row dimension is `CharHasher::dimension()`: `buckets` for keep and strip, `2 * buckets` (131,072 by default) for isolate, where payload features are in `0..buckets` and routing features in `buckets..2*buckets` (`routing_offset()`). Size weight vectors from `dimension()`, not from `buckets`. Isolate normalizes the whole row; masking the routing half needs renormalization.
 - 1.5: Strip and isolate are meaningful only for texts in the CSIC adapter layout. A text without `?` or line feed is routing only: strip gives an empty row. That includes every POST row of the mini fixture (space before the body) and any ordinary log line. Task 1.7 must define the ratio for an empty row and must store the routing mode in the saved settings and the revision; fixture tests use keep.

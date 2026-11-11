@@ -156,6 +156,7 @@ features on HTTP CSIC 2010.
 5. When the encoder-based scorer and the baseline scorer are both evaluated, the Log Triage Tool shall state which has the higher ROC AUC and by how much.
 6. When an evaluation completes, the Log Triage Tool shall write a report that names the dataset and its hash, the encoder identity, the settings, and the date.
 7. The Log Triage Tool shall support HTTP CSIC 2010 as the first evaluation dataset.
+8. When an evaluation is run, the Log Triage Tool shall compute the cross-endpoint ROC AUC only on groups that hold both good and bad logs, and shall report the logs of groups that hold a single label separately, with their count and the share of them ranked within the review budget.
 
 ### Requirement 10: Local operation and housekeeping
 **Objective:** As a log analyst, I want the tool to run on my laptop without extra runtimes or network access, so that log data stays local and the tool is simple to keep.
@@ -183,3 +184,17 @@ features on HTTP CSIC 2010.
 8. When an evaluation is run with a calibrated scorer, the Log Triage Tool shall report, for each label, the achieved error rate against the chosen error rate, overall and per group, and the share of logs in each label set.
 9. The Log Triage Tool shall state in its output that the error rate holds only for logs that resemble the calibration logs.
 10. The Log Triage Tool shall return the same label sets when calibration and triage are repeated on the same logs with the same settings.
+
+### Requirement 12: Batches sized to the available memory
+**Objective:** As a log analyst, I want the tool to size its batches to the memory that is free on my laptop, so that large datasets load without exhausting memory and small ones are not slowed down.
+
+#### Acceptance Criteria
+1. When a dataset is about to be loaded, the Log Triage Tool shall read the free physical memory of the host and choose a batch size whose estimated memory use stays within the configured share of that free memory.
+2. Where the analyst sets a batch size or a memory limit, the Log Triage Tool shall use the analyst's value in place of its own choice.
+3. When an operation processes a dataset in batches, the Log Triage Tool shall report the free memory it observed, the memory limit it applied, and the batch size it chose.
+4. If the smallest allowed batch does not fit within the memory limit, then the Log Triage Tool shall refuse the operation and state the memory it needs and the memory available.
+5. If an operation needs the whole dataset in memory at once and its estimated memory use exceeds the memory limit, then the Log Triage Tool shall refuse before loading and state the estimate and the limit.
+6. The Log Triage Tool shall produce the same results for a dataset regardless of the batch size used.
+7. While a dataset is processed in batches, the Log Triage Tool shall read the free physical memory again before each batch, shall reduce the batch size when the free memory has fallen below the configured reserve, and shall raise it again, up to the configured maximum batch size, when the free memory has recovered.
+8. When the batch size changes during an operation, the Log Triage Tool shall record the change with the free memory that caused it, and shall report the smallest and largest batch size used when the operation ends.
+9. The Log Triage Tool shall keep its own memory use within the memory limit for the whole operation, so that other programs on the host are not starved of memory.

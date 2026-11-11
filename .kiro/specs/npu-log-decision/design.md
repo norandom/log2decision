@@ -327,6 +327,16 @@ flowchart TD
 | 9.5 | Which scorer is better | Evaluator | `EvaluationReport.comparison` | |
 | 9.6 | Report content | Report | `EvaluationReport` | |
 | 9.7 | CSIC 2010 supported | Csic2010Adapter | `InputAdapter::read` | |
+| 12.1 | Batch size from free memory | MemoryBudget | `MemoryBudget::plan` | |
+| 12.2 | Analyst override | MemoryBudget, CLI | `--batch-rows`, `--memory-limit` | |
+| 12.3 | Report memory and batch size | MemoryBudget | `BatchPlan` in `RunRecord.settings` and output | |
+| 12.4 | Refuse when the smallest batch does not fit | MemoryBudget | `L2dError::Refused` | |
+| 12.5 | Refuse whole-dataset operations over the limit | MemoryBudget | `MemoryBudget::require_whole` | |
+| 12.6 | Results independent of batch size | Input adapters, scorers | global dedup state; order-preserving batches | |
+| 12.7 | Shrink and grow between batches | MemoryBudget | `MemoryBudget::next_batch_rows` | |
+| 12.8 | Record batch size changes | MemoryBudget | `BatchPlan.changes`, `min_rows_used`, `max_rows_used` | |
+| 12.9 | Stay within the limit for the whole run | MemoryBudget | reserve check before every batch | |
+| 9.8 | Single-label groups reported separately | Evaluator, Metrics | `EvaluationReport.single_label_groups` | |
 | 10.1 | No Python | whole workspace | native DLLs only | |
 | 10.2 | No network | whole workspace | dependency rule | |
 | 10.3 | Encoders under model directory | Paths, EncoderPackage | `ProjectPaths` | |
@@ -351,6 +361,7 @@ flowchart TD
 |-----------|-------|--------|--------------|------------------|-----------|
 | Input adapters and dedup | l2d-core | Read records, deduplicate, summarize | 1.1–1.4, 1.6, 9.7, 10.4 | `csv` (P1) | Service |
 | ProjectPaths, RunRecord, errors | l2d-core | Locations, run records, error envelope | 3.3, 4.3, 10.3–10.6 | `sha2`, `serde` (P2) | Service |
+| MemoryBudget | l2d-core | Batch size from free memory | 12.1–12.6 | `windows` (P1), `polars` batched readers (P0) | Service |
 | BaselineScorer | l2d-baseline | Character-level ratio | 2.1–2.5 | l2d-core (P0) | Service, State |
 | EncoderPackage, OnnxWriter, Quantizer | l2d-encoder | Encoder file format and identity | 3.1, 3.2, 3.6, 4.6 | `prost` (P1) | Service, State |
 | EncoderSession, RuntimeFiles, ByteCodec | l2d-encoder | Encode on NPU or CPU | 1.5, 4.1–4.7 | `ort` and AMD DLLs (P0) | Service |
@@ -379,7 +390,7 @@ flowchart TD
 - Read records in source order; never modify the source.
 - Deduplicate by exact text; keep occurrence count and first position.
 - When one text carries conflicting labels, keep the record as `Label::Unknown` and count it in `InputSummary.label_conflicts`.
-- The CSIC 2010 adapter builds the text as method, URL, and body on a second line; the group key is method plus URL path without query.
+- The CSIC 2010 adapter builds the text as method, URL, and body on a second line; the group key is the URL path alone, without method, host or query (decision of 2026-11-11). The method is left out because the dataset repeats the same payload as a GET query and as a POST body; grouping by path keeps both copies on one side of every split. Paths are not case-folded.
 
 **Contracts**: Service [x]
 
@@ -447,6 +458,56 @@ pub enum L2dError {
 ```
 - Exit codes: 0 success, 2 `InvalidInput`, 3 `Missing`, 4 `Refused`, 5 `Runtime`.
 - Encoder packages are written only below `models/encoders/`; `EncoderPackage` rejects other targets.
+
+#### MemoryBudget
+
+| Field | Detail |
+|-------|--------|
+| Intent | Size batches to the free memory before a dataset is loaded |
+| Requirements | 12.1, 12.2, 12.3, 12.4, 12.5, 12.6 |
+
+**Responsibilities & Constraints**
+- Lives in `l2d-core` (`memory.rs`). Reads free physical memory from the operating system (the `windows` crate on the reference host) once, before loading.
+- Memory limit: the analyst's `--memory-limit` if given, otherwise a share of the free memory (default 0.5).
+- Estimated bytes per row: from the file size and a sample of the first rows, times an expansion factor per operation (parsing, hashing, encoding) that each operation declares.
+- Batch size: starts at the maximum batch size (the analyst's `--batch-rows` if given, otherwise 65,536 rows), reduced to `limit / bytes per row` when that is smaller, and never below the minimum (1,024 rows).
+- Dynamic scaling: free memory is read again before every batch. When it is below the reserve (default: one quarter of the free memory observed at the start), the next batch is halved, down to the minimum. When it is above twice the reserve, the next batch is doubled, up to the maximum. If the minimum batch still does not fit, the operation stops with a refusal that states what was completed; it does not continue into an out-of-memory failure.
+- The analyst is not expected to tune this: the defaults aim to leave memory for other programs on a busy host.
+- Datasets are read in batches through Polars' batched readers. Deduplication keeps its state across batches, and batches are processed in file order, so frames and results do not depend on the batch size.
+- Operations that need all rows at once (fitting the baseline, calibration, the shift test, pairwise assessments) call `require_whole` with their estimate and are refused before loading when it exceeds the limit.
+- The plan (free memory observed, limit, bytes per row, batch size, whether the analyst overrode it) is printed and stored in the run record's settings.
+
+**Contracts**: Service [x]
+
+```rust
+pub struct MemorySettings {
+    pub memory_limit_bytes: Option<u64>,
+    pub max_batch_rows: Option<u64>,     // --batch-rows
+    pub free_share: f32,                 // default 0.5
+    pub reserve_share: f32,              // default 0.25
+}
+
+pub struct BatchChange { pub at_row: u64, pub from_rows: u64, pub to_rows: u64, pub free_bytes: u64 }
+
+pub struct BatchPlan {
+    pub free_bytes: u64,
+    pub limit_bytes: u64,
+    pub reserve_bytes: u64,
+    pub bytes_per_row: u64,
+    pub batch_rows: u64,                 // first batch
+    pub overridden: bool,
+    pub changes: Vec<BatchChange>,
+    pub min_rows_used: u64,
+    pub max_rows_used: u64,
+}
+
+impl MemoryBudget {
+    pub fn observe(settings: &MemorySettings) -> Result<Self, L2dError>;                       // reads free memory once
+    pub fn plan(&self, total_rows_estimate: u64, bytes_per_row: u64) -> Result<BatchPlan, L2dError>;   // Refused when the minimum batch does not fit
+    pub fn next_batch_rows(&mut self, plan: &mut BatchPlan, rows_done: u64) -> Result<u64, L2dError>; // re-reads free memory; halves or doubles; records the change
+    pub fn require_whole(&self, estimated_bytes: u64, operation: &str) -> Result<(), L2dError>;       // Refused with estimate and limit
+}
+```
 
 ### Baseline
 
@@ -717,6 +778,7 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 - Calibration input: ratios of labelled logs that were not used to fit the scorer. The caller holds out the calibration split. A saved scorer records the content hashes of its fitting inputs; calibration refuses an input whose content hash is among them. The evaluation harness calibrates on a part of each fold's fitting side that the scorer did not see.
 - Nonconformity of a log for a label: `ratio` for good, `1 - ratio` for bad. A higher value means the log fits the label worse.
 - P-value of a new log for a label: `(1 + number of calibration logs of that label with nonconformity >= the new log's) / (n_label + 1)`. Ties count as greater or equal; no randomization.
+- Default error rate: 0.05; the analyst can set another per run.
 - Label set at error rate `e`: every label whose p-value is greater than `e`. Sets: good, bad, both (uncertain), neither (unlike the calibration logs).
 - Strata: per label always; per group in addition when the group holds at least `min_per_group` calibration logs of that label (default 100), otherwise the pooled list of that label. Each decision names its stratum.
 - An error rate `e` is supported by a label's list only if `e >= 1 / (n_label + 1)`; otherwise `TooFewLogs` with the counts and the smallest supported rate.
