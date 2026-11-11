@@ -168,3 +168,18 @@ features on HTTP CSIC 2010.
 5. If a required encoder, dataset or store is missing, then the Log Triage Tool shall name the missing item and its expected location.
 6. When an operation fails, the Log Triage Tool shall exit with a non-zero status and a message that states what failed.
 7. The Log Triage Tool shall offer every operation from the command line with machine-readable output on request.
+
+### Requirement 11: Calibrated decisions with a stated error rate
+**Objective:** As a log analyst, I want each triage decision to carry a stated error rate, so that scoring a log down is a bounded risk and not only a ranking.
+
+#### Acceptance Criteria
+1. When labelled calibration logs are supplied for a fitted scorer, the Log Triage Tool shall calibrate that scorer using only logs that were not used to fit it.
+2. When a calibrated scorer triages a log at a chosen error rate, the Log Triage Tool shall return the set of labels it cannot rule out at that error rate: good, bad, both, or neither.
+3. The Log Triage Tool shall calibrate separately for each label, so that the chosen error rate applies to good logs and to bad logs individually.
+4. Where group keys exist and a group holds at least the configured minimum number of calibration logs of a label, the Log Triage Tool shall calibrate that group separately, and shall state for each decision whether the group's or the pooled calibration was used.
+5. If the calibration logs of a label are too few to support the chosen error rate, then the Log Triage Tool shall refuse that error rate and state the counts found and the smallest error rate they support.
+6. When a set of logs is triaged with a calibrated scorer, the Log Triage Tool shall mark as scored down by calibration only the logs whose label set is good alone, shall rank for review the logs whose label set is bad alone, and shall list the logs whose label set is both or neither separately with the reason: uncertain, or unlike the calibration logs.
+7. When a review budget marks further logs as scored down, the Log Triage Tool shall state for each scored-down log whether calibration or only the budget scored it down.
+8. When an evaluation is run with a calibrated scorer, the Log Triage Tool shall report, for each label, the achieved error rate against the chosen error rate, overall and per group, and the share of logs in each label set.
+9. The Log Triage Tool shall state in its output that the error rate holds only for logs that resemble the calibration logs.
+10. The Log Triage Tool shall return the same label sets when calibration and triage are repeated on the same logs with the same settings.

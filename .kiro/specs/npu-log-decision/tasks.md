@@ -51,8 +51,29 @@
   - Implement `BaselineScorer` in `l2d-baseline`: compute bad/good ratio (0.0 to 1.0)
   - Refusal rule: refuse fitting if fewer than 10 labelled logs or fewer than 5 of either label are provided
   - Save and load scorer with SHA-256 revision hash under `models/baselines/<name>-<rev12>/`
+  - Record the content hashes of the fitting inputs in the saved scorer, so calibration can refuse the same input (11.1)
   - Done when fitting succeeds on the fixture without any runtime DLLs, reloaded model reproduces exact ratios, and refusal cases are tested
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
+
+- [ ] 1.14 Move the data layer to Polars (runs after 1.6, before 1.7)
+  - Add `polars` to `l2d-core` with default features off and only the CSV, JSON, lazy and `ndarray`-conversion features; confirm with the dependency tree that no cloud or HTTP client is linked, and record the added packages and the clean build time
+  - Rework the line, labelled CSV/JSONL and CSIC 2010 adapters so that parsing uses Polars and each returns the logs frame of the design's "Data frames" section plus the `InputSummary`; keep `LogRecord` as the row view
+  - Keep skipped-record reporting with position and reason through a validation pass before Polars reads the accepted rows; deduplication, occurrence counts, first positions and label conflicts become frame operations in first-occurrence order
+  - Done when every existing input test passes unchanged in its expectations: fixture 200 records, 1 skipped at position 121, 169 distinct, 1 conflict; CSIC 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts, 1,648 group keys, the same content hashes; and the frames have the documented schema and row order
+  - _Boundary: Input adapters and dedup_
+  - _Depends: 1.3, 1.4_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.6, 9.7, 10.2, 10.4_
+
+- [ ] 1.13 Conformal calibration layer over any scorer (runs after 1.7, before 1.10)
+  - Add the `conformal-prediction` crate and wrap it in `l2d-decide` (`conformal.rs`) behind the design's contract; confirm it links no network client and gives identical results on repeat, and record in Implementation Notes which parts of the method the crate covers and which the wrapper adds
+  - Label-conditional split conformal calibration on scorer ratios: p-value per label, label set (good, bad, both, neither) at a chosen error rate, no randomization
+  - Per-group strata where a group holds at least `min_per_group` calibration logs of a label, pooled otherwise; each decision names its stratum
+  - Refuse an error rate that the calibration counts do not support, stating the counts and the smallest supported rate
+  - Save and load under `models/calibrations/<name>-<rev12>/` with scorer kind and revision
+  - Done when a synthetic test with known score distributions achieves the chosen error rate per label within sampling tolerance, repeated calibration gives identical label sets, the too-few-logs refusal is tested, and a calibration fitted on the fixture's held-out part loads back identically
+  - _Boundary: ConformalCalibrator_
+  - _Depends: 1.7_
+  - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.10_
 
 - [ ] 1.8 Create, open, and populate SQLite store with FTS5 and exact vector storage
   - Implement embedded SQLite storage in `l2d-store` using `rusqlite` (bundled, feature `fts5`): `stores/<name>.db`
@@ -77,22 +98,25 @@
   - Implement triage engine in `l2d-decide`: rank logs descending by ratio, separate abstained logs, name scorer
   - Review budget: return top $N$ logs as review items and mark remaining logs as scored down
   - Postcondition: every input record lands in exactly one list (review, scored_down, abstained), and stored rows are never modified
-  - Done when triage on the fixture partitions logs correctly according to budget and scorer attribution
+  - With a calibrated primary scorer, place logs by label set: bad alone to the review ranking, good alone scored down by calibration, both or neither to the abstained list with the reason (uncertain, unlike the calibration logs); logs beyond the budget are scored down by budget only, and each scored-down log says which applied
+  - Done when triage on the fixture partitions logs correctly according to budget and scorer attribution, with and without a calibration
   - _Boundary: Scorer, Triage_
-  - _Depends: 1.7, 1.9_
-  - _Requirements: 6.4, 6.5, 6.6, 6.7_
+  - _Depends: 1.7, 1.9, 1.13_
+  - _Requirements: 6.4, 6.5, 6.6, 6.7, 11.6, 11.7_
 
 - [ ] 1.11 Wire Baseline CLI commands
-  - Connect CLI commands in `l2d-cli`: `l2d ingest`, `l2d baseline fit`, `l2d baseline score`, `l2d triage`
+  - Connect CLI commands in `l2d-cli`: `l2d ingest`, `l2d baseline fit`, `l2d baseline score`, `l2d calibrate`, `l2d triage`
   - Support both human-readable text and `--json` machine-readable output
-  - Done when ingesting fixture displays summary, fitting then scoring displays ratios, and triage displays ranked review and scored-down lists
-  - _Requirements: 1.1, 1.2, 1.6, 2.1, 2.2, 6.4, 6.5, 10.6, 10.7_
+  - `l2d calibrate` refuses an input whose content hash is among the scorer's fitting inputs; `l2d triage` takes a calibration and an error rate, and its output states that the error rate holds only for logs that resemble the calibration logs
+  - Done when ingesting fixture displays summary, fitting then scoring displays ratios, calibrating on a held-out part of the fixture succeeds, and triage displays ranked review, scored-down and abstained lists with label sets
+  - _Requirements: 1.1, 1.2, 1.6, 2.1, 2.2, 6.4, 6.5, 10.6, 10.7, 11.1, 11.6, 11.7, 11.9_
 
 - [ ] 1.12 Baseline validation: Grouped cross-validation on CSIC 2010
   - Run 5-fold grouped cross-validation (grouped by endpoint/URL path) using the baseline scorer on CSIC 2010
   - Verify that the baseline achieves cross-endpoint ROC AUC >= 0.90 without memorizing static URLs
-  - Done when baseline cross-endpoint benchmark is completed and results are recorded in `reports/`
-  - _Requirements: 2.1, 9.1, 9.2, 9.7_
+  - In each fold, calibrate on a part of the fitting side the scorer did not see, and report the achieved error rate against the chosen rate per label, overall and per group, and the share of each label set
+  - Done when baseline cross-endpoint benchmark is completed and results, including the calibration coverage, are recorded in `reports/`
+  - _Requirements: 2.1, 9.1, 9.2, 9.7, 11.8_
 
 ---
 
@@ -219,10 +243,11 @@
   - Implement grouped K-fold cross-validation in `l2d-eval`: all logs of a group key stay on one side of each fold
   - Compute ROC AUC (overall and cross-endpoint), average precision, recall at budget, abstention rate, and cost (logs/s, CPU seconds)
   - Explicitly report cross-endpoint ROC AUC to verify that threat scoring is agnostic to training-set endpoints
+  - For calibrated scorers, hold out a calibration part of each fold's fitting side and report achieved against chosen error rate per label, overall and per group, and the share of each label set
   - Done when small synthetic test ensures no group key crosses fold boundaries and hand-calculated metrics match output
   - _Boundary: GroupedSplit, Metrics, Cost_
   - _Depends: 1.10, 2.8_
-  - _Requirements: 9.1, 9.2, 9.3, 9.4_
+  - _Requirements: 9.1, 9.2, 9.3, 9.4, 11.8_
 
 - [ ] 3.8 Write evaluation reports and comparison
   - Generate evaluation reports in JSON and Markdown under `reports/<date>-<dataset>-<encoder>.json` and `.md`
@@ -271,6 +296,9 @@
   - _Requirements: 3.1, 3.3, 3.4_
 
 ## Implementation Notes
+
+- Data layer (decision of 2026-11-11): Polars is the one tabular data layer. From task 1.14 on, tabular data crosses crate boundaries as Polars frames with the schemas in the design's "Data frames" section; tasks written before that decision that speak of records or lists (1.7, 1.9, 1.10, 1.12, 2.7, 3.7) take and return those frames. Numeric code gets slices, arrays or sparse rows from the frames in row order and stays out of Polars' thread pool.
+- Conformal layer (decision of 2026-11-11): the `conformal-prediction` crate is adopted and wrapped in `l2d-decide` (task 1.13, requirement 11).
 
 - 1.1: Build output relies on the host's `CARGO_TARGET_DIR`; `l2d-core/build.rs` only warns if output lands in the repo. Run `cargo fmt --all` before each commit.
 - 1.1: `Placement` and `PlacementSource` live in `l2d-core` (the core `RunRecord` needs them); `l2d-encoder` re-exports them and must not redefine them.

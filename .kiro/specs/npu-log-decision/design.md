@@ -49,6 +49,9 @@ Two measured results shape the design. A general text-embedding model on the NPU
 ### Allowed Dependencies
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
 - Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (features `bundled`, `fts5`), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
+- `polars` for data frames (default features off; only the readers and conversions needed: CSV, JSON, lazy queries, `ndarray` conversion). Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
+- `conformal-prediction` for the conformal calibration layer.
+- `argmin` and `ndarray`, the optimizer and array types underneath `linfa-logistic`, used directly where `linfa-logistic` cannot take sparse input.
 - `burn` 0.22.1 (confined to optional training module `l2d-train`).
 - No crate that opens network connections may be added.
 - No Python interpreter at runtime; development scripts in `uv` are permitted for offline model architecture exploration and static quantization.
@@ -110,6 +113,7 @@ graph LR
 - Selected pattern: layered Cargo workspace of library crates plus one binary. Modules have zero async runtime; `l2d-store` runs synchronously on SQLite, and `l2d-encoder` dynamically loads ONNX Runtime.
 - Dependency direction: `l2d-core` → `l2d-baseline`, `l2d-encoder`, `l2d-store` → `l2d-train`, `l2d-decide` → `l2d-assess` → `l2d-eval` → `l2d-cli`. A crate imports only from crates earlier in this order. `l2d-encoder`, `l2d-baseline` and `l2d-store` do not import each other.
 - Domain boundaries: `l2d-encoder` owns package verification and execution; `l2d-train` trains weights and outputs package files. `l2d-store` owns the local SQLite database and exact in-memory SIMD vector search via `faer`.
+- Data layer: Polars is the one tabular data layer. Log data is parsed with Polars, and tabular data crosses crate boundaries as Polars frames with the fixed schemas in "Data frames": logs, scores, calibration points, evaluation predictions. Typed structs remain for single values and identities (`InputSummary`, `EncoderIdentity`, `RunRecord`, errors). Frames are converted to `ndarray`, sparse rows or vector slices only at the numeric boundary (hashing, fitting, encoding, distance search). The store persists frames to SQLite and returns frames.
 - Agnostic threat scoring: `l2d-baseline` separates routing context (path/method) from payload anomaly tokens; `l2d-decide` reports neighbor endpoint diversity and avoids false suppression; `l2d-eval` enforces strict grouped cross-validation to report cross-endpoint ROC AUC.
 - Technology Stack:
 
@@ -118,6 +122,8 @@ graph LR
 | CLI | Rust 1.98, `clap` 4, `serde_json` | Subcommands, JSON output, exit codes | Binary name `l2d` |
 | Encoder execution | `ort` 2.0.0-rc.15, features `load-dynamic`, `vitis`, `std`, `ndarray`, one `api-NN` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | `api-NN` fixed from DLL version |
 | NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
+| Data layer | `polars` (default features off; CSV, JSON, lazy, `ndarray` conversion) | Parsing of log data; frames between crates; grouping and joins in calibration, evaluation and reports | No cloud or HTTP features; lives in `l2d-core` |
+| Calibration | `conformal-prediction` | Conformal label sets at a stated error rate | Wrapped in `l2d-decide` |
 | Storage | `rusqlite` 0.32 (`bundled`, `fts5`) + `faer` 0.24 | Logs, labels, FTS5 full-text, exact SIMD vector search | Single-file database (`stores/<name>.db`), zero async |
 | Baseline Scorer | Character n-grams + L2 Logistic Regression via `faer` / `linfa` | Deterministic baseline ratio | Independent of NPU and ONNX runtime |
 | Analysis | `linfa` 0.8, `faer` 0.24, `bhtsne` 0.5 | Vector-set assessment, MMD shift test, TwoNN | Pure-Rust numeric calculations |
@@ -168,6 +174,7 @@ crates/
 │   ├── scorer.rs                  # Scorer trait, NeighbourScorer, baseline adapter
 │   ├── evidence.rs                # Evidence tracking with endpoint diversity and anti-false-suppression
 │   ├── triage.rs                  # Ranking, abstained list, review budget
+│   ├── conformal.rs               # Label-conditional split conformal calibration over any scorer
 │   └── shift.rs                   # RBF MMD permutation test
 ├── l2d-assess/src/
 │   ├── lib.rs
@@ -192,7 +199,7 @@ tests/fixtures/mini-labelled.csv   # 200 synthetic labelled request lines
 runtime/README.md                  # Which DLLs belong in runtime/ryzenai/ and where they come from
 ```
 
-Runtime directories, all untracked: `models/encoders/<name>-<rev12>/`, `models/baselines/<name>-<rev12>/`, `stores/<name>/`, `runtime/ryzenai/`, `runtime/cache/`, `reports/`.
+Runtime directories, all untracked: `models/encoders/<name>-<rev12>/`, `models/baselines/<name>-<rev12>/`, `models/calibrations/<name>-<rev12>/`, `stores/<name>/`, `runtime/ryzenai/`, `runtime/cache/`, `reports/`.
 
 ### Modified Files
 - `.gitignore` — add `/stores/`, `/runtime/ryzenai/`, `/runtime/cache/`, `/reports/`.
@@ -327,6 +334,16 @@ flowchart TD
 | 10.5 | Name missing items | Paths, RuntimeFiles | `L2dError::Missing` | |
 | 10.6 | Non-zero exit and message | CLI | exit-code mapping | |
 | 10.7 | Command line and JSON | CLI | `--json` | |
+| 11.1 | Calibrate on logs not used for fitting | ConformalCalibrator | `ConformalCalibrator::fit` | |
+| 11.2 | Label set at a chosen error rate | ConformalCalibrator | `ConformalCalibrator::predict`, `LabelSet` | Triage |
+| 11.3 | Calibrate per label | ConformalCalibrator | per-label score lists | |
+| 11.4 | Calibrate per group, state which was used | ConformalCalibrator | `Stratum` | |
+| 11.5 | Refuse unsupported error rates | ConformalCalibrator | `CalibrationError::TooFewLogs` | |
+| 11.6 | Scored down, review, uncertain, unlike | Triage | `TriageResult`, `AbstainReason` | Triage |
+| 11.7 | Calibration or budget scored it down | Triage | `ScoredDownBy` | Triage |
+| 11.8 | Achieved against chosen error rate | Evaluator | `ScorerResult.coverage` | |
+| 11.9 | State the assumption | CLI output | `output.rs` text | |
+| 11.10 | Repeatable label sets | ConformalCalibrator | no randomness, fixed tie rule | |
 
 ## Components and Interfaces
 
@@ -340,6 +357,7 @@ flowchart TD
 | Trainer | l2d-train | Train the encoder on CPU | 3.1, 3.3–3.5 | `burn` (P0), l2d-encoder (P0) | Batch |
 | Store | l2d-store | Persist and search logs | 5.1–5.7, 6.7 | `lancedb` (P0), `tokio` (P1) | Service, State |
 | Scorer, NeighbourScorer, Triage | l2d-decide | Ratio, evidence, abstention, ranking | 6.1–6.7 | l2d-store (P0), l2d-encoder (P0), l2d-baseline (P1) | Service |
+| ConformalCalibrator | l2d-decide | Label sets at a stated error rate over any scorer | 11.1–11.7, 11.10 | l2d-core (P0) | Service, State |
 | ShiftTest | l2d-decide | Population-shift test | 7.1–7.4 | none | Service |
 | Assessments | l2d-assess | Vector-set measurements | 8.1–8.7 | `linfa`, `faer`, `bhtsne` (P1) | Service |
 | Evaluator | l2d-eval | Quality and cost report | 9.1–9.6 | l2d-decide, l2d-train (P0) | Batch |
@@ -355,6 +373,9 @@ flowchart TD
 | Requirements | 1.1, 1.2, 1.3, 1.4, 1.6, 9.7, 10.4 |
 
 **Responsibilities & Constraints**
+- Parsing uses Polars. An adapter returns a logs frame (schema below) and an `InputSummary`. The `LogRecord` struct stays as the row view of that frame for code that handles one log at a time.
+- Skipped records keep their position and reason (1.4): a validation pass over the raw records finds unreadable rows before Polars reads the accepted ones, so no row is dropped silently.
+- Deduplication, occurrence counts, first positions and label conflicts are computed as frame operations, with rows kept in first-occurrence order.
 - Read records in source order; never modify the source.
 - Deduplicate by exact text; keep occurrence count and first position.
 - When one text carries conflicting labels, keep the record as `Label::Unknown` and count it in `InputSummary.label_conflicts`.
@@ -684,6 +705,62 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 ```
 - Postcondition: every input text appears in exactly one of the three lists.
 
+#### ConformalCalibrator
+
+| Field | Detail |
+|-------|--------|
+| Intent | Turn any scorer's ratio into a label set with a stated error rate |
+| Requirements | 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.10 |
+
+**Responsibilities & Constraints**
+- Method: split (inductive) conformal prediction, label-conditional. It works on the ratio of any `Scorer`, so it covers the baseline and the encoder-based scorer alike and needs no refit.
+- Calibration input: ratios of labelled logs that were not used to fit the scorer. The caller holds out the calibration split. A saved scorer records the content hashes of its fitting inputs; calibration refuses an input whose content hash is among them. The evaluation harness calibrates on a part of each fold's fitting side that the scorer did not see.
+- Nonconformity of a log for a label: `ratio` for good, `1 - ratio` for bad. A higher value means the log fits the label worse.
+- P-value of a new log for a label: `(1 + number of calibration logs of that label with nonconformity >= the new log's) / (n_label + 1)`. Ties count as greater or equal; no randomization.
+- Label set at error rate `e`: every label whose p-value is greater than `e`. Sets: good, bad, both (uncertain), neither (unlike the calibration logs).
+- Strata: per label always; per group in addition when the group holds at least `min_per_group` calibration logs of that label (default 100), otherwise the pooled list of that label. Each decision names its stratum.
+- An error rate `e` is supported by a label's list only if `e >= 1 / (n_label + 1)`; otherwise `TooFewLogs` with the counts and the smallest supported rate.
+- A scorer's own abstention passes through unchanged; it is not given a label set.
+- Saved under `models/calibrations/<name>-<rev12>/`: scorer kind and revision, settings, and the sorted nonconformity lists per stratum. The revision is the SHA-256 of that content.
+- The guarantee assumes new logs are exchangeable with the calibration logs of the same stratum. The tool states this in its output; `l2d shift` is the check the analyst can run.
+
+**Build or adopt**
+- Adopt the `conformal-prediction` crate (project decision). `conformal.rs` wraps it behind the contract below and adds only what the crate does not provide for this contract (for example the per-label and per-group strata, the refusal rule, or saving and loading).
+- The task that introduces it confirms on the reference host that the crate links no network client and returns identical results on repeat, and records which parts of the method the crate covers.
+- Calibration inputs are prepared as Polars frames (ratio, label, group) and grouped there.
+
+**Contracts**: Service [x] / State [x]
+
+```rust
+pub enum LabelSet { Good, Bad, Both, Neither }
+pub enum Stratum { Pooled, Group(String) }
+
+pub struct Calibrated { pub set: LabelSet, pub p_good: f32, pub p_bad: f32, pub stratum: Stratum, pub error_rate: f32 }
+
+pub struct CalibrationSettings { pub min_per_group: u32 }
+
+pub struct CalibrationPoint { pub ratio: f32, pub label: Label, pub group: Option<String> }
+
+pub enum CalibrationError {
+    TooFewLogs { good: u64, bad: u64, smallest_supported: f32 },
+    SameInputAsFitting { content_sha256: String },
+}
+
+impl ConformalCalibrator {
+    pub fn fit(points: &[CalibrationPoint], scorer: ScorerKind, scorer_revision: &str, settings: &CalibrationSettings)
+        -> Result<Self, CalibrationError>;   // the caller checks the input hash against the scorer's fitting inputs first
+    pub fn predict(&self, ratio: f32, group: Option<&str>, error_rate: f32) -> Result<Calibrated, CalibrationError>;
+    pub fn save(&self, paths: &ProjectPaths, name: &str) -> Result<PathBuf, L2dError>;
+    pub fn load(dir: &Path) -> Result<Self, L2dError>;
+}
+
+pub enum AbstainReason { ScorerAbstained, Uncertain, UnlikeCalibration }
+pub enum ScoredDownBy { Calibration, BudgetOnly }
+```
+- `ScoredLog` gains `calibrated: Option<Calibrated>`; entries of `TriageResult.abstained` carry an `AbstainReason`, entries of `scored_down` a `ScoredDownBy`.
+- With a calibrated primary scorer, triage places a log by its label set: bad alone goes to the review ranking, good alone to `scored_down` (by calibration), both and neither to `abstained`. The review budget then applies to the review ranking; logs beyond it are `scored_down` by budget only.
+- Evaluation reports, per label and per stratum, the share of test logs whose true label is missing from the set (achieved error rate) next to the chosen rate, and the share of each set kind (`ScorerResult.coverage`).
+
 #### ShiftTest
 
 | Field | Detail |
@@ -786,6 +863,7 @@ pub struct EvaluationReport {
 | `l2d encoder train` / `encode` / `info` | Train, encode, show identity | `--seed`, `--allow-cpu` | identity, `RunRecord` |
 | `l2d store add` / `search` | Fill and query a store | `--store`, `--text`, `--like`, `--label`, `--source`, `--k` | counts or hits |
 | `l2d triage` | Rank logs | `--store`, `--baseline`, `--budget`, `--primary` | `TriageResult` |
+| `l2d calibrate` | Calibrate a fitted scorer on held-out labelled logs | `--input`, `--baseline` or `--store`, `--name`, `--min-per-group` | calibration identity, counts per stratum |
 | `l2d shift` | Compare two groups | `--a`, `--b`, `--permutations`, `--seed` | `ShiftResult` |
 | `l2d assess` | Vector-set measurements | `--store`, `--kind`, `--reference`, `--out` | reports |
 | `l2d eval` | Evaluation report | `--folds`, `--budget`, `--scorers` | `EvaluationReport` |
@@ -805,6 +883,20 @@ pub struct EvaluationReport {
 - **Run record**: what was run, on what, with which settings and result.
 
 Invariants: a vector is never compared with vectors of another identity; a package's revision always matches its files; triage never changes stored logs.
+
+### Data frames
+
+Frames exchanged between crates. Column names and types are fixed; a crate may add columns to a frame it owns but does not rename these.
+
+| Frame | Columns | Produced by | Consumed by |
+|-------|---------|-------------|-------------|
+| Logs | `text` String, `label` String (`good`, `bad`, `unknown`), `group` String nullable, `first_position` UInt64, `occurrences` UInt32 | input adapters | baseline, encoder integration, store, triage, evaluation |
+| Scores | `text` String, `scorer` String, `ratio` Float32 nullable, `abstained` Boolean, plus evidence columns owned by the scorer | scorers | triage, calibration, evaluation |
+| Calibration points | `ratio` Float32, `label` String, `group` String nullable | evaluation harness, `l2d calibrate` | ConformalCalibrator |
+| Predictions | `text`, `label`, `group`, `fold` UInt32, `scorer`, `ratio`, `label_set` String nullable | evaluation harness | metrics, reports |
+
+- Row order is meaningful: the logs frame is in first-occurrence order, and frames derived from it keep that order unless a column says otherwise.
+- Numeric code receives plain slices, `ndarray` arrays or sparse rows taken from these frames in row order; it never iterates a frame from several threads.
 
 ### Physical Data Model
 
