@@ -1,0 +1,890 @@
+# Design Document: npu-log-decision
+
+## Overview
+
+**Purpose**: The Log Triage Tool (`l2d`) gives a forensic log analyst a bad/good ratio for every text log, ranks the logs, and scores down those that look good. It runs locally on a laptop.
+
+**Users**: A log analyst works from the command line: load logs, fit or train scorers on labelled logs, store logs with vectors, triage new logs, compare groups of logs, assess vector sets, and evaluate quality and cost on a labelled dataset.
+
+**Impact**: The repository holds no application code today. This design adds a Rust workspace with one command-line binary. It replaces the thesis notebooks as the working tool; `log2ml/` stays an untracked reference.
+
+Two measured results shape the design. A general text-embedding model on the NPU reached 2.3 logs per second and separated attacks worse than character-level features (ROC AUC 0.79 against 0.91 to 0.96 on HTTP CSIC 2010). A small convolutional encoder with random weights reached about 36,700 logs per second on the same NPU. The design therefore has two scorers: a character-level baseline that needs no model runtime, and a small encoder trained on log text that runs on the NPU and feeds a nearest-outcome ratio.
+
+### Goals
+- A baseline bad/good ratio from character-level features that works without NPU or encoder.
+- A byte-level convolutional encoder, trained in Rust, executed on the NPU at 1,000 or more logs per second, with a CPU fallback the analyst must allow.
+- One embedded store for log text, labels and vectors, searchable by similarity, by text, and by both.
+- Triage per log: ratio, evidence, abstention, ranking, review budget.
+- Population-shift test, vector-set assessment, and an evaluation report with grouped splits.
+- No Python at runtime, no network use.
+
+### Non-Goals
+- Language-model stages (for example explaining a decision); separate spec.
+- Evaluation on AIT Log Data Set V2 or the thesis Sysmon data.
+- Streaming ingestion, alerting, graphical interface.
+- Bad/good share per source or time window.
+- Acting on logs (blocking, deleting).
+- Approximate vector indexes, BM25 ranking, GPU training by default, a long-running service process.
+- Using the Venn Python package; its operations are re-implemented.
+
+## Boundary Commitments
+
+### This Spec Owns
+- The `l2d` command-line contract: subcommands, options, exit codes, JSON output.
+- Input adapters for line-based text logs, labelled CSV/JSONL, and HTTP CSIC 2010.
+- The baseline scorer: character n-gram hashing and logistic regression, and its saved form.
+- The encoder: architecture, training, ONNX writing, 8-bit quantization, package format, identity, and execution on NPU or CPU.
+- The store schema and its search operations.
+- The decision operations: nearest-outcome ratio with evidence and abstention, ranking and review budget, population-shift test.
+- Vector-set assessment and evaluation reports.
+- Run records for training, encoding and evaluation.
+
+### Out of Boundary
+- NPU driver installation and repair; the tool only reports state.
+- Obtaining datasets; the analyst places them under `data/<dataset>/`.
+- Obtaining AMD's runtime DLLs; the tool checks for them and names what is missing.
+- Any language-model inference.
+- Promotion of generated reports into `docs/`; the analyst does that and indexes them in `README.md`.
+
+### Allowed Dependencies
+- ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
+- Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (features `bundled`, `fts5`), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
+- `burn` 0.22.1 (confined to optional training module `l2d-train`).
+- No crate that opens network connections may be added.
+- No Python interpreter at runtime; development scripts in `uv` are permitted for offline model architecture exploration and static quantization.
+- Dependency direction between workspace crates is fixed (see Architecture); a crate imports only from crates to its left.
+
+### Revalidation Triggers
+- Encoder architecture, input length, output dimension, or training objective changes.
+- Encoder package format or identity scheme changes.
+- Store schema changes, or more than one encoder identity per store.
+- `Scorer` contract changes.
+- A new AMD runtime release, NPU driver change, or `ort` feature-level change.
+- CLI option, exit-code or JSON shape changes.
+- Any change that adds a runtime prerequisite.
+
+## Architecture
+
+### Architecture Pattern & Boundary Map
+
+```mermaid
+graph LR
+    CLI[l2d-cli]
+    EVAL[l2d-eval]
+    ASSESS[l2d-assess]
+    DECIDE[l2d-decide]
+    TRAIN[l2d-train]
+    STORE[l2d-store]
+    ENC[l2d-encoder]
+    BASE[l2d-baseline]
+    CORE[l2d-core]
+    RT[AMD runtime DLLs]
+    NPU[NPU]
+    DB[SQLite on disk]
+    PKG[Encoder package on disk]
+
+    CLI --> EVAL
+    CLI --> ASSESS
+    CLI --> DECIDE
+    CLI --> TRAIN
+    EVAL --> DECIDE
+    EVAL --> TRAIN
+    EVAL --> BASE
+    ASSESS --> STORE
+    ASSESS --> BASE
+    DECIDE --> STORE
+    DECIDE --> ENC
+    DECIDE --> BASE
+    TRAIN --> ENC
+    STORE --> CORE
+    ENC --> CORE
+    BASE --> CORE
+    ENC --> RT
+    RT --> NPU
+    STORE --> DB
+    ENC --> PKG
+    TRAIN --> PKG
+```
+
+**Architecture Integration**:
+- Selected pattern: layered Cargo workspace of library crates plus one binary. Modules have zero async runtime; `l2d-store` runs synchronously on SQLite, and `l2d-encoder` dynamically loads ONNX Runtime.
+- Dependency direction: `l2d-core` → `l2d-baseline`, `l2d-encoder`, `l2d-store` → `l2d-train`, `l2d-decide` → `l2d-assess` → `l2d-eval` → `l2d-cli`. A crate imports only from crates earlier in this order. `l2d-encoder`, `l2d-baseline` and `l2d-store` do not import each other.
+- Domain boundaries: `l2d-encoder` owns package verification and execution; `l2d-train` trains weights and outputs package files. `l2d-store` owns the local SQLite database and exact in-memory SIMD vector search via `faer`.
+- Agnostic threat scoring: `l2d-baseline` separates routing context (path/method) from payload anomaly tokens; `l2d-decide` reports neighbor endpoint diversity and avoids false suppression; `l2d-eval` enforces strict grouped cross-validation to report cross-endpoint ROC AUC.
+- Technology Stack:
+
+| Layer | Choice / Version | Role in Feature | Notes |
+|-------|------------------|-----------------|-------|
+| CLI | Rust 1.98, `clap` 4, `serde_json` | Subcommands, JSON output, exit codes | Binary name `l2d` |
+| Encoder execution | `ort` 2.0.0-rc.15, features `load-dynamic`, `vitis`, `std`, `ndarray`, one `api-NN` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | `api-NN` fixed from DLL version |
+| NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
+| Storage | `rusqlite` 0.32 (`bundled`, `fts5`) + `faer` 0.24 | Logs, labels, FTS5 full-text, exact SIMD vector search | Single-file database (`stores/<name>.db`), zero async |
+| Baseline Scorer | Character n-grams + L2 Logistic Regression via `faer` / `linfa` | Deterministic baseline ratio | Independent of NPU and ONNX runtime |
+| Analysis | `linfa` 0.8, `faer` 0.24, `bhtsne` 0.5 | Vector-set assessment, MMD shift test, TwoNN | Pure-Rust numeric calculations |
+| Optional Training | `burn` 0.22.1 (`Flex` CPU backend) | Offline neural model training | Confined to `l2d-train` |
+| Build output | `CARGO_TARGET_DIR` = `D:\BuildArtifacts\cargo-target` | Build artifacts off the repo | Host convention |
+
+## File Structure Plan
+
+### Directory Structure
+```
+Cargo.toml                         # Workspace manifest, shared dependency versions
+rust-toolchain.toml                # Pins the toolchain
+crates/
+├── l2d-core/src/
+│   ├── lib.rs
+│   ├── error.rs                   # L2dError, exit-code mapping
+│   ├── types.rs                   # LogRecord, Label, InputSummary, EncoderIdentity, Ratio
+│   ├── input.rs                   # InputAdapter trait, dedup, hashing of inputs
+│   ├── adapters/lines.rs          # One log per line
+│   ├── adapters/labelled.rs       # CSV/JSONL with configurable text, label, group columns
+│   ├── adapters/csic2010.rs       # HTTP CSIC 2010 CSV
+│   ├── paths.rs                   # Project directories: models, data, stores, runtime, reports
+│   └── runrecord.rs               # RunRecord and its JSON form
+├── l2d-baseline/src/
+│   ├── lib.rs
+│   ├── hashing.rs                 # Character 1-3 gram signed hashing with routing/payload isolation
+│   ├── logreg.rs                  # Deterministic L2 logistic regression via faer/linfa
+│   └── scorer.rs                  # BaselineScorer: fit, score, save, load
+├── l2d-encoder/src/
+│   ├── lib.rs
+│   ├── arch.rs                    # EncoderArch: layer definitions, input length, dimension
+│   ├── package.rs                 # EncoderPackage: artifact files, identity verification, revision hash
+│   ├── bytes.rs                   # Text to fixed-length byte ids, truncation flag, table lookup
+│   ├── runtime.rs                 # RuntimeFiles check, ort initialisation, NPU device and driver query
+│   └── session.rs                 # EncoderSession: NPU or CPU execution via ort, placement evidence
+├── l2d-train/src/                 # Optional / offline training module
+│   ├── lib.rs
+│   ├── model.rs                   # Burn module mirroring EncoderArch plus classifier layer
+│   ├── trainer.rs                 # Training loop, seed, record, calibration activations
+│   └── export.rs                  # Burn weights export to EncoderPackage files
+├── l2d-store/src/
+│   ├── lib.rs                     # Synchronous Store facade
+│   ├── sqlite.rs                  # SQLite setup, FTS5 index, meta table, migrations
+│   ├── vector.rs                  # In-memory exact SIMD vector search via faer
+│   └── query.rs                   # Nearest, text (FTS5), combined, restricted searches
+├── l2d-decide/src/
+│   ├── lib.rs
+│   ├── scorer.rs                  # Scorer trait, NeighbourScorer, baseline adapter
+│   ├── evidence.rs                # Evidence tracking with endpoint diversity and anti-false-suppression
+│   ├── triage.rs                  # Ranking, abstained list, review budget
+│   └── shift.rs                   # RBF MMD permutation test
+├── l2d-assess/src/
+│   ├── lib.rs
+│   ├── loss.rs                    # Explained variance, TwoNN, shortening effect, neighbour overlap
+│   ├── cluster.rs                 # Silhouette, label separability overall and within group
+│   ├── properties.rs              # Cosine distribution, norms, anisotropy, duplicates, dimension
+│   ├── projection.rs              # t-SNE coordinates to CSV
+│   └── compare.rs                 # Side-by-side report for two vector sets
+├── l2d-eval/src/
+│   ├── lib.rs
+│   ├── split.rs                   # Grouped, deduplicated K-fold splits
+│   ├── metrics.rs                 # ROC AUC, average precision, recall at budget
+│   ├── cost.rs                    # Logs per second, time to first result, CPU seconds
+│   └── report.rs                  # EvaluationReport to JSON and Markdown
+└── l2d-cli/src/
+    ├── main.rs                    # Argument parsing, dispatch, exit code
+    ├── output.rs                  # Human and JSON rendering
+    └── cmd/                       # One file per subcommand: ingest, baseline, encoder, store,
+                                   # triage, shift, assess, eval, runtime
+tests/                             # Workspace-level end-to-end tests with a small fixture dataset
+tests/fixtures/mini-labelled.csv   # 200 synthetic labelled request lines
+runtime/README.md                  # Which DLLs belong in runtime/ryzenai/ and where they come from
+```
+
+Runtime directories, all untracked: `models/encoders/<name>-<rev12>/`, `models/baselines/<name>-<rev12>/`, `stores/<name>/`, `runtime/ryzenai/`, `runtime/cache/`, `reports/`.
+
+### Modified Files
+- `.gitignore` — add `/stores/`, `/runtime/ryzenai/`, `/runtime/cache/`, `/reports/`.
+- `README.md` — layout table gains `crates/`, `runtime/`, `stores/`, `reports/`; spec status.
+
+## System Flows
+
+### Train, package and load the encoder
+
+```mermaid
+sequenceDiagram
+    participant A as Analyst
+    participant C as l2d-cli
+    participant T as l2d-train
+    participant E as l2d-encoder
+    participant R as AMD runtime
+    A->>C: encoder train
+    C->>T: train with labelled logs and seed
+    T->>T: fit on CPU backend
+    T->>E: weights and calibration ranges
+    E->>E: write float ONNX
+    E->>E: write 8-bit ONNX
+    E->>E: compute revision and write package to temp dir
+    E->>E: rename temp dir to final dir
+    C-->>A: encoder identity and training record
+    A->>C: encoder encode
+    C->>E: open session
+    E->>R: load DLL and register NPU provider
+    alt NPU usable
+        R-->>E: session on NPU
+    else NPU not usable and fallback allowed
+        E->>R: CPU provider
+        R-->>E: session on CPU
+    else NPU not usable and fallback not allowed
+        E-->>C: error with reason
+    end
+    E-->>C: vectors and run record
+```
+
+- A package becomes visible only through the final rename, so an interrupted run leaves earlier packages untouched (3.6).
+- NPU registration uses `error_on_failure`; the CPU path is taken only with `--allow-cpu` (4.4).
+
+### Triage
+
+```mermaid
+flowchart TD
+    IN[Logs to triage] --> DEDUP[Deduplicate texts]
+    DEDUP --> B{Baseline scorer loaded}
+    B -->|yes| BS[Baseline ratio]
+    DEDUP --> E{Encoder and store available}
+    E -->|yes| ENC[Encode]
+    ENC --> NN[Nearest labelled logs within reach]
+    NN --> S{Support at least minimum}
+    S -->|yes| NR[Neighbour ratio with evidence]
+    S -->|no| AB[Abstain]
+    BS --> RANK[Rank by primary scorer]
+    NR --> RANK
+    AB --> ABL[Abstained list]
+    RANK --> BUD[Apply review budget]
+    BUD --> OUT[Review list and scored-down list]
+    ABL --> OUT
+```
+
+- The primary scorer is the encoder-based one when available, otherwise the baseline. Both ratios are reported when both exist (6.6).
+- A log is abstained only by the encoder-based scorer. When that scorer is primary and abstains, the log goes to the abstained list even if a baseline ratio exists; the baseline ratio is still shown.
+
+## Requirements Traceability
+
+| Requirement | Summary | Components | Interfaces | Flows |
+|-------------|---------|------------|------------|-------|
+| 1.1 | Read text logs | LinesAdapter | `InputAdapter::read` | |
+| 1.2 | Read labelled datasets | LabelledAdapter, Csic2010Adapter | `InputAdapter::read` | |
+| 1.3 | Process duplicates once | Input dedup | `dedup` | Triage |
+| 1.4 | Skip unreadable records | Input adapters | `InputSummary.skipped` | |
+| 1.5 | Mark truncated logs | ByteCodec | `ByteCodec::encode_text` | |
+| 1.6 | Record input identity | Input dedup | `InputSummary` | |
+| 2.1 | Fit baseline | BaselineScorer | `BaselineScorer::fit` | |
+| 2.2 | Ratio 0 to 1 | BaselineScorer | `Scorer::score` | Triage |
+| 2.3 | Refuse too few labels | BaselineScorer | `FitError::TooFewLabels` | |
+| 2.4 | Deterministic baseline | CharHasher, LogReg | fixed hash, fixed iteration order | |
+| 2.5 | Works without NPU or encoder | BaselineScorer | no dependency on `l2d-encoder` | Triage |
+| 3.1 | Fixed length and dimension | EncoderArch, Trainer | `EncoderArch` | Train |
+| 3.2 | Encoder identity | EncoderPackage | `EncoderIdentity` | Train |
+| 3.3 | Training record | Trainer | `RunRecord` | Train |
+| 3.4 | Train without NPU | Trainer | Burn CPU backend | Train |
+| 3.5 | Repeatable training | Trainer | seed, CPU backend | |
+| 3.6 | Interrupted training is safe | EncoderPackage | atomic rename | Train |
+| 4.1 | One vector per distinct text | EncoderSession | `EncoderSession::encode` | Train |
+| 4.2 | 1,000 logs/s on NPU | EncoderSession | batch of 32, fixed shapes | |
+| 4.3 | Encoding run record | EncoderSession, RuntimeFiles | `RunRecord`, `Placement` | Train |
+| 4.4 | Fallback only when allowed | EncoderSession | `Device`, `EncoderError::NpuUnavailable` | Train |
+| 4.5 | Mark CPU runs | EncoderSession | `RunRecord.device` | |
+| 4.6 | NPU and CPU agree | EncoderSession, Quantizer | same 8-bit file on both | |
+| 4.7 | Ready within 30 s | EncoderSession | on-disk provider cache | |
+| 5.1 | Stored fields | Store | `StoredLog` | |
+| 5.2 | Similarity search | Store | `Store::nearest` | Triage |
+| 5.3 | Text search | Store | `Store::text_search` | |
+| 5.4 | Combined search | Store | `Store::nearest` with `Filter.contains` | |
+| 5.5 | Restrict by label or source | Store | `Filter` | |
+| 5.6 | Refuse identity mismatch | Store | `StoreError::IdentityMismatch` | |
+| 5.7 | Persistent | Store | on-disk store | |
+| 6.1 | Ratio from labelled logs | NeighbourScorer | `Scorer::score` | Triage |
+| 6.2 | Evidence | NeighbourScorer | `Evidence` | Triage |
+| 6.3 | Abstain below support | NeighbourScorer | `Decision::Abstain` | Triage |
+| 6.4 | Ranking, abstained separate | Triage | `TriageResult` | Triage |
+| 6.5 | Review budget | Triage | `TriageResult.review`, `.scored_down` | Triage |
+| 6.6 | Name the scorer | Triage | `ScoredLog.by` | Triage |
+| 6.7 | Never alter logs | Triage, Store | read-only inputs; store rows only added | |
+| 7.1 | Statistic and p-value | ShiftTest | `shift_test` | |
+| 7.2 | Group sizes, permutations | ShiftTest | `ShiftResult` | |
+| 7.3 | Refuse small groups | ShiftTest | `ShiftError::GroupTooSmall` | |
+| 7.4 | Repeatable with seed | ShiftTest | seeded permutations | |
+| 7.5 | P-value wording | CLI output | `output.rs` text | |
+| 8.1 | Information loss | LossAssessment | `assess_loss` | |
+| 8.2 | Neighbour overlap with reference | LossAssessment | `neighbour_overlap` | |
+| 8.3 | Clustering | ClusterAssessment | `assess_clusters` | |
+| 8.4 | Separability within groups | ClusterAssessment | `separability_within_groups` | |
+| 8.5 | Properties | PropertiesAssessment | `assess_properties` | |
+| 8.6 | Projection file | Projection | `project_to_csv` | |
+| 8.7 | Compare two encoders | Compare | `compare` | |
+| 9.1 | Quality metrics per scorer | Metrics, Evaluator | `EvaluationReport.scorers` | |
+| 9.2 | Distinct texts, grouped splits | GroupedSplit | `grouped_folds` | |
+| 9.3 | Abstention rate | Evaluator | `ScorerResult.abstention_rate` | |
+| 9.4 | Speed and energy proxy | Cost | `CostMeasure` | |
+| 9.5 | Which scorer is better | Evaluator | `EvaluationReport.comparison` | |
+| 9.6 | Report content | Report | `EvaluationReport` | |
+| 9.7 | CSIC 2010 supported | Csic2010Adapter | `InputAdapter::read` | |
+| 10.1 | No Python | whole workspace | native DLLs only | |
+| 10.2 | No network | whole workspace | dependency rule | |
+| 10.3 | Encoders under model directory | Paths, EncoderPackage | `ProjectPaths` | |
+| 10.4 | Datasets from data directory or given path | Paths, input adapters | `ProjectPaths` | |
+| 10.5 | Name missing items | Paths, RuntimeFiles | `L2dError::Missing` | |
+| 10.6 | Non-zero exit and message | CLI | exit-code mapping | |
+| 10.7 | Command line and JSON | CLI | `--json` | |
+
+## Components and Interfaces
+
+| Component | Crate | Intent | Req Coverage | Key Dependencies | Contracts |
+|-----------|-------|--------|--------------|------------------|-----------|
+| Input adapters and dedup | l2d-core | Read records, deduplicate, summarize | 1.1–1.4, 1.6, 9.7, 10.4 | `csv` (P1) | Service |
+| ProjectPaths, RunRecord, errors | l2d-core | Locations, run records, error envelope | 3.3, 4.3, 10.3–10.6 | `sha2`, `serde` (P2) | Service |
+| BaselineScorer | l2d-baseline | Character-level ratio | 2.1–2.5 | l2d-core (P0) | Service, State |
+| EncoderPackage, OnnxWriter, Quantizer | l2d-encoder | Encoder file format and identity | 3.1, 3.2, 3.6, 4.6 | `prost` (P1) | Service, State |
+| EncoderSession, RuntimeFiles, ByteCodec | l2d-encoder | Encode on NPU or CPU | 1.5, 4.1–4.7 | `ort` and AMD DLLs (P0) | Service |
+| Trainer | l2d-train | Train the encoder on CPU | 3.1, 3.3–3.5 | `burn` (P0), l2d-encoder (P0) | Batch |
+| Store | l2d-store | Persist and search logs | 5.1–5.7, 6.7 | `lancedb` (P0), `tokio` (P1) | Service, State |
+| Scorer, NeighbourScorer, Triage | l2d-decide | Ratio, evidence, abstention, ranking | 6.1–6.7 | l2d-store (P0), l2d-encoder (P0), l2d-baseline (P1) | Service |
+| ShiftTest | l2d-decide | Population-shift test | 7.1–7.4 | none | Service |
+| Assessments | l2d-assess | Vector-set measurements | 8.1–8.7 | `linfa`, `faer`, `bhtsne` (P1) | Service |
+| Evaluator | l2d-eval | Quality and cost report | 9.1–9.6 | l2d-decide, l2d-train (P0) | Batch |
+| CLI | l2d-cli | Commands, output, exit codes | 7.5, 10.6, 10.7 | `clap` (P1) | API |
+
+### Core
+
+#### Input adapters and dedup
+
+| Field | Detail |
+|-------|--------|
+| Intent | Turn local files into deduplicated log records with a summary |
+| Requirements | 1.1, 1.2, 1.3, 1.4, 1.6, 9.7, 10.4 |
+
+**Responsibilities & Constraints**
+- Read records in source order; never modify the source.
+- Deduplicate by exact text; keep occurrence count and first position.
+- When one text carries conflicting labels, keep the record as `Label::Unknown` and count it in `InputSummary.label_conflicts`.
+- The CSIC 2010 adapter builds the text as method, URL, and body on a second line; the group key is method plus URL path without query.
+
+**Contracts**: Service [x]
+
+```rust
+pub enum Label { Good, Bad, Unknown }
+
+pub struct LogRecord {
+    pub text: String,
+    pub label: Label,
+    pub group: Option<String>,
+    pub first_position: u64,
+    pub occurrences: u32,
+}
+
+pub struct InputSummary {
+    pub source_path: PathBuf,
+    pub records: u64,
+    pub distinct_texts: u64,
+    pub content_sha256: String,
+    pub skipped: Vec<SkippedRecord>,   // position and reason
+    pub label_conflicts: u64,
+}
+
+pub trait InputAdapter {
+    fn read(&self, path: &Path) -> Result<(Vec<LogRecord>, InputSummary), L2dError>;
+}
+```
+- Preconditions: the path exists and is readable; otherwise `L2dError::Missing`.
+- Postconditions: every returned text is unique; `records` equals the sum of occurrences plus skipped.
+
+#### ProjectPaths, RunRecord, errors
+
+| Field | Detail |
+|-------|--------|
+| Intent | Fixed locations, one run-record shape, one error envelope |
+| Requirements | 3.3, 4.3, 10.3, 10.4, 10.5, 10.6 |
+
+```rust
+pub struct ProjectPaths { pub root: PathBuf }   // models/, data/, stores/, runtime/, reports/
+
+pub struct EncoderIdentity { pub name: String, pub revision: String, pub dimension: u16 }
+
+pub enum Device { Npu, Cpu }
+
+pub struct RunRecord {
+    pub kind: RunKind,                  // Train, Encode, Evaluate
+    pub started_utc: String,
+    pub duration_ms: u64,
+    pub inputs: Vec<InputSummary>,
+    pub settings: serde_json::Value,
+    pub seed: Option<u64>,
+    pub encoder: Option<EncoderIdentity>,
+    pub device: Option<Device>,
+    pub driver_version: Option<String>,
+    pub logs_per_second: Option<f64>,
+    pub placement: Option<Placement>,
+}
+
+pub enum L2dError {
+    Missing { item: String, expected_at: PathBuf },
+    InvalidInput { detail: String },
+    Refused { reason: String },
+    Runtime { detail: String },
+}
+```
+- Exit codes: 0 success, 2 `InvalidInput`, 3 `Missing`, 4 `Refused`, 5 `Runtime`.
+- Encoder packages are written only below `models/encoders/`; `EncoderPackage` rejects other targets.
+
+### Baseline
+
+#### BaselineScorer
+
+| Field | Detail |
+|-------|--------|
+| Intent | Bad/good ratio from character-level features |
+| Requirements | 2.1, 2.2, 2.3, 2.4, 2.5 |
+
+**Responsibilities & Constraints**
+- Features: character 1-, 2- and 3-grams over the text's bytes, signed FNV-1a hashing into 65,536 buckets, L2-normalized sparse rows.
+- Model: logistic regression with L2 penalty, fitted by full-batch L-BFGS with a fixed iteration cap and fixed row order. No randomness.
+- Saved under `models/baselines/<name>-<rev12>/` as weights plus settings; revision is the SHA-256 of both.
+- Does not depend on `l2d-encoder` or `l2d-store`.
+
+**Contracts**: Service [x] / State [x]
+
+```rust
+pub struct BaselineSettings { pub buckets: u32, pub ngram_max: u8, pub l2: f64, pub max_iter: u32 }
+
+pub enum FitError { TooFewLabels { good: u64, bad: u64 } }
+
+impl BaselineScorer {
+    pub fn fit(records: &[LogRecord], settings: &BaselineSettings) -> Result<Self, FitError>;
+    pub fn ratio(&self, text: &str) -> f32;            // 0.0..=1.0, higher is more likely bad
+    pub fn save(&self, paths: &ProjectPaths, name: &str) -> Result<PathBuf, L2dError>;
+    pub fn load(dir: &Path) -> Result<Self, L2dError>;
+}
+```
+- Preconditions for `fit`: at least 10 labelled records and at least 5 of each label, else `TooFewLabels`.
+- Invariant: equal inputs and settings give bit-equal weights.
+- `LogReg` also accepts dense rows; `l2d-assess` reuses it for separability.
+
+### Encoder
+
+#### EncoderArch, EncoderPackage, OnnxWriter, Quantizer
+
+| Field | Detail |
+|-------|--------|
+| Intent | Define the encoder and turn trained weights into an identified package |
+| Requirements | 3.1, 3.2, 3.6, 4.6 |
+
+**Responsibilities & Constraints**
+- Architecture v1 (fixed): input 256 bytes; byte table 256 × 64; five convolution blocks with kernel 5 and ReLU (64→128, 128→128 stride 2, 128→256 stride 2, 256→256 stride 2, 256→256); global average pooling; linear 256→128. Output dimension 128. About one million parameters.
+- The byte-table lookup runs on the CPU in `ByteCodec`. The ONNX graph takes `[32, 64, 1, 256]` float input and returns `[32, 128]`.
+- `OnnxWriter` emits opset 17 with Conv, Relu, GlobalAveragePool, Flatten and Gemm.
+- `Quantizer` emits the QDQ form: uint8 activations and int8 symmetric weights, per tensor, float scales; bias int32 with scale `input_scale × weight_scale`.
+- Calibration ranges are the minimum and maximum of each activation over a calibration sample, supplied by the trainer.
+- Package directory `models/encoders/<name>-<rev12>/` contains `encoder.json` (identity, architecture, quantization ranges), `table.bin`, `model.f32.onnx`, `model.int8.onnx`, `training-record.json`.
+- Revision: SHA-256 over `model.int8.onnx`, `table.bin` and the architecture description, first 40 hex characters.
+- A package is written to a temporary sibling directory and renamed into place.
+
+**Contracts**: Service [x] / State [x]
+
+```rust
+pub struct Weights { pub table: Vec<f32>, pub layers: Vec<LayerWeights> }   // shapes checked against EncoderArch
+pub struct CalibrationRanges { pub per_tensor: Vec<(f32, f32)> }
+
+impl EncoderPackage {
+    pub fn write(
+        paths: &ProjectPaths, name: &str, arch: &EncoderArch,
+        weights: &Weights, ranges: &CalibrationRanges, record: &RunRecord,
+    ) -> Result<EncoderPackage, L2dError>;
+    pub fn open(dir: &Path) -> Result<EncoderPackage, L2dError>;   // verifies revision against file hashes
+    pub fn identity(&self) -> &EncoderIdentity;
+}
+```
+- Postcondition of `open`: the stored revision equals the recomputed one, else `Refused`.
+
+#### EncoderSession, RuntimeFiles, ByteCodec
+
+| Field | Detail |
+|-------|--------|
+| Intent | Encode log texts on the NPU, or on the CPU when allowed |
+| Requirements | 1.5, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 |
+
+**Responsibilities & Constraints**
+- `RuntimeFiles::check` verifies the DLLs in `runtime/ryzenai/` against the list in `runtime/README.md` and names any missing file.
+- The runtime is loaded with `ort` `load-dynamic` from that directory. The Vitis AI provider is registered with `error_on_failure`, cache directory `runtime/cache/`, cache key equal to the encoder revision, cache kept on disk.
+- The environment variable for the provider's placement report is set in-process before the session is created; `Placement` is read from that report.
+- NPU presence and driver version are read through a Windows device query.
+- Texts are deduplicated by the caller; the session pads the last batch to 32 and drops padded outputs.
+- Output vectors are L2-normalized on the CPU.
+- The CPU path runs the same `model.int8.onnx` through the CPU provider of the same runtime.
+
+**Dependencies**
+- External: `ort`, AMD runtime DLLs — encoder execution (P0). Unproven from Rust; task 1 gates it.
+
+**Contracts**: Service [x]
+
+```rust
+pub struct Placement { pub npu_nodes: u32, pub cpu_nodes: u32, pub source: PlacementSource }
+pub enum PlacementSource { ProviderReport, Unavailable }
+
+pub enum EncoderError {
+    NpuUnavailable { reason: String },
+    RuntimeMissing { file: String, expected_at: PathBuf },
+    Failed { detail: String },
+}
+
+pub struct Encoded { pub vector: Vec<f32>, pub truncated: bool }
+
+impl EncoderSession {
+    pub fn open(pkg: &EncoderPackage, paths: &ProjectPaths, allow_cpu: bool) -> Result<Self, EncoderError>;
+    pub fn device(&self) -> Device;
+    pub fn encode(&mut self, texts: &[&str]) -> Result<Vec<Encoded>, EncoderError>;
+    pub fn finish(self) -> RunRecord;      // identity, device, driver, logs per second, placement
+}
+
+impl ByteCodec {
+    pub fn encode_text(text: &str) -> ([u8; 256], bool);   // bytes, truncated flag
+}
+```
+- Preconditions: package revision verified; runtime files present.
+- Postconditions: `encode` returns one entry per input text in input order, each of the identity's dimension.
+- `open` with `allow_cpu = false` returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed.
+
+**Implementation Notes**
+- Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest.
+- Validation: a test opens the same package on NPU and CPU and checks cosine ≥ 0.99 per vector (4.6); a benchmark checks 1,000 logs/s over 10,000 logs (4.2) and readiness within 30 s (4.7).
+- Risks: placement report may not regenerate on a warm cache; the first compile stores the counts in `runtime/cache/<revision>/placement.json` for reuse.
+
+### Training
+
+#### Trainer
+
+| Field | Detail |
+|-------|--------|
+| Intent | Train the encoder on labelled logs and hand weights to the encoder crate |
+| Requirements | 3.1, 3.3, 3.4, 3.5 |
+
+**Contracts**: Batch [x]
+
+- Trigger: `l2d encoder train --input <path> --adapter <name> --name <name> --seed <n>`.
+- Input / validation: labelled records; refuses with fewer than 10 labelled or fewer than 5 of either label.
+- Objective: binary cross-entropy on a classifier layer placed after the 128-dimension output; the classifier layer is discarded at export.
+- Backend: Burn `Flex` CPU backend, seeded; batches in a seeded shuffled order. The `gpu` cargo feature switches to Vulkan and marks the record as GPU-trained.
+- Output / destination: `Weights`, `CalibrationRanges` from 512 training texts, `RunRecord`; passed to `EncoderPackage::write`.
+- Idempotency & recovery: nothing is written until training completes; an interrupted run leaves no package.
+
+```rust
+pub struct TrainSettings { pub epochs: u32, pub batch: u32, pub lr: f64, pub seed: u64, pub holdout_fraction: f32 }
+
+pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings)
+    -> Result<(Weights, CalibrationRanges, RunRecord), L2dError>;
+```
+
+**Implementation Notes**
+- Risks: CPU training time is unmeasured; the first training task reports it.
+
+### Storage
+
+#### Store
+
+| Field | Detail |
+|-------|--------|
+| Intent | Persist logs with vectors and answer text and similarity searches |
+| Requirements | 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 6.7 |
+
+**Responsibilities & Constraints**
+- One SQLite database `stores/<name>.db` holds one encoder identity, written to a `meta` table when the store is created.
+- Rows are added; existing rows are never changed or removed by triage.
+- Full-text search uses SQLite FTS5 for exact and containment queries.
+- Vector search is exact squared L2 on normalized vectors, computed via `faer` SIMD matrix multiplication over stored vectors.
+- Entirely synchronous; no async runtime or background database daemon.
+
+**Dependencies**
+- External: `rusqlite` 0.32 (`bundled`, `fts5`) and `faer` 0.24 (P0).
+
+**Contracts**: Service [x] / State [x]
+
+```rust
+pub struct StoredLog {
+    pub id: String,                 // SHA-256 of source id and text
+    pub text: String,
+    pub source: String,
+    pub occurrences: u32,
+    pub label: Label,
+    pub group: Option<String>,
+    pub truncated: bool,
+    pub vector: Vec<f32>,
+    pub encoder_revision: String,
+}
+
+pub struct Filter { pub label: Option<Label>, pub source: Option<String>, pub contains: Vec<String> }
+
+pub struct Hit { pub log: StoredLog, pub distance: f32 }
+
+pub enum StoreError {
+    IdentityMismatch { store: EncoderIdentity, given: EncoderIdentity },
+    Missing { expected_at: PathBuf },
+    Failed { detail: String },
+}
+
+impl Store {
+    pub fn create(paths: &ProjectPaths, name: &str, identity: &EncoderIdentity) -> Result<Self, StoreError>;
+    pub fn open(paths: &ProjectPaths, name: &str) -> Result<Self, StoreError>;
+    pub fn add(&mut self, logs: &[StoredLog], identity: &EncoderIdentity) -> Result<u64, StoreError>;
+    pub fn nearest(&self, vector: &[f32], identity: &EncoderIdentity, k: usize, filter: &Filter)
+        -> Result<Vec<Hit>, StoreError>;
+    pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<Vec<StoredLog>, StoreError>;
+    pub fn vectors(&self, filter: &Filter) -> Result<Vec<StoredLog>, StoreError>;   // for assessment and shift
+}
+```
+- Preconditions: `add` and `nearest` receive the identity of the encoder that produced the vectors; a difference from the store's identity returns `IdentityMismatch`.
+- Invariant: `id` is unique; adding an existing `id` adds its occurrences and leaves text, label and vector unchanged.
+
+### Decisions
+
+#### Scorer, NeighbourScorer, Triage
+
+| Field | Detail |
+|-------|--------|
+| Intent | Ratio with evidence or abstention; ranking and review budget |
+| Requirements | 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7 |
+
+**Responsibilities & Constraints**
+- `NeighbourScorer`: for a vector, take the `k` nearest stored logs with a known label within squared distance `reach`; the ratio is the share of bad labels among them; abstain when fewer than `min_support` are found. Defaults: `k` 11, `min_support` 3, `reach` 0.5.
+- Agnostic threat scoring: `Evidence` tracks whether nearest neighbors share the target log's `group` (endpoint) or span distinct endpoints. If nearest neighbors only match on a static benign endpoint without payload match, the score is not falsely suppressed.
+- The baseline scorer is adapted to the same contract and never abstains.
+- Triage ranks by the primary scorer, descending; ties keep input order.
+
+**Contracts**: Service [x]
+
+```rust
+pub enum ScorerKind { Baseline, Neighbour }
+
+pub struct Evidence {
+    pub neighbours: Vec<Hit>,
+    pub used: u32,
+    pub same_group_count: u32,
+    pub cross_group_count: u32,
+}
+
+pub enum Decision {
+    Ratio { value: f32, evidence: Option<Evidence> },
+    Abstain { found: u32, required: u32 },
+}
+
+pub trait Scorer {
+    fn kind(&self) -> ScorerKind;
+    fn score(&mut self, texts: &[&str]) -> Result<Vec<Decision>, L2dError>;
+}
+
+pub struct ScoredLog { pub text: String, pub occurrences: u32, pub by: Vec<(ScorerKind, Decision)> }
+
+pub struct TriageResult {
+    pub review: Vec<ScoredLog>,        // highest ratios, at most the budget
+    pub scored_down: Vec<ScoredLog>,
+    pub abstained: Vec<ScoredLog>,
+}
+
+pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: ScorerKind, budget: Option<usize>)
+    -> Result<TriageResult, L2dError>;
+```
+- Postcondition: every input text appears in exactly one of the three lists.
+
+#### ShiftTest
+
+| Field | Detail |
+|-------|--------|
+| Intent | Test whether two groups of vectors come from one population |
+| Requirements | 7.1, 7.2, 7.3, 7.4 |
+
+- Statistic: unbiased squared maximum mean discrepancy with a Gaussian kernel; bandwidth from the median pairwise distance of the pooled sample.
+- P-value: `(1 + count of permuted statistics ≥ observed) / (1 + permutations)`; default 199 permutations; seeded.
+- Groups larger than 2,000 are subsampled with the seed; the sizes used are reported.
+
+```rust
+pub struct ShiftResult { pub statistic: f64, pub p_value: f64, pub n_a: usize, pub n_b: usize, pub permutations: u32, pub seed: u64 }
+pub enum ShiftError { GroupTooSmall { n_a: usize, n_b: usize, minimum: usize } }   // minimum 30
+
+pub fn shift_test(a: &[Vec<f32>], b: &[Vec<f32>], permutations: u32, seed: u64) -> Result<ShiftResult, ShiftError>;
+```
+
+### Assessment and evaluation
+
+#### Assessments
+
+| Field | Detail |
+|-------|--------|
+| Intent | Reusable measurements of a vector set |
+| Requirements | 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7 |
+
+- Input is a `VectorSet`: vectors with optional labels and group keys, from a store or from two encoders on the same logs.
+- Pairwise measures run on a seeded sample of at most 5,000 vectors; the sample size is reported.
+
+```rust
+pub struct VectorSet { pub vectors: Vec<Vec<f32>>, pub labels: Option<Vec<Label>>, pub groups: Option<Vec<String>>, pub name: String }
+
+pub struct LossReport { pub explained_variance: Vec<f32>, pub intrinsic_dimension: f32, pub shortened: Vec<ShortenedResult> }
+pub struct ShortenedResult { pub dimension: u16, pub neighbour_overlap: f32, pub separability_auc: Option<f32> }
+pub struct ClusterReport { pub k: u32, pub silhouette: f32, pub separability_auc: Option<f32>, pub within_group_auc: Option<f32> }
+pub struct PropertiesReport { pub dimension: u16, pub cosine_quantiles: [f32; 5], pub norm_quantiles: [f32; 5], pub anisotropy: f32, pub duplicate_rate: f32 }
+
+pub fn assess_loss(set: &VectorSet, shorten_to: &[u16], seed: u64) -> LossReport;                    // 8.1
+pub fn neighbour_overlap(set: &VectorSet, reference: &VectorSet, k: usize) -> f32;                   // 8.2
+pub fn assess_clusters(set: &VectorSet, k: u32, seed: u64) -> ClusterReport;                         // 8.3, 8.4
+pub fn assess_properties(set: &VectorSet, seed: u64) -> PropertiesReport;                            // 8.5
+pub fn project_to_csv(set: &VectorSet, out: &Path, seed: u64) -> Result<(), L2dError>;               // 8.6
+pub fn compare(a: &VectorSet, b: &VectorSet, seed: u64) -> ComparisonReport;                         // 8.7
+```
+- Intrinsic dimension uses the TwoNN estimator. Anisotropy is the mean cosine between random pairs. Separability is the cross-validated ROC AUC of `LogReg` on the vectors. Within-group separability averages that AUC over groups holding at least 20 labelled logs with both labels, weighted by group size.
+- The projection is t-SNE; the CSV has columns `x`, `y`, `label`, `group`.
+
+#### Evaluator
+
+| Field | Detail |
+|-------|--------|
+| Intent | Measure triage quality and cost on a labelled dataset |
+| Requirements | 9.1, 9.2, 9.3, 9.4, 9.5, 9.6 |
+
+**Contracts**: Batch [x]
+
+- Trigger: `l2d eval --input <path> --adapter <name> --folds 5 --budget <n> --scorers baseline,neighbour`.
+- Input / validation: labelled, deduplicated records with group keys; records without a group key form their own group.
+- Splits: grouped K-fold; all logs of a group fall on one side. Each fold fits the baseline, optionally prepares the encoder and fills a temporary store on the fitting side only, then scores the test side. This enforces that testing strictly evaluates cross-endpoint generalization to prevent hardcoding training-set site topology.
+- Metrics per scorer over the pooled test predictions: ROC AUC (overall and cross-endpoint), average precision, recall at budget, abstention rate, and the same metrics on non-abstained logs.
+- Cost per scorer: logs per second, time to first result, process CPU seconds as the energy proxy.
+- Output / destination: `reports/<date>-<dataset>-<encoder>.json` and `.md`.
+- Idempotency & recovery: a rerun with the same seed overwrites the same report files; temporary stores are removed at the end.
+
+```rust
+pub struct ScorerResult {
+    pub kind: ScorerKind,
+    pub roc_auc: f64,
+    pub cross_endpoint_roc_auc: f64,
+    pub average_precision: f64,
+    pub recall_at_budget: f64,
+    pub abstention_rate: f64,
+    pub roc_auc_non_abstained: f64,
+    pub cost: CostMeasure,
+}
+pub struct CostMeasure { pub logs_per_second: f64, pub first_result_ms: u64, pub cpu_seconds: f64 }
+pub struct EvaluationReport {
+    pub date: String, pub dataset: InputSummary, pub encoder: Option<EncoderIdentity>,
+    pub settings: serde_json::Value, pub scorers: Vec<ScorerResult>,
+    pub comparison: Option<Comparison>,       // which scorer has the higher ROC AUC, and the difference
+}
+```
+
+### Command line
+
+#### CLI
+
+| Field | Detail |
+|-------|--------|
+| Intent | One entry point for every operation |
+| Requirements | 7.5, 10.6, 10.7 |
+
+**Contracts**: API [x]
+
+| Command | Purpose | Main options | Output |
+|---------|---------|--------------|--------|
+| `l2d ingest` | Read and summarize an input | `--input`, `--adapter` | `InputSummary` |
+| `l2d baseline fit` / `score` | Fit or apply the baseline | `--input`, `--name` | identity or ratios |
+| `l2d encoder train` / `encode` / `info` | Train, encode, show identity | `--seed`, `--allow-cpu` | identity, `RunRecord` |
+| `l2d store add` / `search` | Fill and query a store | `--store`, `--text`, `--like`, `--label`, `--source`, `--k` | counts or hits |
+| `l2d triage` | Rank logs | `--store`, `--baseline`, `--budget`, `--primary` | `TriageResult` |
+| `l2d shift` | Compare two groups | `--a`, `--b`, `--permutations`, `--seed` | `ShiftResult` |
+| `l2d assess` | Vector-set measurements | `--store`, `--kind`, `--reference`, `--out` | reports |
+| `l2d eval` | Evaluation report | `--folds`, `--budget`, `--scorers` | `EvaluationReport` |
+| `l2d runtime check` | Runtime files, NPU, driver | none | status list |
+
+- Every command accepts `--json`; JSON goes to standard output, diagnostics to standard error.
+- Errors print one line naming what failed and exit with the code from the error mapping.
+- The human output of `l2d shift` states that the p-value is a test result and not the probability that a shift occurred.
+
+## Data Models
+
+### Domain Model
+- **Log**: a distinct text with occurrences, label, optional group, source.
+- **Encoder**: an immutable package identified by name, revision and dimension. Vectors are meaningful only together with their encoder identity.
+- **Store**: logs with vectors of exactly one encoder identity.
+- **Scorer**: produces a `Decision` per log. Baseline scorers are identified by name and revision.
+- **Run record**: what was run, on what, with which settings and result.
+
+Invariants: a vector is never compared with vectors of another identity; a package's revision always matches its files; triage never changes stored logs.
+
+### Physical Data Model
+
+Store table `logs`:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | string | Primary identity, unique |
+| `text` | string | N-gram index for containment |
+| `source` | string | Bitmap index |
+| `occurrences` | uint32 | |
+| `label` | string (`good`, `bad`, `unknown`) | Bitmap index |
+| `group` | string, nullable | |
+| `truncated` | bool | |
+| `vector` | fixed-size list of float32, length = dimension | No approximate index |
+| `encoder_revision` | string | Equals the store's identity |
+
+Store table `meta`: one row with encoder name, revision, dimension, creation time, tool version.
+
+Encoder package `encoder.json`: identity, architecture description, calibration ranges, quantization scheme, file hashes.
+
+## Error Handling
+
+### Error Strategy
+- Validate at the edges: adapters, package open, store open, session open. Fail before doing work.
+- Each crate has its own error enum; `l2d-cli` maps them to `L2dError` and an exit code.
+- Partial input is tolerated (skipped records are counted); partial output is not (packages and reports appear only complete).
+
+### Error Categories and Responses
+- **Analyst errors** (exit 2): unknown adapter, bad option values, unreadable file format. The message names the option or the record position.
+- **Missing items** (exit 3): encoder, baseline, store, dataset or runtime DLL not found. The message names the item and the expected location.
+- **Refusals** (exit 4): too few labels, group too small, encoder identity mismatch, NPU unavailable without `--allow-cpu`, package revision mismatch. The message states the rule and the observed values.
+- **Runtime failures** (exit 5): provider or database errors. The underlying message is included.
+
+### Monitoring
+Run records are written next to the artifact they describe (`training-record.json` in the package, encode and evaluation records in `reports/`). There is no background monitoring.
+
+## Testing Strategy
+
+### Unit Tests
+- `CharHasher` and `LogReg`: equal input gives bit-equal weights; fitting refuses 9 labelled logs and a 10-log set with 4 of one label (2.3, 2.4).
+- Input dedup: duplicate texts collapse with correct occurrence counts; an unreadable row is skipped and reported with its position; conflicting labels become unknown (1.3, 1.4).
+- `ByteCodec`: a 300-byte text sets the truncated flag, a 256-byte text does not (1.5).
+- `OnnxWriter` and `Quantizer`: the written float and 8-bit files load in the runtime's CPU provider; 8-bit outputs agree with float outputs at cosine ≥ 0.98 on 256 random inputs.
+- `shift_test`: identical groups give p > 0.05, shifted Gaussians give p < 0.01, the same seed gives the same result, 29 logs are refused (7.1–7.4).
+- `NeighbourScorer`: ratio equals the bad share of neighbours; abstains below minimum support (6.1–6.3).
+
+### Integration Tests
+- Package round trip: train on the fixture, write, reopen; a modified byte in `model.int8.onnx` makes `open` refuse (3.2).
+- Interrupted training: a failure injected before the rename leaves the encoder directory unchanged (3.6).
+- Store: add, restart, search by vector, by text, combined, and restricted by label; a vector from another identity is refused with both identities named (5.1–5.7).
+- Triage on the fixture: every text lands in exactly one list; the budget is respected; stored rows are unchanged afterwards (6.4–6.7).
+- Grouped split: no group key appears on both sides of any fold (9.2).
+
+### End-to-End Tests
+- `l2d baseline fit` then `l2d triage --json` on the fixture without runtime DLLs present: succeeds and names the baseline scorer (2.5).
+- `l2d encoder train`, `store add`, `triage`, `eval` on the fixture with `--allow-cpu`: report files exist with dataset hash, encoder identity and both scorers (9.1, 9.6).
+- `l2d encoder encode` without `--allow-cpu` and with the provider DLL removed: exit code 4 and a message naming the reason (4.4).
+- `l2d store search` against a missing store: exit code 3 and the expected path (10.5).
+
+### Performance and Hardware Tests (reference host, run on demand)
+- NPU throughput: 10,000 distinct fixture-style logs at ≥ 1,000 logs/s; run record shows NPU placement (4.2, 4.3).
+- NPU against CPU: cosine ≥ 0.99 for every vector of 1,000 logs (4.6).
+- Readiness: second `EncoderSession::open` within 30 s (4.7).
+- Evaluation on HTTP CSIC 2010 with grouped folds; the report states which scorer has the higher ROC AUC (9.5, 9.7).
+- Repeatability: two training runs with one seed differ by at most 0.01 ROC AUC (3.5).
+
+## Security Considerations
+- Log data can contain attack payloads. The tool treats log text as data only: it is never executed, interpolated into shell commands, or used to build file paths.
+- Text search terms are passed to the store as escaped literals, never concatenated into filter expressions unescaped.
+- No network access; no crate with network features is linked (10.2).
+- Runtime DLLs are loaded only from `runtime/ryzenai/` by absolute path.
+
+## Performance & Scalability
+- Encoding: fixed batch of 32, target ≥ 1,000 logs/s on the NPU (measured headroom: about 36,700 logs/s with random weights).
+- Store: exact search over up to one million 128-dimension vectors (about 512 MB of vectors). Above that, an approximate index is a revalidation trigger.
+- Pairwise assessments sample at most 5,000 vectors; the shift test at most 2,000 per group.
+- Evaluation trains one encoder per fold; training time on the CPU backend is measured in the first training task and reported.
+
+## Implementation Order Constraints
+1. Runtime spike: load AMD's DLL from Rust, register the Vitis AI provider, run the spike's 8-bit model, read placement. Fix the `ort` feature level and the DLL list. If this fails, stop and return to design.
+2. `lancedb` build check on Windows.
+3. `l2d-core` and `l2d-baseline` (no hardware dependency) can proceed in parallel with 1 and 2.

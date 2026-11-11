@@ -22,7 +22,7 @@ the date.
 
 | Spec | Phase |
 | --- | --- |
-| [npu-log-decision](.kiro/specs/npu-log-decision/requirements.md) | Initialized |
+| [npu-log-decision](.kiro/specs/npu-log-decision/requirements.md) | Requirements and [design](.kiro/specs/npu-log-decision/design.md) approved; [tasks](.kiro/specs/npu-log-decision/tasks.md) generated, awaiting approval |
 
 ## Layout
 

@@ -94,6 +94,8 @@ agreed margin of the default. The margin is not set yet.
 | 2026-11-11 | Document created. Default measured at about 3 logs/s, 768 dimensions. No alternative measured. |
 | 2026-11-11 | Benchmark run, see [speed and separability](2026-11-11-embedding-speed-benchmark.md). The NPU default is rejected on speed: 2.3 logs/s on real requests, unchanged by batching, concurrency or power mode. The small CPU models were also measured and separate attacks worse than a character n-gram baseline. The position and order of work above are superseded; the open question is now the representation, not the model size. |
 
+| 2026-11-11 | Direction agreed: character-level features for the baseline ratio; a small encoder trained on log text as the research question; larger models only later in the triage flow. Spike: a 1M-parameter byte-level convolutional encoder (random weights) runs at about 36,700 logs/s through the Vitis AI provider. Quality untested. |
+
 ## Sources
 
 - FastFlowLM EmbeddingGemma model card: https://fastflow-page.pages.dev/docs/models/embeddinggemma

@@ -99,6 +99,42 @@ Three ways forward, to be decided:
 3. Drop the NPU requirement for embedding and reserve the NPU for a later
    language-model step, such as explaining a triage decision.
 
+## Follow-up: a small encoder of our own runs fast on the NPU
+
+Decision after the results above: character-level features give the baseline
+ratio, and a small encoder trained on log text is the research question. The
+blocker was whether such an encoder can run on the NPU at all. It can.
+
+Spike: a convolutional encoder over bytes, 976,000 parameters, random weights.
+Input is 256 bytes per log, each byte looked up in a 64-value table on the CPU
+side; output is a 128-dimension vector. Exported to ONNX with fixed shapes,
+quantized to 8-bit, run through ONNX Runtime 1.30 with the Vitis AI provider
+(`onnxruntime_vitisai`, `voe` 1.9.0 from the Ryzen AI environment in
+`../memguard_alpha/tools/oga-venv`).
+
+| Run, 32 logs per call, 15 s | Logs/s | Process CPU |
+| --- | ---: | ---: |
+| Vitis AI provider | 36,713 | 27 % of one core |
+| CPU provider, same 8-bit model | 4,467 | 484 % of one core |
+
+- One log per call: about 1,800 to 2,500 logs/s on the Vitis AI provider.
+- First load including compilation took 3 to 5 seconds.
+- Outputs match the CPU run of the same model (cosine 1.000 for one log per
+  call, at least 0.992 across a batch of 32).
+- Placement: the provider's partition log names the NPU target and sends only
+  the final dequantize step to the CPU, and the work left the CPU (27 % against
+  484 %). No GPU engine was busy. A direct NPU utilization reading was not
+  obtained.
+
+What this does not show: quality. The weights were random. Whether a trained
+encoder of this shape beats the character baseline is the open research
+question. Training itself cannot run on the NPU; it needs the CPU, the
+integrated GPU or another machine.
+
+Open for the Rust implementation: whether the Rust `ort` crate can load this
+provider. If not, the encoder runs behind a small local service, as FastFlowLM
+does today.
+
 ## Reproduction
 
 One-off Python scripts run with `uv` (not part of the repository): a CPU run
