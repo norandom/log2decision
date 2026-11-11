@@ -11,6 +11,12 @@
 # Rust
 /target/
 
+# Runtime directories: stores, AMD runtime files, provider cache, generated reports
+/stores/
+/runtime/ryzenai/
+/runtime/cache/
+/reports/
+
 # Local environment
 .env
 .venv/

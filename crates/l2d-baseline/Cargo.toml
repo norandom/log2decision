@@ -1,0 +1,10 @@
+[package]
+name = "l2d-baseline"
+description = "Baseline scorer: character n-gram hashing and logistic regression."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+l2d-core.workspace = true

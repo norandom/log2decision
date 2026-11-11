@@ -1,0 +1,17 @@
+[package]
+name = "l2d-cli"
+description = "The `l2d` command-line binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "l2d"
+path = "src/main.rs"
+
+[dependencies]
+l2d-core.workspace = true
+l2d-decide.workspace = true
+l2d-assess.workspace = true
+l2d-eval.workspace = true

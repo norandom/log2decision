@@ -1,0 +1,57 @@
+# log2decision workspace.
+#
+# Dependency direction between crates is fixed (design.md, "Architecture Integration"):
+#   l2d-core -> l2d-baseline, l2d-encoder, l2d-store -> l2d-train, l2d-decide
+#            -> l2d-assess -> l2d-eval -> l2d-cli
+# A crate imports only from crates earlier in this order.
+#
+# Build output must stay off the repository. Set CARGO_TARGET_DIR (reference host:
+# D:\BuildArtifacts\cargo-target) before building. The path is deliberately not hard-coded
+# in a .cargo/config.toml so the workspace still builds on other machines; instead the
+# l2d-core build script prints a warning when the build output lands inside the repository.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/l2d-core",
+    "crates/l2d-baseline",
+    "crates/l2d-encoder",
+    "crates/l2d-store",
+    "crates/l2d-train",
+    "crates/l2d-decide",
+    "crates/l2d-assess",
+    "crates/l2d-eval",
+    "crates/l2d-cli",
+]
+# l2d-train (offline training, later `burn`) is optional: it is left out of the default
+# build and is only built with `--workspace` or `-p l2d-train`.
+default-members = [
+    "crates/l2d-core",
+    "crates/l2d-baseline",
+    "crates/l2d-encoder",
+    "crates/l2d-store",
+    "crates/l2d-decide",
+    "crates/l2d-assess",
+    "crates/l2d-eval",
+    "crates/l2d-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+l2d-core = { path = "crates/l2d-core" }
+l2d-baseline = { path = "crates/l2d-baseline" }
+l2d-encoder = { path = "crates/l2d-encoder" }
+l2d-store = { path = "crates/l2d-store" }
+l2d-train = { path = "crates/l2d-train" }
+l2d-decide = { path = "crates/l2d-decide" }
+l2d-assess = { path = "crates/l2d-assess" }
+l2d-eval = { path = "crates/l2d-eval" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

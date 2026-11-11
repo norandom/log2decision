@@ -1,0 +1,13 @@
+[package]
+name = "l2d-decide"
+description = "Decision operations: ratio with evidence and abstention, triage, population shift."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+l2d-core.workspace = true
+l2d-baseline.workspace = true
+l2d-encoder.workspace = true
+l2d-store.workspace = true

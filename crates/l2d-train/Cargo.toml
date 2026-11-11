@@ -1,0 +1,11 @@
+[package]
+name = "l2d-train"
+description = "Optional offline encoder training. Not part of the default workspace build."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+l2d-core.workspace = true
+l2d-encoder.workspace = true

@@ -2,7 +2,7 @@
 
 ## Milestone 1: Working Baseline Triage & Core Infrastructure
 
-- [ ] 1.1 Set up the Rust workspace and the shared core types
+- [x] 1.1 Set up the Rust workspace and the shared core types
   - Create the Cargo workspace with crates: `l2d-core`, `l2d-baseline`, `l2d-store`, `l2d-decide`, `l2d-assess`, `l2d-eval`, `l2d-encoder`, `l2d-cli`, and optional `l2d-train`
   - Define shared record, label (`Good`, `Bad`, `Unknown`), encoder identity, run record, and error types (`L2dError`) with exit-code mapping
   - Configure project paths for models (`models/`), data (`data/`), stores (`stores/`), runtime files (`runtime/ryzenai/`), and reports (`reports/`)
@@ -269,3 +269,12 @@
   - Export trained weights into `EncoderPackage` format
   - Done when Burn model output matches exported model output within 1e-4
   - _Requirements: 3.1, 3.3, 3.4_
+
+## Implementation Notes
+
+- 1.1: Build output relies on the host's `CARGO_TARGET_DIR`; `l2d-core/build.rs` only warns if output lands in the repo. Run `cargo fmt --all` before each commit.
+- 1.1: `Placement` and `PlacementSource` live in `l2d-core` (the core `RunRecord` needs them); `l2d-encoder` re-exports them and must not redefine them.
+- 1.1: `Label` serializes in lower case (`"good"`, `"bad"`, `"unknown"`); keep the CLI JSON consistent with that.
+- 1.1: `l2d-train` is a workspace member outside `default-members`; `l2d-cli` and `l2d-eval` do not depend on it.
+- 1.1: Store location is undecided in the design (`stores/<name>.db` at the technology stack, `stores/<name>/` in the file plan). Task 1.8 uses `stores/<name>.db` and adds the path helper to `ProjectPaths`.
+- 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).

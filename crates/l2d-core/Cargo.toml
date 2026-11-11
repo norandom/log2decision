@@ -1,0 +1,13 @@
+[package]
+name = "l2d-core"
+description = "Shared record, label, identity, run-record, path, and error types."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
