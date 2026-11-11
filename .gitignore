@@ -1,0 +1,17 @@
+# Thesis reference copy (own repository: https://github.com/norandom/log2ml)
+/log2ml/
+
+# Model weights
+/models/
+
+# Datasets: only the registry is tracked
+/data/*
+!/data/README.md
+
+# Rust
+/target/
+
+# Local environment
+.env
+.venv/
+__pycache__/
