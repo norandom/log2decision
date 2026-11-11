@@ -16,7 +16,7 @@
   - Done when `l2d --help` lists subcommands, stub exits non-zero with informative error, and tests verify fixture properties
   - _Requirements: 10.6, 10.7_
 
-- [ ] 1.3 Read, deduplicate, and summarize text logs and labelled datasets
+- [x] 1.3 Read, deduplicate, and summarize text logs and labelled datasets
   - Implement `InputAdapter` in `l2d-core` for plain line-based logs and labelled CSV/JSONL with configurable text, label, and group columns
   - Exact text deduplication: keep occurrence counts and first position; conflicting labels become `Label::Unknown`
   - Skip malformed records and report their count and positions in `InputSummary`
@@ -281,4 +281,10 @@
 - 1.2: Fixture `tests/fixtures/mini-labelled.csv` (header `text,label,group`): 200 data rows = 199 well-formed (115 good, 84 bad) + 1 malformed at data row 121 (two fields only, group missing); 169 distinct texts (96 good-only, 72 bad-only, 1 conflicting); 27 texts repeat; 8 group keys `METHOD /path`, each with 12 good and 9 bad distinct texts. Exact counts are pinned by `crates/l2d-cli/tests/fixture.rs`.
 - 1.2: The malformed row is malformed only by field count. A reader must treat a wrong field count as a skipped record (expected: 200 read, 1 skipped at position 121, 169 distinct, 1 unknown label); a lenient CSV reader would wrongly accept it.
 - 1.2: One group key holds only 21 to 22 distinct texts, below the 30 minimum of the shift test; fixture shift tests must compare good against bad, not group against group.
+- 1.3: Input code is in `l2d-core`: `input.rs` (`InputAdapter`, `Dedup`, `read_source`, `content_sha256`, `strip_bom`, `split_lines`) and `adapters/{lines,labelled}.rs`. New adapters reuse `Dedup` and `read_source`; they do not reimplement deduplication.
+- 1.3: Position is the 1-based record index: line number for lines and JSONL, data-row index without the header for CSV. CSV blank lines take no position, so `records` counts CSV data rows, not file lines; `l2d ingest` must not present it as a line count.
+- 1.3: Labels: `good`/`bad` case-insensitive; empty, `unknown`, null or absent means unlabelled and never conflicts; any other value skips the record. On duplicate text the first group key is kept. Any read failure maps to `Missing`.
+- 1.3: `LabelledAdapter::new` defaults the label column to `Some("label")`; unlabelled CSV/JSONL needs `label_column = None` set by the caller (1.11).
+- 1.3: A CSV data row starting with an unbalanced quote absorbs the following rows into one skipped record (standard CSV behaviour). Adapters for real datasets must check the total row count against the dataset's known size.
+- 1.3: Open follow-ups, not blocking: no test pins that the content hash covers raw bytes including a byte-order mark; input tests leave scratch directories in the system temp folder.
 - 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).

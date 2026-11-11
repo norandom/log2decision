@@ -53,6 +53,8 @@ l2d-assess = { path = "crates/l2d-assess" }
 l2d-eval = { path = "crates/l2d-eval" }
 
 clap = { version = "4", features = ["derive"] }
+csv = "1"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
