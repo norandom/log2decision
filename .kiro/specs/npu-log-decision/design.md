@@ -49,7 +49,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 ### Allowed Dependencies
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
 - Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (features `bundled`, `fts5`), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
-- `polars` for data frames (default features off; only the readers and conversions needed: CSV, JSON, lazy queries, `ndarray` conversion). Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
+- `polars` for data frames, pinned to `=0.52.0` with default features off: facade features `lazy` and `ndarray` only, and the CSV and JSON readers enabled on `polars-io` directly. The facade's own `csv` and `json` features, and releases from 0.53 on, link network client crates and are not used. Other crates import Polars only through `l2d_core::polars`. Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
 - `conformal-prediction` for the conformal calibration layer.
 - `argmin` and `ndarray`, the optimizer and array types underneath `linfa-logistic`, used directly where `linfa-logistic` cannot take sparse input.
 - `burn` 0.22.1 (confined to optional training module `l2d-train`).
@@ -415,7 +415,7 @@ pub struct InputSummary {
 }
 
 pub trait InputAdapter {
-    fn read(&self, path: &Path) -> Result<(Vec<LogRecord>, InputSummary), L2dError>;
+    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError>;   // LogsFrame owns the Polars logs frame and gives LogRecord row views
 }
 ```
 - Preconditions: the path exists and is readable; otherwise `L2dError::Missing`.

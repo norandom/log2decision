@@ -4,14 +4,22 @@
 //! space. An empty value, `unknown`, a JSON `null` or an absent JSON key means the
 //! record is unlabelled ([`Label::Unknown`]). Any other value makes the record
 //! unreadable: it is skipped and reported, never guessed.
+//!
+//! A validation pass finds the unreadable records; Polars parses the accepted ones. The
+//! same functions (`parse_label`, `non_empty`) judge a raw value in the validation
+//! pass and turn the value Polars parsed into the frame value.
 
 use std::path::Path;
 
+use polars::prelude::{Column, DataFrame, DataType, IntoColumn};
 use serde_json::Value;
 
 use crate::error::L2dError;
-use crate::input::{Dedup, InputAdapter, read_source, split_lines, strip_bom};
-use crate::types::{InputSummary, Label, LogRecord};
+use crate::input::{
+    Accepted, CsvSource, Dedup, InputAdapter, csv_field_name, parse_csv_records, parse_json_lines,
+    read_source, row_digest, split_lines, string_column, strip_bom,
+};
+use crate::types::{InputSummary, Label, LogsFrame};
 
 /// The file format of a labelled dataset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,14 +53,16 @@ impl LabelledFormat {
 /// Reads a labelled CSV or JSONL dataset.
 ///
 /// The text column is required. The label and group columns are optional; without a
-/// label column every record is [`Label::Unknown`], without a group column no record has
-/// a group. A configured column that the source does not have is
-/// [`L2dError::InvalidInput`]: for CSV when the header lacks it, for JSONL when no
-/// record carries the key.
+/// label column every row is `unknown`, without a group column no row has a group. A
+/// configured column that the source does not have is [`L2dError::InvalidInput`]: for
+/// CSV when the header lacks it, for JSONL when no record carries the key.
 ///
 /// A record is skipped and reported when it is malformed (CSV: field count differs from
 /// the header; JSONL: not a JSON object), when its text is empty, absent or not a
-/// string, or when its label is not one of the accepted values.
+/// string, or when its label is not one of the accepted values. A JSONL record is also
+/// skipped when it repeats the text, label or group key, because JSON readers differ on
+/// which value counts, and when Polars cannot parse a line that is valid JSON (for
+/// example an integer beyond 64 bits).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelledAdapter {
     pub format: LabelledFormat,
@@ -88,19 +98,9 @@ impl LabelledAdapter {
         self
     }
 
-    fn read_csv(&self, bytes: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            // Rows of any length are read so that a wrong field count is reported as a
-            // skipped record with its position instead of ending the read.
-            .flexible(true)
-            .from_reader(bytes);
-        let headers = reader
-            .byte_headers()
-            .map_err(|error| L2dError::InvalidInput {
-                detail: format!("unreadable CSV header: {error}"),
-            })?
-            .clone();
+    fn read_csv(&self, content: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
+        let source = CsvSource::open(content)?;
+        let headers = source.headers().clone();
         if headers.is_empty() {
             return Err(L2dError::InvalidInput {
                 detail: "the CSV file has no header row".into(),
@@ -127,83 +127,60 @@ impl LabelledAdapter {
             None => None,
         };
 
-        let mut row = csv::ByteRecord::new();
-        let mut position = 0u64;
-        loop {
-            let more = reader
-                .read_byte_record(&mut row)
-                .map_err(|error| L2dError::Runtime {
-                    detail: format!("reading CSV data row {}: {error}", position + 1),
-                })?;
-            if !more {
-                return Ok(());
-            }
-            position += 1;
-            if row.len() != headers.len() {
-                let line = row
-                    .position()
-                    .map(|at| format!(" (line {})", at.line()))
-                    .unwrap_or_default();
-                dedup.skip(
-                    position,
-                    format!(
-                        "expected {} fields, found {}{line}",
-                        headers.len(),
-                        row.len()
-                    ),
-                );
-                continue;
-            }
+        let accepted = source.validate(true, dedup, |row| {
             let field = |at: usize| std::str::from_utf8(&row[at]);
-            let Ok(text) = field(text_at) else {
-                dedup.skip(position, "text is not valid UTF-8");
-                continue;
-            };
+            let text = field(text_at).map_err(|_| "text is not valid UTF-8")?;
             if text.is_empty() {
-                dedup.skip(position, "empty text");
-                continue;
+                return Err("empty text".into());
             }
             let label = match label_at.map(field) {
                 None => Label::Unknown,
-                Some(Ok(raw)) => match parse_label(raw) {
-                    Some(label) => label,
-                    None => {
-                        dedup.skip(position, UNKNOWN_LABEL_VALUE);
-                        continue;
-                    }
-                },
-                Some(Err(_)) => {
-                    dedup.skip(position, "label is not valid UTF-8");
-                    continue;
-                }
+                Some(Ok(raw)) => parse_label(raw).ok_or(UNKNOWN_LABEL_VALUE)?,
+                Some(Err(_)) => return Err("label is not valid UTF-8".into()),
             };
             let group = match group_at.map(field) {
                 None => None,
                 Some(Ok(raw)) => non_empty(raw),
-                Some(Err(_)) => {
-                    dedup.skip(position, "group is not valid UTF-8");
-                    continue;
-                }
+                Some(Err(_)) => return Err("group is not valid UTF-8".into()),
             };
-            dedup.accept(position, text.to_string(), label, group);
+            Ok((row_digest(text, label, group), label))
+        })?;
+        if accepted.is_empty() {
+            return Ok(());
         }
+
+        let used: Vec<usize> = [Some(text_at), label_at, group_at]
+            .into_iter()
+            .flatten()
+            .collect();
+        let parsed = parse_csv_records(accepted.raw(), headers.len(), &used, b',', Some(b'"'))?;
+        let name = |at: Option<usize>| at.map(csv_field_name);
+        push_parsed(
+            dedup,
+            accepted,
+            &parsed,
+            &name(Some(text_at)),
+            &name(label_at),
+            &name(group_at),
+        )
     }
 
-    fn read_jsonl(&self, bytes: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
+    fn read_jsonl(&self, content: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
+        let mut candidates: Vec<Candidate<'_>> = Vec::new();
         let mut objects = 0u64;
         let mut text_seen = false;
         let mut label_seen = false;
         let mut group_seen = false;
 
-        for (index, line) in split_lines(bytes).enumerate() {
+        for (index, line) in split_lines(content).enumerate() {
             let position = index as u64 + 1;
             if line.iter().all(u8::is_ascii_whitespace) {
                 dedup.skip(position, "empty line");
                 continue;
             }
-            let object = match serde_json::from_slice::<Value>(line) {
-                Ok(Value::Object(object)) => object,
-                Ok(_) => {
+            let (object, repeated) = match serde_json::from_slice::<JsonLine>(line) {
+                Ok(JsonLine::Object { fields, repeated }) => (fields, repeated),
+                Ok(JsonLine::Other) => {
                     dedup.skip(position, "line is not a JSON object");
                     continue;
                 }
@@ -220,6 +197,18 @@ impl LabelledAdapter {
             text_seen |= text.is_some();
             label_seen |= label.is_some();
             group_seen |= group.is_some();
+
+            // JSON readers differ on which of two values of one key they keep, so a
+            // record that repeats a configured key is not guessed at.
+            let configured = [
+                Some(&self.text_column),
+                self.label_column.as_ref(),
+                self.group_column.as_ref(),
+            ];
+            if let Some(key) = repeated.iter().find(|key| configured.contains(&Some(*key))) {
+                dedup.skip(position, format!("key '{key}' occurs more than once"));
+                continue;
+            }
 
             let text = match text {
                 Some(Value::String(text)) if !text.is_empty() => text,
@@ -258,7 +247,12 @@ impl LabelledAdapter {
                     continue;
                 }
             };
-            dedup.accept(position, text.clone(), label, group);
+            candidates.push(Candidate {
+                position,
+                digest: row_digest(text, label, group),
+                label,
+                line,
+            });
         }
 
         if objects > 0 {
@@ -277,12 +271,64 @@ impl LabelledAdapter {
                 }
             }
         }
-        Ok(())
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let keys: Vec<&str> = [
+            Some(&self.text_column),
+            self.label_column.as_ref(),
+            self.group_column.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+        let mut accepted = accepted_lines(&candidates);
+        let parsed = match parse_json_lines(accepted.raw(), &keys) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                // Polars refuses a line that is valid JSON for the validation pass, for
+                // example an integer beyond 64 bits under a key that is not even read.
+                // Such a line is a record that cannot be read: it is skipped and reported,
+                // and the other lines are parsed again without it.
+                candidates.retain(|candidate| {
+                    let alone = accepted_lines(std::slice::from_ref(candidate));
+                    match parse_json_lines(alone.raw(), &keys) {
+                        Ok(_) => true,
+                        Err(error) => {
+                            let reason = match error {
+                                L2dError::Runtime { detail } => detail,
+                                other => other.to_string(),
+                            };
+                            dedup.skip(
+                                candidate.position,
+                                format!("line cannot be read by Polars: {reason}"),
+                            );
+                            false
+                        }
+                    }
+                });
+                if candidates.is_empty() {
+                    return Ok(());
+                }
+                accepted = accepted_lines(&candidates);
+                parse_json_lines(accepted.raw(), &keys)?
+            }
+        };
+        push_parsed(
+            dedup,
+            accepted,
+            &parsed,
+            &Some(self.text_column.clone()),
+            &self.label_column,
+            &self.group_column,
+        )
     }
 }
 
 impl InputAdapter for LabelledAdapter {
-    fn read(&self, path: &Path) -> Result<(Vec<LogRecord>, InputSummary), L2dError> {
+    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError> {
         let bytes = read_source(path)?;
         let content = strip_bom(&bytes);
         let mut dedup = Dedup::new();
@@ -290,8 +336,148 @@ impl InputAdapter for LabelledAdapter {
             LabelledFormat::Csv => self.read_csv(content, &mut dedup)?,
             LabelledFormat::Jsonl => self.read_jsonl(content, &mut dedup)?,
         }
-        Ok(dedup.finish(path, &bytes))
+        dedup.finish(path, &bytes)
     }
+}
+
+/// A JSON line the validation pass accepted.
+struct Candidate<'a> {
+    position: u64,
+    digest: u64,
+    label: Label,
+    line: &'a [u8],
+}
+
+/// The batch of candidates for Polars to parse.
+fn accepted_lines(candidates: &[Candidate<'_>]) -> Accepted {
+    let mut accepted = Accepted::new();
+    for candidate in candidates {
+        accepted.record(candidate.position, candidate.digest, candidate.label);
+        accepted.push_raw(candidate.line);
+        accepted.push_raw(b"\n");
+    }
+    accepted
+}
+
+/// One JSON line as the validation pass reads it.
+enum JsonLine {
+    /// An object: its keys with the last value of each, and the keys that occur more
+    /// than once.
+    Object {
+        fields: serde_json::Map<String, Value>,
+        repeated: Vec<String>,
+    },
+    /// Any other JSON value.
+    Other,
+}
+
+impl<'de> serde::Deserialize<'de> for JsonLine {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct LineVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LineVisitor {
+            type Value = JsonLine;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<JsonLine, A::Error> {
+                let mut fields = serde_json::Map::new();
+                let mut repeated = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value: Value = map.next_value()?;
+                    if fields.insert(key.clone(), value).is_some() {
+                        repeated.push(key);
+                    }
+                }
+                Ok(JsonLine::Object { fields, repeated })
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<JsonLine, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+
+            fn visit_unit<E>(self) -> Result<JsonLine, E> {
+                Ok(JsonLine::Other)
+            }
+        }
+
+        deserializer.deserialize_any(LineVisitor)
+    }
+}
+
+/// Takes the text, label and group columns out of what Polars parsed and hands them to
+/// the deduplication, which checks them against the accepted records.
+fn push_parsed(
+    dedup: &mut Dedup,
+    accepted: Accepted,
+    parsed: &DataFrame,
+    text: &Option<String>,
+    label: &Option<String>,
+    group: &Option<String>,
+) -> Result<(), L2dError> {
+    let rows = parsed.height();
+    let text = match text {
+        Some(name) => string_column(parsed, name)?.clone().into_column(),
+        None => Column::full_null("text".into(), rows, &DataType::String),
+    };
+    let label = match label {
+        // A value the validation pass would have refused is kept as it is, so that the
+        // agreement check reports it.
+        Some(name) => Column::new(
+            "label".into(),
+            string_column(parsed, name)?
+                .iter()
+                .map(|raw| {
+                    let raw = raw.unwrap_or_default();
+                    match parse_label(raw) {
+                        Some(label) => label.as_str(),
+                        None => raw,
+                    }
+                })
+                .collect::<Vec<&str>>(),
+        ),
+        None => Column::new("label".into(), vec![Label::Unknown.as_str(); rows]),
+    };
+    let group = match group {
+        Some(name) => Column::new(
+            "group".into(),
+            string_column(parsed, name)?
+                .iter()
+                .map(|raw| raw.and_then(non_empty))
+                .collect::<Vec<Option<&str>>>(),
+        ),
+        None => Column::full_null("group".into(), rows, &DataType::String),
+    };
+    dedup.push(accepted, text, label, group)
 }
 
 const UNKNOWN_LABEL_VALUE: &str = "label is not good, bad or unknown";
@@ -310,6 +496,7 @@ fn parse_label(raw: &str) -> Option<Label> {
     }
 }
 
-fn non_empty(raw: &str) -> Option<String> {
-    (!raw.is_empty()).then(|| raw.to_string())
+/// `raw` as a group key; an empty value is no group.
+fn non_empty(raw: &str) -> Option<&str> {
+    (!raw.is_empty()).then_some(raw)
 }

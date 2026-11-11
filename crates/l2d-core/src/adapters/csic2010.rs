@@ -30,13 +30,22 @@
 //! that delimiter: the query string and the body. The adapter skips a row whose method
 //! contains white space or `?`, or whose URL contains a line break, so the split is
 //! unambiguous for every text it returns. [`split_routing`] performs the split and
-//! [`group_key`] turns the routing part into the group key.
+//! [`group_key`] takes the group key out of the routing part.
 //!
 //! # Group key
 //!
-//! `METHOD /path`: no scheme, host, query string, body or protocol version, for example
-//! `GET /tienda1/publico/anadir.jsp`. All requests to one endpoint share one key, whatever
-//! their payload and label, which is what grouped splits need.
+//! The URL path alone: no method, scheme, host, query string, body or protocol version,
+//! for example `/tienda1/publico/anadir.jsp`. Paths are not normalized or case-folded.
+//! All requests to one path share one key, whatever their method, payload and label,
+//! which is what grouped splits need. The method is left out because the dataset repeats
+//! the same payload as a GET query string and as a POST body; with the method in the key
+//! the two copies could fall on different sides of a split.
+//!
+//! # Reading
+//!
+//! A validation pass over the raw rows finds the unreadable ones; Polars parses the
+//! accepted rows. One function (`text_and_label`) both judges a raw row in the
+//! validation pass and builds the text and label from the fields Polars parsed.
 //!
 //! # Untrusted data
 //!
@@ -45,10 +54,15 @@
 
 use std::path::{Path, PathBuf};
 
+use polars::prelude::Column;
+
 use crate::error::L2dError;
-use crate::input::{Dedup, InputAdapter, read_source, strip_bom};
+use crate::input::{
+    CsvSource, Dedup, InputAdapter, csv_field_name, parse_csv_records, read_source, row_digest,
+    string_column, strip_bom,
+};
 use crate::paths::ProjectPaths;
-use crate::types::{InputSummary, Label, LogRecord};
+use crate::types::{InputSummary, Label, LogsFrame};
 
 /// The dataset's directory below the project's data directory.
 pub const CSIC2010_DIR_NAME: &str = "csic-2010";
@@ -60,8 +74,8 @@ const ITEM: &str = "HTTP CSIC 2010 dataset (csic_database.csv)";
 
 /// How many readable rows carried each label, counted before deduplication.
 ///
-/// The deduplicated records cannot give these numbers: a text seen with both labels is
-/// one record with [`Label::Unknown`].
+/// The logs frame cannot give these numbers: a text seen with both labels is one row
+/// with the label `unknown`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Csic2010Counts {
     pub good: u64,
@@ -96,17 +110,17 @@ pub fn split_routing(text: &str) -> RoutingSplit<'_> {
     }
 }
 
-/// The group key `METHOD /path` of a text in the layout of this module, or of its
-/// routing part alone.
+/// The group key of a text in the layout of this module, or of its routing part alone:
+/// the URL path, without the method.
 ///
 /// Scheme and host are dropped; a URL without a path has the path `/`. A request target
-/// that is not an absolute URL is kept as it is.
+/// that is not an absolute URL is kept as it is. The path is not case-folded.
 pub fn group_key(text: &str) -> String {
     let routing = split_routing(text).routing;
-    let Some((method, target)) = routing.split_once(' ') else {
-        return routing.to_string();
-    };
-    format!("{method} {}", path_of(target))
+    let target = routing
+        .split_once(' ')
+        .map_or(routing, |(_method, target)| target);
+    path_of(target).to_string()
 }
 
 /// The path of `target`, which holds no query string.
@@ -171,35 +185,26 @@ impl Csic2010Adapter {
     pub fn read_counted(
         &self,
         path: &Path,
-    ) -> Result<(Vec<LogRecord>, InputSummary, Csic2010Counts), L2dError> {
+    ) -> Result<(LogsFrame, InputSummary, Csic2010Counts), L2dError> {
         let bytes = read_source(path)?;
         let mut dedup = Dedup::new();
-        let counts = read_rows(strip_bom(&bytes), &mut dedup)?;
-        let (records, summary) = dedup.finish(path, &bytes);
-        Ok((records, summary, counts))
+        read_rows(strip_bom(&bytes), &mut dedup)?;
+        let (good, bad) = dedup.label_counts();
+        let (logs, summary) = dedup.finish(path, &bytes)?;
+        Ok((logs, summary, Csic2010Counts { good, bad }))
     }
 }
 
 impl InputAdapter for Csic2010Adapter {
-    fn read(&self, path: &Path) -> Result<(Vec<LogRecord>, InputSummary), L2dError> {
+    fn read(&self, path: &Path) -> Result<(LogsFrame, InputSummary), L2dError> {
         self.read_counted(path)
-            .map(|(records, summary, _)| (records, summary))
+            .map(|(logs, summary, _)| (logs, summary))
     }
 }
 
-fn read_rows(bytes: &[u8], dedup: &mut Dedup) -> Result<Csic2010Counts, L2dError> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        // Rows of any length are read so that a wrong field count is reported as a
-        // skipped record with its position instead of ending the read.
-        .flexible(true)
-        .from_reader(bytes);
-    let headers = reader
-        .byte_headers()
-        .map_err(|error| L2dError::InvalidInput {
-            detail: format!("unreadable CSV header: {error}"),
-        })?
-        .clone();
+fn read_rows(content: &[u8], dedup: &mut Dedup) -> Result<(), L2dError> {
+    let source = CsvSource::open(content)?;
+    let headers = source.headers().clone();
     let column = |name: &str| {
         headers
             .iter()
@@ -219,82 +224,131 @@ fn read_rows(bytes: &[u8], dedup: &mut Dedup) -> Result<Csic2010Counts, L2dError
     // The unnamed first column, `Normal` / `Anomalous`.
     let status_at = headers.get(0).filter(|name| name.is_empty()).map(|_| 0);
 
-    let mut counts = Csic2010Counts::default();
-    let mut row = csv::ByteRecord::new();
-    let mut position = 0u64;
-    loop {
-        let more = reader
-            .read_byte_record(&mut row)
-            .map_err(|error| L2dError::Runtime {
-                detail: format!("reading CSV data row {}: {error}", position + 1),
-            })?;
-        if !more {
-            return Ok(counts);
-        }
-        position += 1;
-        if row.len() != headers.len() {
-            dedup.skip(
-                position,
-                format!("expected {} fields, found {}", headers.len(), row.len()),
-            );
-            continue;
-        }
-        match parse_row(&row, method_at, url_at, body_at, class_at, status_at) {
-            Ok((text, label)) => {
-                match label {
-                    Label::Good => counts.good += 1,
-                    Label::Bad => counts.bad += 1,
-                    Label::Unknown => {}
-                }
-                let group = group_key(&text);
-                dedup.accept(position, text, label, Some(group));
-            }
-            Err(reason) => dedup.skip(position, reason),
-        }
+    // Validation pass: every raw row is judged by `text_and_label`.
+    let accepted = source.validate(false, dedup, |row| {
+        let (text, label) = text_and_label(|field| {
+            let (at, name) = match field {
+                Field::Method => (method_at, "method"),
+                Field::Url => (url_at, "URL"),
+                Field::Class => (class_at, "classification"),
+                Field::Body => (body_at, "body"),
+                Field::Status => match status_at {
+                    Some(at) => (at, "first column"),
+                    None => return Ok(None),
+                },
+            };
+            std::str::from_utf8(&row[at])
+                .map(Some)
+                .map_err(|_| format!("{name} is not valid UTF-8"))
+        })?;
+        Ok((row_digest(&text, label, Some(&group_key(&text))), label))
+    })?;
+    if accepted.is_empty() {
+        return Ok(());
     }
+
+    // Polars parses the accepted rows; the same function builds text and label from
+    // its fields. The first column was checked by the validation pass and is not read
+    // again.
+    let parsed = parse_csv_records(
+        accepted.raw(),
+        headers.len(),
+        &[method_at, url_at, body_at, class_at],
+        b',',
+        Some(b'"'),
+    )?;
+    let field = |at: usize| string_column(&parsed, &csv_field_name(at));
+    let (methods, urls, bodies, classes) = (
+        field(method_at)?,
+        field(url_at)?,
+        field(body_at)?,
+        field(class_at)?,
+    );
+    let rows = parsed.height();
+    let mut texts: Vec<String> = Vec::with_capacity(rows);
+    let mut labels: Vec<&str> = Vec::with_capacity(rows);
+    let mut groups: Vec<String> = Vec::with_capacity(rows);
+    for (((method, url), body), class) in methods
+        .iter()
+        .zip(urls.iter())
+        .zip(bodies.iter())
+        .zip(classes.iter())
+    {
+        let built = text_and_label(|field| {
+            Ok(match field {
+                Field::Method => Some(method.unwrap_or_default()),
+                Field::Url => Some(url.unwrap_or_default()),
+                Field::Class => Some(class.unwrap_or_default()),
+                Field::Body => Some(body.unwrap_or_default()),
+                Field::Status => None,
+            })
+        });
+        let (text, label) = built.map_err(|reason| L2dError::Runtime {
+            detail: format!(
+                "Polars and the validation pass disagree: a row the validation pass \
+                 accepted reads as unusable after parsing ({reason})"
+            ),
+        })?;
+        groups.push(group_key(&text));
+        labels.push(label.as_str());
+        texts.push(text);
+    }
+    dedup.push(
+        accepted,
+        Column::new("text".into(), texts),
+        Column::new("label".into(), labels),
+        Column::new("group".into(), groups),
+    )
+}
+
+/// The fields of a row that [`text_and_label`] asks for.
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    Method,
+    Url,
+    Class,
+    /// The unnamed first column; absent in files without it.
+    Status,
+    Body,
 }
 
 /// The text and label of one row, or the reason it cannot be read.
-fn parse_row(
-    row: &csv::ByteRecord,
-    method_at: usize,
-    url_at: usize,
-    body_at: usize,
-    class_at: usize,
-    status_at: Option<usize>,
+///
+/// `field` gives the value of a field, `Ok(None)` when the row has no such field, or
+/// the reason the field cannot be read.
+fn text_and_label<'r>(
+    field: impl Fn(Field) -> Result<Option<&'r str>, String>,
 ) -> Result<(String, Label), String> {
-    let field = |at: usize, name: &str| {
-        std::str::from_utf8(&row[at]).map_err(|_| format!("{name} is not valid UTF-8"))
-    };
-    let method = field(method_at, "method")?.trim();
+    let required = |which: Field| field(which).map(Option::unwrap_or_default);
+    let method = required(Field::Method)?.trim();
     if method.is_empty() {
         return Err("empty method".into());
     }
     if method.contains(|c: char| c.is_whitespace() || c == '?') {
         return Err("method contains white space or '?'".into());
     }
-    let url = without_protocol_version(field(url_at, "URL")?.trim());
+    let url = without_protocol_version(required(Field::Url)?.trim());
     if url.is_empty() {
         return Err("empty URL".into());
     }
     if url.contains(['\n', '\r']) {
         return Err("URL contains a line break".into());
     }
-    let class = field(class_at, "classification")?.trim();
+    let class = required(Field::Class)?.trim();
     let (label, status_name) = match class {
         "0" => (Label::Good, "Normal"),
         "1" => (Label::Bad, "Anomalous"),
         other => return Err(format!("classification '{other}' is neither 0 nor 1")),
     };
-    if let Some(at) = status_at {
-        let status = field(at, "first column")?.trim();
+    if let Some(status) = field(Field::Status)? {
+        let status = status.trim();
         if status != status_name {
             return Err(format!(
                 "the first column '{status}' and the classification column '{class}' disagree"
             ));
         }
     }
-    let body = field(body_at, "body")?;
+    let body = required(Field::Body)?;
     let text = if body.is_empty() {
         format!("{method} {url}")
     } else {

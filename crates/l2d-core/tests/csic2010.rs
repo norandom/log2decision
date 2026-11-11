@@ -4,13 +4,13 @@
 //! The excerpt below is committed with the tests. The real dataset is untracked; the
 //! real-file test is skipped with a printed note when it is absent.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use l2d_core::adapters::csic2010::{
     CSIC2010_FILE_NAME, Csic2010Adapter, Csic2010Counts, group_key, split_routing,
 };
-use l2d_core::{InputAdapter, InputSummary, L2dError, Label, LogRecord, ProjectPaths};
+use l2d_core::{InputAdapter, InputSummary, L2dError, Label, LogRecord, LogsFrame, ProjectPaths};
 
 const HEADER: &str = ",Method,User-Agent,Pragma,Cache-Control,Accept,Accept-encoding,Accept-charset,language,host,cookie,content-type,connection,lenght,content,classification,URL";
 
@@ -135,7 +135,10 @@ impl Drop for Scratch {
 fn read_counted(name: &str, content: &str) -> (Vec<LogRecord>, InputSummary, Csic2010Counts) {
     let scratch = Scratch::new(name);
     let path = scratch.file(CSIC2010_FILE_NAME, content);
-    Csic2010Adapter::new().read_counted(&path).unwrap()
+    let (logs, summary, counts) = Csic2010Adapter::new().read_counted(&path).unwrap();
+    assert_eq!(*logs.frame().schema().as_ref(), LogsFrame::schema());
+    assert_eq!(logs.frame().column("group").unwrap().null_count(), 0);
+    (logs.to_records(), summary, counts)
 }
 
 /// Design postconditions: every text is unique; `records` = occurrences + skipped.
@@ -157,49 +160,49 @@ fn excerpt_rows_become_text_label_and_group_key() {
         (
             "GET http://localhost:8080/tienda1/index.jsp".into(),
             Label::Good,
-            "GET /tienda1/index.jsp",
+            "/tienda1/index.jsp",
             1,
             2,
         ),
         (
             "GET http://localhost:8080/tienda1/publico/anadir.jsp?id=3&nombre=Vino+Rioja&precio=100&cantidad=55&B1=A%F1adir+al+carrito".into(),
             Label::Good,
-            "GET /tienda1/publico/anadir.jsp",
+            "/tienda1/publico/anadir.jsp",
             2,
             1,
         ),
         (
             "POST http://localhost:8080/tienda1/publico/anadir.jsp\nid=3&nombre=Vino+Rioja&precio=100&cantidad=55&B1=A%F1adir+al+carrito".into(),
             Label::Good,
-            "POST /tienda1/publico/anadir.jsp",
+            "/tienda1/publico/anadir.jsp",
             3,
             1,
         ),
         (
             format!("POST http://localhost:8080/tienda1/publico/anadir.jsp\n{SQL_BODY}"),
             Label::Bad,
-            "POST /tienda1/publico/anadir.jsp",
+            "/tienda1/publico/anadir.jsp",
             4,
             1,
         ),
         (
             r#"GET http://localhost:8080/tienda1/publico/pagar.jsp?modo=insertar&precio=183','0','0');waitfor delay "0:0:15";--&B1=Pasar+por+caja"#.into(),
             Label::Bad,
-            "GET /tienda1/publico/pagar.jsp",
+            "/tienda1/publico/pagar.jsp",
             5,
             1,
         ),
         (
             "PUT http://localhost:8080/tienda1/publico/entrar.jsp.BAK\nmodo=entrar&login=bob".into(),
             Label::Bad,
-            "PUT /tienda1/publico/entrar.jsp.BAK",
+            "/tienda1/publico/entrar.jsp.BAK",
             7,
             1,
         ),
         (
             "GET http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=%3CSCRIPT%3Ealert%28%22Paros%22%29%3B%3C%2FSCRIPT%3E&precio=85".into(),
             Label::Bad,
-            "GET /tienda1/publico/anadir.jsp",
+            "/tienda1/publico/anadir.jsp",
             10,
             1,
         ),
@@ -245,23 +248,29 @@ fn group_key_is_isolated_from_host_query_body_and_protocol_version() {
         assert!(!group.contains('='), "{group}");
         assert!(!group.contains('\n'), "{group}");
         assert!(!group.contains("HTTP/"), "{group}");
+        assert!(!group.contains(' '), "{group}");
+        assert!(group.starts_with('/'), "the key is the path alone: {group}");
         assert!(!record.text.contains("HTTP/1.1"), "{}", record.text);
         assert_eq!(group, group_key(&record.text));
     }
 
-    // One endpoint, different payloads and labels: same key.
-    let anadir_get: Vec<&LogRecord> = records
+    // One endpoint, different payloads, labels and methods: same key. The dataset
+    // repeats a payload as a GET query and as a POST body; both copies share the group.
+    let anadir: Vec<&LogRecord> = records
         .iter()
-        .filter(|r| r.group.as_deref() == Some("GET /tienda1/publico/anadir.jsp"))
+        .filter(|r| r.group.as_deref() == Some("/tienda1/publico/anadir.jsp"))
         .collect();
-    assert_eq!(anadir_get.len(), 2);
-    assert_ne!(anadir_get[0].text, anadir_get[1].text);
-    assert_ne!(anadir_get[0].label, anadir_get[1].label);
+    assert_eq!(anadir.len(), 4);
+    let positions: Vec<u64> = anadir.iter().map(|r| r.first_position).collect();
+    assert_eq!(positions, [2, 3, 4, 10]);
+    assert!(anadir.iter().any(|r| r.text.starts_with("GET ")));
+    assert!(anadir.iter().any(|r| r.text.starts_with("POST ")));
+    assert!(anadir.iter().any(|r| r.label == Label::Good));
+    assert!(anadir.iter().any(|r| r.label == Label::Bad));
 
-    // Same path, different method: different key.
     let keys: HashSet<&str> = records.iter().filter_map(|r| r.group.as_deref()).collect();
-    assert!(keys.contains("POST /tienda1/publico/anadir.jsp"));
-    assert_eq!(keys.len(), 5);
+    assert!(!keys.iter().any(|key| key.starts_with("POST")));
+    assert_eq!(keys.len(), 4);
 }
 
 // --- Routing is separable from payload ----------------------------------------------------
@@ -311,15 +320,28 @@ fn excerpt_payload_never_carries_the_endpoint_and_routing_never_the_payload() {
 fn group_key_drops_scheme_host_query_and_body() {
     assert_eq!(
         group_key("GET http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=x"),
-        "GET /tienda1/publico/anadir.jsp"
+        "/tienda1/publico/anadir.jsp"
     );
-    assert_eq!(group_key("POST https://shop.example/a/b\nx=1"), "POST /a/b");
+    assert_eq!(group_key("POST https://shop.example/a/b\nx=1"), "/a/b");
     assert_eq!(
         group_key("GET /already/a/path?x=http://evil/"),
-        "GET /already/a/path"
+        "/already/a/path"
     );
-    assert_eq!(group_key("GET http://localhost:8080"), "GET /");
-    assert_eq!(group_key("GET http://localhost:8080?x=/a/b"), "GET /");
+    assert_eq!(group_key("GET http://localhost:8080"), "/");
+    assert_eq!(group_key("GET http://localhost:8080?x=/a/b"), "/");
+    // The method is not part of the key, and paths are not case-folded.
+    assert_eq!(
+        group_key("PUT http://localhost:8080/Tienda1/A.JSP"),
+        group_key("GET http://localhost:8080/Tienda1/A.JSP?x=1")
+    );
+    assert_eq!(
+        group_key("GET http://localhost:8080/Tienda1/A.JSP"),
+        "/Tienda1/A.JSP"
+    );
+    assert_ne!(
+        group_key("GET http://localhost:8080/tienda1/a.jsp"),
+        group_key("GET http://localhost:8080/Tienda1/A.JSP")
+    );
 }
 
 // --- Labels and unreadable rows -----------------------------------------------------------
@@ -447,8 +469,9 @@ fn real_dataset_has_the_known_totals() {
     };
 
     let started = std::time::Instant::now();
-    let (records, summary, counts) = Csic2010Adapter::new().read_counted(&path).unwrap();
+    let (logs, summary, counts) = Csic2010Adapter::new().read_counted(&path).unwrap();
     let elapsed = started.elapsed();
+    let records = logs.to_records();
 
     // Before deduplication. A swallowed row (unbalanced quote) would lower the total.
     assert_eq!(summary.records, 61_065);
@@ -464,20 +487,35 @@ fn real_dataset_has_the_known_totals() {
     assert!(summary.skipped.is_empty(), "{:?}", summary.skipped.first());
     assert_postconditions(&records, &summary);
 
-    let mut groups: HashSet<&str> = HashSet::new();
+    // Per group: (holds a good text, holds a bad text).
+    let mut groups: HashMap<&str, (bool, bool)> = HashMap::new();
     for record in &records {
         let group = record.group.as_deref().expect("every record has a group");
         let split = split_routing(&record.text);
         assert_eq!(group, group_key(split.routing), "{}", record.text);
         assert!(!group.contains('?') && !group.contains("://") && !group.contains('\n'));
+        assert!(group.starts_with('/'), "the key is the path alone: {group}");
         assert!(!record.text.ends_with(" HTTP/1.1"), "{}", record.text);
-        groups.insert(group);
+        let seen = groups.entry(group).or_default();
+        seen.0 |= record.label == Label::Good;
+        seen.1 |= record.label == Label::Bad;
     }
     let label = |label: Label| records.iter().filter(|r| r.label == label).count();
+    let mixed_groups = groups.values().filter(|seen| seen.0 && seen.1).count();
+
+    assert_eq!(summary.distinct_texts, 25_608);
+    assert_eq!(
+        summary.content_sha256,
+        "c420f0bc0464376de75b6c419a0ac226fe69fe12c8ac4908843273721e44e637"
+    );
+    // Group key = URL path alone: GET and POST copies of an endpoint share one group.
+    assert_eq!(groups.len(), 1_632);
+    assert_eq!(mixed_groups, 8, "groups holding both labels");
 
     eprintln!(
         "CSIC 2010: {} records ({} good, {} bad) before dedup; {} distinct texts \
-         ({} good, {} bad, {} conflicting); {} distinct group keys; sha256 {}; read in {:.2?}",
+         ({} good, {} bad, {} conflicting); {} path groups, {} with both labels; sha256 {}; \
+         read in {:.2?}",
         summary.records,
         counts.good,
         counts.bad,
@@ -486,8 +524,81 @@ fn real_dataset_has_the_known_totals() {
         label(Label::Bad),
         summary.label_conflicts,
         groups.len(),
+        mixed_groups,
         summary.content_sha256,
         elapsed,
     );
     assert_eq!(label(Label::Unknown) as u64, summary.label_conflicts);
+
+    // Repeatable: a second read gives an equal frame (row order and values), summary
+    // and counts, whatever Polars' threads did.
+    let (again, summary_again, counts_again) = Csic2010Adapter::new().read_counted(&path).unwrap();
+    assert_eq!(again, logs);
+    assert_eq!(summary_again, summary);
+    assert_eq!(counts_again, counts);
+
+    // Row for row what a plain pass without Polars gives: same texts in the same
+    // order, same labels, groups, first positions and occurrence counts.
+    let reference = reference_records(&std::fs::read(&path).unwrap());
+    assert_eq!(records.len(), reference.len());
+    for (record, expected) in records.iter().zip(&reference) {
+        assert_eq!(record, expected);
+    }
+}
+
+/// The records a plain row-by-row pass over the real file gives: the `csv` crate for
+/// the fields and a hash map for the deduplication. Independent of Polars and of the
+/// adapter code. Panics on a row it cannot read.
+fn reference_records(bytes: &[u8]) -> Vec<LogRecord> {
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
+    let headers = reader.headers().unwrap().clone();
+    let at = |name: &str| headers.iter().position(|header| header == name).unwrap();
+    let (method_at, url_at, body_at, class_at) =
+        (at("Method"), at("URL"), at("content"), at("classification"));
+
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut seen: Vec<(bool, bool)> = Vec::new();
+    let mut records: Vec<LogRecord> = Vec::new();
+    for (row_index, row) in reader.records().enumerate() {
+        let row = row.unwrap();
+        let url = row[url_at].trim().strip_suffix(" HTTP/1.1").unwrap();
+        let (method, body) = (row[method_at].trim(), &row[body_at]);
+        let text = if body.is_empty() {
+            format!("{method} {url}")
+        } else {
+            format!("{method} {url}\n{body}")
+        };
+        let good = match row[class_at].trim() {
+            "0" => true,
+            "1" => false,
+            other => panic!("classification {other:?}"),
+        };
+        let at = *index.entry(text.clone()).or_insert_with(|| {
+            // The path starts at the first slash after the host; a URL such as
+            // `http://localhost:8080.old` has none and gets the path `/`.
+            let target = url.strip_prefix("http://").unwrap();
+            let target = target.split('?').next().unwrap();
+            let path = target.find('/').map_or("/", |slash| &target[slash..]);
+            records.push(LogRecord {
+                text,
+                label: Label::Unknown,
+                group: Some(path.to_string()),
+                first_position: row_index as u64 + 1,
+                occurrences: 0,
+            });
+            seen.push((false, false));
+            records.len() - 1
+        });
+        records[at].occurrences += 1;
+        seen[at].0 |= good;
+        seen[at].1 |= !good;
+    }
+    for (record, seen) in records.iter_mut().zip(seen) {
+        record.label = match seen {
+            (true, false) => Label::Good,
+            (false, true) => Label::Bad,
+            _ => Label::Unknown,
+        };
+    }
+    records
 }

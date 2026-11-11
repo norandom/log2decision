@@ -55,7 +55,7 @@
   - Done when fitting succeeds on the fixture without any runtime DLLs, reloaded model reproduces exact ratios, and refusal cases are tested
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
 
-- [ ] 1.14 Move the data layer to Polars (runs after 1.6, before 1.7)
+- [x] 1.14 Move the data layer to Polars (runs after 1.6, before 1.7)
   - Add `polars` to `l2d-core` with default features off and only the CSV, JSON, lazy and `ndarray`-conversion features; confirm with the dependency tree that no cloud or HTTP client is linked, and record the added packages and the clean build time
   - Rework the line, labelled CSV/JSONL and CSIC 2010 adapters so that parsing uses Polars and each returns the logs frame of the design's "Data frames" section plus the `InputSummary`; keep `LogRecord` as the row view
   - Keep skipped-record reporting with position and reason through a validation pass before Polars reads the accepted rows; deduplication, occurrence counts, first positions and label conflicts become frame operations in first-occurrence order
@@ -68,7 +68,8 @@
 - [ ] 1.15 Size batches to the free memory before loading a dataset (runs after 1.14, before 1.7)
   - Read the host's free physical memory once before loading and derive a memory limit: the analyst's limit if given, otherwise a share of the free memory (default one half)
   - Estimate bytes per row from the file size and a sample of the first rows, and choose the batch size from the limit; the analyst's batch size overrides it
-  - Read datasets through Polars' batched readers in file order, with deduplication state kept across batches, so that the logs frame and the input summary are identical for any batch size
+  - Read datasets in batches in file order: the validation pass walks the source in batches and Polars parses each batch of accepted records, with deduplication state kept across batches (`Dedup::push` already takes batches), so that the logs frame and the input summary are identical for any batch size; the source file is no longer loaded whole
+  - Add a guard test that fails when `Cargo.lock` names a network client crate (tokio, reqwest, hyper, rustls, object_store, mio, socket2, h2), so a later feature change cannot link one unnoticed
   - Scale dynamically: start from the maximum batch size, read the free memory again before every batch, halve the next batch when free memory is below the reserve and double it (up to the maximum) when memory has recovered; record each change with the free memory that caused it, and report the smallest and largest batch used
   - Make the free-memory reading injectable so tests can simulate memory falling and recovering during a run
   - Refuse when the smallest allowed batch does not fit; provide the whole-dataset check for operations that need all rows at once, refusing before loading with the estimate and the limit
@@ -76,7 +77,7 @@
   - Done when reading the fixture and CSIC 2010 with batch sizes of 1,024 rows, 10,000 rows and the whole file gives identical frames and summaries, an artificially low memory limit triggers both refusals with the stated figures, a simulated drop and recovery of free memory shrinks and regrows the batch with the changes recorded and the results unchanged, and the plan shows the free memory read from the host
   - _Boundary: MemoryBudget, Input adapters and dedup_
   - _Depends: 1.14_
-  - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8, 12.9_
+  - _Requirements: 10.2, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8, 12.9_
 
 - [ ] 1.13 Conformal calibration layer over any scorer (runs after 1.7, before 1.10)
   - Add the `conformal-prediction` crate and wrap it in `l2d-decide` (`conformal.rs`) behind the design's contract; confirm it links no network client and gives identical results on repeat, and record in Implementation Notes which parts of the method the crate covers and which the wrapper adds
@@ -331,7 +332,13 @@
 - 1.3: `LabelledAdapter::new` defaults the label column to `Some("label")`; unlabelled CSV/JSONL needs `label_column = None` set by the caller (1.11).
 - 1.3: A CSV data row starting with an unbalanced quote absorbs the following rows into one skipped record (standard CSV behaviour). Adapters for real datasets must check the total row count against the dataset's known size.
 - 1.3: Open follow-ups, not blocking: no test pins that the content hash covers raw bytes including a byte-order mark; input tests leave scratch directories in the system temp folder.
-- 1.4: CSIC text is `METHOD URL` plus a line feed and the body when the body is non-empty; the URL keeps `http://localhost:8080` and drops ` HTTP/1.1`. Group key is `METHOD /path`; paths are not normalized or case-folded. `l2d_core::adapters::csic2010::{split_routing, group_key}` split a text at the first `?` or line feed into routing and payload; valid for this layout only (the mini fixture puts a space before the body). `Csic2010Adapter::read_counted` gives label counts before deduplication.
+- 1.14: Polars is pinned `=0.52.0` (facade features `lazy`, `ndarray`; readers via a direct `polars-io` dependency with `csv`, `json`). Do not enable the facade `csv`/`json`/`strings` features and do not upgrade without re-checking `cargo tree` for network crates: 0.53+ links tokio with networking. Import Polars only as `l2d_core::polars`.
+- 1.14: `InputAdapter::read` returns `(LogsFrame, InputSummary)`. `LogsFrame` (in `l2d-core` `types.rs`) validates the Logs schema and offers `frame()`, `records()`, `to_records()`, `from_records()`; it does not check text uniqueness. Parsing is a validation pass (skips, positions, per-record digest) followed by Polars parsing the accepted records; `Dedup::push` fails with `Runtime` if Polars' rows disagree with the validation pass. Labels, groups and CSIC text are derived in Rust over Polars string columns.
+- 1.14: Behaviour changes in JSONL input: a record repeating the text, label or group key, and a record Polars cannot parse (for example an integer beyond 64 bits in any key), are skipped with a reason. `InputSummary.skipped` is sorted by position.
+- 1.14: CSIC group key is the URL path alone: 1,632 path groups, 8 with both labels (supersedes the `METHOD /path` figures in the 1.4 notes). CSIC read: about 2.5 to 3.3 s debug, 290 ms release.
+- 1.14: Workspace manifest has `[profile.dev.package."*"] debug = false`: with debug info on dependencies the linker failed intermittently (Polars debug files of about 1 GB). Clean debug build is about 110 s; `Cargo.lock` has 196 packages.
+- 1.14: Shared build folder hazard: a scratch copy of the workspace built into the shared `CARGO_TARGET_DIR` leaves test binaries with the scratch path baked in, which the real workspace then reuses (seen as "fixture ... cannot find the path"). Scratch copies must build with their own `--target-dir`; the cure is `cargo clean -p <the l2d crates>`.
+- 1.4: CSIC text is `METHOD URL` plus a line feed and the body when the body is non-empty; the URL keeps `http://localhost:8080` and drops ` HTTP/1.1`. Group key was `METHOD /path` until task 1.14 (now the path alone); paths are not normalized or case-folded. `l2d_core::adapters::csic2010::{split_routing, group_key}` split a text at the first `?` or line feed into routing and payload; valid for this layout only (the mini fixture puts a space before the body). `Csic2010Adapter::read_counted` gives label counts before deduplication.
 - 1.4: CSIC totals on the real file: 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts (9,644 good, 15,964 bad), 1,648 group keys, no skipped rows, read in about 2 s (debug).
 - 1.4: Group distribution (distinct texts): 16 groups hold both labels (9,624 good, 14,082 bad) and are 8 endpoints under GET and POST; 20 good-only groups with one text each; 1,612 bad-only groups (1,882 texts), 1,605 of them singletons. So nearly all good texts sit in 16 groups, and about 1,600 bad paths never occur as good.
 - 1.4: DECIDED 2026-11-11: the CSIC group key becomes the URL path alone (task 1.14 changes the adapter); single-label groups are reported separately (requirement 9.8); default conformal error rate 0.05. Background: 11,853 of 12,094 distinct (path, payload) pairs occur under more than one method (same parameters as GET query and as POST body). Folds grouped by `METHOD /path` leak payloads between fitting and testing; grouping by path alone gives 1,632 groups, 8 of them mixed. The group definition for cross-endpoint evaluation must be decided before 1.12.

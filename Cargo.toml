@@ -54,6 +54,23 @@ l2d-eval = { path = "crates/l2d-eval" }
 
 clap = { version = "4", features = ["derive"] }
 csv = "1"
+# The one tabular data layer (design.md, "Data layer"). Default features are off: only the
+# CSV and JSON-lines readers, lazy queries and `ndarray` conversion. No cloud, HTTP,
+# async or object-store feature may be enabled (requirement 10.2). Other crates import
+# Polars through `l2d_core::polars`, not as a dependency of their own.
+#
+# Two things here are deliberate and must be re-checked with
+# `cargo tree -p l2d-core -e normal` whenever the version or the features change:
+# - The readers are enabled on `polars-io`, not through the facade features `csv` and
+#   `json`. From 0.47 on those facade features imply `streaming`, which together with
+#   `lazy` links `polars-stream` and through it `reqwest`, `hyper`, `object_store` and
+#   `rustls`.
+# - The version is 0.52.0, not the latest release (0.55.2 on 2026-11-11). From 0.53 on
+#   this feature set links `tokio` with its `net` feature (`mio`, `socket2`), and from
+#   0.54 on `polars-core` itself depends on it, whatever the features.
+# With this entry neither the dependency tree nor `Cargo.lock` names a network crate.
+polars = { version = "=0.52.0", default-features = false, features = ["lazy", "polars-io", "ndarray"] }
+polars-io = { version = "=0.52.0", default-features = false, features = ["csv", "json"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -69,3 +86,11 @@ ndarray = { version = "0.16", default-features = false, features = ["std"] }
 # Test-only reference implementation for the dense path.
 linfa = "0.8.1"
 linfa-logistic = "0.8.1"
+
+# Dependencies are built without debug information; the workspace's own crates keep it.
+# With it, `polars-core` alone is a 1.1 GB library and every test binary that links
+# `l2d-core` gets a program database of 0.4 to 1 GB. Linking the test binaries of the
+# workspace in parallel then exhausted the memory of the reference host from time to
+# time (`link.exe` failed with 0xe0000001).
+[profile.dev.package."*"]
+debug = false

@@ -1,4 +1,16 @@
-//! Shared record, label, identity, run-record, path, and error types.
+//! Shared record, label, identity, run-record, path, and error types, the input
+//! adapters, and the data layer.
+//!
+//! # Data layer
+//!
+//! Polars is the one tabular data layer of the workspace. Tabular data crosses crate
+//! boundaries as Polars frames with the fixed schemas of the design's "Data frames"
+//! section; [`LogsFrame`] is the first of them. Other crates do not depend on Polars
+//! themselves: they import it from here (`use l2d_core::polars::prelude::*;`), so the
+//! whole workspace uses the one version and feature set chosen in the workspace
+//! manifest.
+
+pub use polars;
 
 pub mod adapters;
 pub mod error;
@@ -10,11 +22,11 @@ pub mod types;
 pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
 pub use adapters::lines::LinesAdapter;
-pub use input::{Dedup, InputAdapter};
+pub use input::{Accepted, Dedup, InputAdapter};
 
 pub use error::{
     EXIT_INVALID_INPUT, EXIT_MISSING, EXIT_REFUSED, EXIT_RUNTIME, EXIT_SUCCESS, L2dError,
 };
 pub use paths::ProjectPaths;
 pub use runrecord::{Device, Placement, PlacementSource, RunKind, RunRecord};
-pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, SkippedRecord};
+pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, LogsFrame, SkippedRecord};
