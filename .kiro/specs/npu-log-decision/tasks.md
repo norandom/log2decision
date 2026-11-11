@@ -33,7 +33,7 @@
   - Done when adapter reports 61,065 records (36,000 good, 25,065 bad) before dedup, and tests verify group key isolation on sample rows
   - _Requirements: 1.2, 9.7, 10.4_
 
-- [ ] 1.5 Hash character n-grams into sparse feature rows with routing isolation option
+- [x] 1.5 Hash character n-grams into sparse feature rows with routing isolation option
   - Implement signed FNV-1a hashing of character 1-, 2-, and 3-grams over text bytes into 65,536 buckets with L2 normalization in `l2d-baseline`
   - Provide an option to isolate or strip routing tokens (method/path) to prevent the baseline from memorizing endpoint URLs
   - Done when same text yields bit-identical sparse vectors across processes, and test verifies row values on fixed examples
@@ -291,4 +291,7 @@
 - 1.4: CSIC totals on the real file: 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts (9,644 good, 15,964 bad), 1,648 group keys, no skipped rows, read in about 2 s (debug).
 - 1.4: Group distribution (distinct texts): 16 groups hold both labels (9,624 good, 14,082 bad) and are 8 endpoints under GET and POST; 20 good-only groups with one text each; 1,612 bad-only groups (1,882 texts), 1,605 of them singletons. So nearly all good texts sit in 16 groups, and about 1,600 bad paths never occur as good.
 - 1.4: OPEN DECISION for 1.12: 11,853 of 12,094 distinct (path, payload) pairs occur under more than one method (same parameters as GET query and as POST body). Folds grouped by `METHOD /path` leak payloads between fitting and testing; grouping by path alone gives 1,632 groups, 8 of them mixed. The group definition for cross-endpoint evaluation must be decided before 1.12.
+- 1.5: `l2d_baseline::hashing`: `CharHasher::row(&str) -> SparseRow` (strictly ascending `u32` indices, `f64` values, unit L2 norm, empty text gives an empty row). FNV-1a 64-bit per n-gram; bucket = low 32 bits modulo `buckets`; sign = parity of the high 32 bits. `HashingSettings { buckets, ngram_max, routing }` with `RoutingMode::{Keep, Strip, Isolate}`.
+- 1.5: Row dimension is `CharHasher::dimension()`: `buckets` for keep and strip, `2 * buckets` (131,072 by default) for isolate, where payload features are in `0..buckets` and routing features in `buckets..2*buckets` (`routing_offset()`). Size weight vectors from `dimension()`, not from `buckets`. Isolate normalizes the whole row; masking the routing half needs renormalization.
+- 1.5: Strip and isolate are meaningful only for texts in the CSIC adapter layout. A text without `?` or line feed is routing only: strip gives an empty row. That includes every POST row of the mini fixture (space before the body) and any ordinary log line. Task 1.7 must define the ratio for an empty row and must store the routing mode in the saved settings and the revision; fixture tests use keep.
 - 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).
