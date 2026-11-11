@@ -7,6 +7,7 @@ pub mod paths;
 pub mod runrecord;
 pub mod types;
 
+pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
 pub use adapters::lines::LinesAdapter;
 pub use input::{Dedup, InputAdapter};

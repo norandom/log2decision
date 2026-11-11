@@ -26,7 +26,7 @@
   - _Depends: 1.2_
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.6_
 
-- [ ] 1.4 Read HTTP CSIC 2010 with group-key extraction for agnostic splitting
+- [x] 1.4 Read HTTP CSIC 2010 with group-key extraction for agnostic splitting
   - Implement CSIC 2010 adapter: format text as `METHOD URL\nBODY`, extract label from classification column, derive group key from `METHOD /path` (excluding query params)
   - Ensure routing structure is separable from payload for agnostic threat analysis
   - Read from `data/csic-2010/` or specified path
@@ -287,4 +287,8 @@
 - 1.3: `LabelledAdapter::new` defaults the label column to `Some("label")`; unlabelled CSV/JSONL needs `label_column = None` set by the caller (1.11).
 - 1.3: A CSV data row starting with an unbalanced quote absorbs the following rows into one skipped record (standard CSV behaviour). Adapters for real datasets must check the total row count against the dataset's known size.
 - 1.3: Open follow-ups, not blocking: no test pins that the content hash covers raw bytes including a byte-order mark; input tests leave scratch directories in the system temp folder.
+- 1.4: CSIC text is `METHOD URL` plus a line feed and the body when the body is non-empty; the URL keeps `http://localhost:8080` and drops ` HTTP/1.1`. Group key is `METHOD /path`; paths are not normalized or case-folded. `l2d_core::adapters::csic2010::{split_routing, group_key}` split a text at the first `?` or line feed into routing and payload; valid for this layout only (the mini fixture puts a space before the body). `Csic2010Adapter::read_counted` gives label counts before deduplication.
+- 1.4: CSIC totals on the real file: 61,065 records (36,000 good, 25,065 bad), 25,608 distinct texts (9,644 good, 15,964 bad), 1,648 group keys, no skipped rows, read in about 2 s (debug).
+- 1.4: Group distribution (distinct texts): 16 groups hold both labels (9,624 good, 14,082 bad) and are 8 endpoints under GET and POST; 20 good-only groups with one text each; 1,612 bad-only groups (1,882 texts), 1,605 of them singletons. So nearly all good texts sit in 16 groups, and about 1,600 bad paths never occur as good.
+- 1.4: OPEN DECISION for 1.12: 11,853 of 12,094 distinct (path, payload) pairs occur under more than one method (same parameters as GET query and as POST body). Folds grouped by `METHOD /path` leak payloads between fitting and testing; grouping by path alone gives 1,632 groups, 8 of them mixed. The group definition for cross-endpoint evaluation must be decided before 1.12.
 - 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).
