@@ -991,7 +991,10 @@ fn scale_texts() -> (Vec<String>, Vec<bool>) {
     (texts, labels)
 }
 
+/// Runs on request only, in release mode:
+/// `cargo test --release -p l2d-baseline --test logreg -- --ignored --nocapture`
 #[test]
+#[ignore = "scale test; run in release mode on request"]
 fn a_training_fold_of_csic_size_fits_in_reasonable_time_and_memory() {
     let hasher = CharHasher::default();
     let (texts, labels) = scale_texts();
