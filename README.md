@@ -58,7 +58,7 @@ it is allowed in.
 | Deduplication, with skipped rows reported by position and reason | Done, tested |
 | Batches sized to free memory, with a memory limit that holds | Done, measured on files up to 564 MB |
 | Character-sequence features and the scoring model | Done, tested |
-| Baseline scorer (fit, score, save, load) | Built, in review |
+| Baseline scorer (fit, score, save, load) | Done, tested |
 | Calibrated decisions | Specified, not built |
 | Store, search, triage, evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |

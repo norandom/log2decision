@@ -524,25 +524,44 @@ impl MemoryBudget {
 **Responsibilities & Constraints**
 - Features: character 1-, 2- and 3-grams over the text's bytes, signed FNV-1a hashing into 65,536 buckets, L2-normalized sparse rows.
 - Model: logistic regression with L2 penalty, fitted by full-batch L-BFGS with a fixed iteration cap and fixed row order. No randomness.
-- Saved under `models/baselines/<name>-<rev12>/` as weights plus settings; revision is the SHA-256 of both.
+- Saved under `models/baselines/<name>-<rev12>/` as `weights.bin` (little-endian f64) and `baseline.json` (settings, bias, fit report, fitting inputs). The revision is the first 40 hex characters of SHA-256 over settings, weights and bias; `load` recomputes it and refuses a mismatch. Saving is atomic.
+- A saved scorer records the content hash of every input it was fitted on. Saving the same revision again merges the inputs; it never drops one. A scorer with no recorded inputs has unknown provenance.
+- A text with no features (for example strip mode on a request without query or body) scores the constant sigmoid of the bias and is flagged `no_features` in the Scores frame.
+- Fitting needs all rows at once: the memory estimate is taken from a sample of hashed rows and checked with `require_whole` before the matrix is allocated.
+- Defaults were chosen by measurement on CSIC 2010: tolerance 1e-3 (every routing mode converges in about 150 to 180 iterations) and an iteration cap of 1,000 as a safety limit. A capped or unconverged fit is visible in the fit report.
 - Does not depend on `l2d-encoder` or `l2d-store`.
 
 **Contracts**: Service [x] / State [x]
 
 ```rust
-pub struct BaselineSettings { pub buckets: u32, pub ngram_max: u8, pub l2: f64, pub max_iter: u32 }
+pub struct BaselineSettings {
+    pub buckets: u32, pub ngram_max: u8, pub routing: RoutingMode,
+    pub l2: f64, pub max_iter: u32, pub tolerance: f64,
+}   // default 65_536 / 3 / Keep / 1.0 / 1_000 / 1e-3; every field is part of the revision
 
-pub enum FitError { TooFewLabels { good: u64, bad: u64 } }
+pub enum FitError {
+    TooFewLabels { good: u64, bad: u64 },
+    InvalidSettings { detail: String },
+    Memory(L2dError),
+    Solver(LogRegError),
+}
 
 impl BaselineScorer {
-    pub fn fit(records: &[LogRecord], settings: &BaselineSettings) -> Result<Self, FitError>;
-    pub fn ratio(&self, text: &str) -> f32;            // 0.0..=1.0, higher is more likely bad
+    pub fn fit(logs: &LogsFrame, inputs: &[InputSummary], settings: &BaselineSettings) -> Result<Self, FitError>;
+    pub fn fit_with(logs: &LogsFrame, inputs: &[InputSummary], settings: &BaselineSettings, budget: &MemoryBudget)
+        -> Result<Self, FitError>;                      // pass the budget used for reading, so the frame counts
+    pub fn ratio(&self, text: &str) -> f32;             // 0.0..=1.0, higher is more likely bad
+    pub fn score(&self, logs: &LogsFrame) -> Result<DataFrame, L2dError>;   // Scores frame, input row order
     pub fn save(&self, paths: &ProjectPaths, name: &str) -> Result<PathBuf, L2dError>;
     pub fn load(dir: &Path) -> Result<Self, L2dError>;
+    pub fn load_under(paths: &ProjectPaths, dir: &Path) -> Result<Self, L2dError>;   // also checks the model directory
+    pub fn was_fitted_on(&self, content_sha256: &str) -> bool;
+    pub fn has_known_fitting_inputs(&self) -> bool;
+    pub fn fit_report(&self) -> &BaselineFitReport;     // termination, iterations, gradient norm, counts
 }
 ```
-- Preconditions for `fit`: at least 10 labelled records and at least 5 of each label, else `TooFewLabels`.
-- Invariant: equal inputs and settings give bit-equal weights.
+- Preconditions for `fit`: at least 10 distinct labelled logs and at least 5 of each label, else `TooFewLabels`. Rows labelled unknown are ignored.
+- Invariant: equal frames (including row order) and settings give bit-equal weights on one build and machine.
 - `LogReg` also accepts dense rows; `l2d-assess` reuses it for separability.
 
 ### Encoder

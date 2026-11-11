@@ -255,6 +255,25 @@ impl SparseMatrix {
         }
     }
 
+    /// A matrix without rows that has room for exactly `rows` rows and `stored` entries,
+    /// so that appending up to that many does not allocate again.
+    pub fn with_capacity(dimension: u32, rows: usize, stored: usize) -> Self {
+        let mut starts = Vec::with_capacity(rows + 1);
+        starts.push(0);
+        Self {
+            dimension,
+            starts,
+            indices: Vec::with_capacity(stored),
+            values: Vec::with_capacity(stored),
+        }
+    }
+
+    /// Makes room for exactly `additional` more entries.
+    pub fn reserve_entries(&mut self, additional: usize) {
+        self.indices.reserve_exact(additional);
+        self.values.reserve_exact(additional);
+    }
+
     /// The matrix of `rows`, in their order. Size `dimension` from
     /// [`crate::hashing::CharHasher::dimension`].
     pub fn from_rows(dimension: u32, rows: &[SparseRow]) -> Result<Self, LogRegError> {

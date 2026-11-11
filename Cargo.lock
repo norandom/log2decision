@@ -654,6 +654,8 @@ dependencies = [
  "linfa",
  "linfa-logistic",
  "ndarray",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

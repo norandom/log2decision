@@ -11,6 +11,8 @@ l2d-core.workspace = true
 argmin.workspace = true
 argmin-math.workspace = true
 ndarray.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
