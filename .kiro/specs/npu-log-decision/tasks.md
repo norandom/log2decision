@@ -10,7 +10,7 @@
   - Done when workspace builds, tests verify exit code mappings, and missing items report their expected location
   - _Requirements: 10.3, 10.4, 10.5, 10.6_
 
-- [ ] 1.2 Add the command-line skeleton and the test fixture
+- [x] 1.2 Add the command-line skeleton and the test fixture
   - Implement CLI entry point in `l2d-cli` with subcommands stubbed out, `--json` global flag, and stderr diagnostics
   - Create synthetic labelled fixture (`tests/fixtures/mini-labelled.csv`) with 200 request lines: at least 6 group keys with both labels, duplicates, 1 malformed row, and 1 conflicting label
   - Done when `l2d --help` lists subcommands, stub exits non-zero with informative error, and tests verify fixture properties
@@ -277,4 +277,8 @@
 - 1.1: `Label` serializes in lower case (`"good"`, `"bad"`, `"unknown"`); keep the CLI JSON consistent with that.
 - 1.1: `l2d-train` is a workspace member outside `default-members`; `l2d-cli` and `l2d-eval` do not depend on it.
 - 1.1: Store location is undecided in the design (`stores/<name>.db` at the technology stack, `stores/<name>/` in the file plan). Task 1.8 uses `stores/<name>.db` and adds the path helper to `ProjectPaths`.
+- 1.2: Unwired commands exit 4 (`Refused`, "not implemented yet"); with `--json` the error envelope `{"error":{"kind","message","exit_code"}}` goes to standard output and the one-line diagnostic to standard error. Stubs declare no options yet.
+- 1.2: Fixture `tests/fixtures/mini-labelled.csv` (header `text,label,group`): 200 data rows = 199 well-formed (115 good, 84 bad) + 1 malformed at data row 121 (two fields only, group missing); 169 distinct texts (96 good-only, 72 bad-only, 1 conflicting); 27 texts repeat; 8 group keys `METHOD /path`, each with 12 good and 9 bad distinct texts. Exact counts are pinned by `crates/l2d-cli/tests/fixture.rs`.
+- 1.2: The malformed row is malformed only by field count. A reader must treat a wrong field count as a skipped record (expected: 200 read, 1 skipped at position 121, 169 distinct, 1 unknown label); a lenient CSV reader would wrongly accept it.
+- 1.2: One group key holds only 21 to 22 distinct texts, below the 30 minimum of the shift test; fixture shift tests must compare good against bad, not group against group.
 - 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).

@@ -1,0 +1,201 @@
+text,label,group
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=1,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=javier&direccion=Calle+Mayor+10&cp=28019&ciudad=Cordoba,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=especias&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=hugo&pwd=clave191&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=7&nombre=Cava+Brut&precio=52&cantidad=2&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=vino+tinto&orden=precio,good,GET /tienda1/publico/buscar.jsp
+"POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=carla&nombre=1 UNION SELECT login, pwd FROM usuarios--&apellidos=Martin&email=carla@example.com&ciudad=Valencia&B1=Registrar",bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=%27%3B+DROP+TABLE+usuarios%3B+--,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=' OR '1'='1&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=12,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=irene&direccion=| ping -c 3 127.0.0.1&cp=28018&ciudad=Gijon,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=%3B+cat+/etc/passwd&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=..%2F..%2F..%2FWEB-INF%2Fweb.xml&pwd=clave178&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=6&nombre=../../../../etc/passwd&precio=45&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=felix&pwd=../../../../etc/passwd&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=elena&direccion=Calle+Mayor+5&cp=28014&ciudad=Zaragoza,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=aceite+virgen&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=carla&pwd=clave126&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=Queso+Manchego&precio=17&cantidad=2&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=hugo&pwd=clave191&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=javier&nombre=javier&apellidos=Alonso&email=javier@example.com&ciudad=Cordoba&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=9,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=8&nombre=Miel+Alcarria&precio=59&cantidad=3&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=7,good,GET /tienda1/index.jsp
+"POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=diego&direccion=Calle+Mayor+4&cp=<script>alert(""xss"")</script>&ciudad=Bilbao",bad,POST /tienda1/miembros/editar.jsp
+"GET http://localhost:8080/tienda1/publico/buscar.jsp?q=1+UNION+SELECT+login,pwd+FROM+usuarios--&orden=precio",bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=bruno&pwd='; DROP TABLE usuarios; --&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=%27+OR+%271%27%3D%271&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=alba&direccion=Calle+Mayor+1&cp=28010&ciudad=Madrid,good,POST /tienda1/miembros/editar.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=irene&nombre=| ping -c 3 127.0.0.1&apellidos=Moreno&email=irene@example.com&ciudad=Gijon&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=%3B+cat+/etc/passwd,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=..%2F..%2F..%2FWEB-INF%2Fweb.xml&nombre=Cava+Brut&precio=52&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=../../../../etc/passwd,bad,GET /tienda1/index.jsp
+"GET http://localhost:8080/tienda1/publico/anadir.jsp?id=1+UNION+SELECT+login,pwd+FROM+usuarios--&nombre=Jamon+Iberico&precio=24&cantidad=1&B1=Anadir+al+carrito",bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=elena&nombre=elena&apellidos=Perez&email=elena@example.com&ciudad=Zaragoza&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=4,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=3&nombre=Jamon+Iberico&precio=24&cantidad=3&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=2,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=lucia&direccion=Calle+Mayor+11&cp=28020&ciudad=Granada,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=anchoas&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=irene&pwd=clave204&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=8&nombre=Miel+Alcarria&precio=59&cantidad=3&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=miel&orden=precio,good,GET /tienda1/publico/buscar.jsp
+"POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=diego&nombre=diego&apellidos=Sanchez&email=diego@example.com&ciudad=<script>alert(""xss"")</script>&B1=Registrar",bad,POST /tienda1/publico/registro.jsp
+"GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=1+UNION+SELECT+login,pwd+FROM+usuarios--",bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=2&nombre='; DROP TABLE usuarios; --&precio=17&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=%27+OR+%271%27%3D%271,bad,GET /tienda1/index.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=1,good,GET /tienda1/index.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=%7C+ping+-c+3+127.0.0.1&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=hugo&pwd=; cat /etc/passwd&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=..%2F..%2F..%2FWEB-INF%2Fweb.xml&nombre=Cava+Brut&precio=52&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=bruno&direccion=Calle+Mayor+2&cp='; DROP TABLE usuarios; --&ciudad=Sevilla,bad,POST /tienda1/miembros/editar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=felix&direccion=Calle+Mayor+6&cp=28015&ciudad=Malaga,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=conservas&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=diego&pwd=clave139&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=3&nombre=Jamon+Iberico&precio=24&cantidad=3&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+"POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=1 UNION SELECT login, pwd FROM usuarios--&pwd=clave126&remember=on&B1=Entrar",bad,POST /tienda1/publico/autenticar.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=lucia&nombre=lucia&apellidos=Romero&email=lucia@example.com&ciudad=Granada&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=10,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=9&nombre=Pimenton+Vera&precio=66&cantidad=4&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=8,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=elena&direccion=<img src=x onerror=alert(1)>&cp=28014&ciudad=Zaragoza,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=%3Cscript%3Ealert(%22xss%22)%3C/script%3E&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+"POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=1 UNION SELECT login, pwd FROM usuarios--&pwd=clave126&remember=on&B1=Entrar",bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=2&nombre=%27%3B+DROP+TABLE+usuarios%3B+--&precio=17&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=hugo&direccion=Calle+Mayor+8&cp=28017&ciudad=Vigo,good,POST /tienda1/miembros/editar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=alba&direccion=Calle+Mayor+1&cp=28010&ciudad=Madrid,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=%7C+ping+-c+3+127.0.0.1,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=8&nombre=; cat /etc/passwd&precio=59&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=..%2F..%2F..%2FWEB-INF%2Fweb.xml,bad,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=1&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=felix&nombre=felix&apellidos=Gomez&email=felix@example.com&ciudad=Malaga&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=5,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=4&nombre=Aceite+Oliva&precio=31&cantidad=4&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=3,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=marcos&direccion=Calle+Mayor+12&cp=28021&ciudad=Toledo,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=sidra+natural&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=javier&pwd=clave217&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=9&nombre=Pimenton+Vera&precio=66&cantidad=4&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+"GET http://localhost:8080/tienda1/publico/buscar.jsp?q=1+UNION+SELECT+login,pwd+FROM+usuarios--&orden=precio",bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=elena&nombre=<img src=x onerror=alert(1)>&apellidos=Perez&email=elena@example.com&ciudad=Zaragoza&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=%3Cscript%3Ealert(%22xss%22)%3C/script%3E,bad,GET /tienda1/publico/caracteristicas.jsp
+"POST http://localhost:8080/tienda1/publico/anadir.jsp id=1 UNION SELECT login, pwd FROM usuarios--&nombre=Jamon+Iberico&precio=24&cantidad=1&B1=Anadir+al+carrito",bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=%27%3B+DROP+TABLE+usuarios%3B+--,bad,GET /tienda1/index.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=8,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=alba&nombre=alba&apellidos=Garcia&email=alba@example.com&ciudad=Madrid&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=| ping -c 3 127.0.0.1&pwd=clave204&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=8&nombre=%3B+cat+/etc/passwd&precio=59&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=bruno&direccion=Calle+Mayor+2&cp='; DROP TABLE usuarios; --&ciudad=Sevilla,bad,POST /tienda1/miembros/editar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=gloria&direccion=Calle+Mayor+7&cp=28016&ciudad=Murcia,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=turron+blando&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=elena&pwd=clave152&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=4&nombre=Aceite+Oliva&precio=31&cantidad=4&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=1,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=marcos&nombre=marcos&apellidos=Navarro&email=marcos@example.com&ciudad=Toledo&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=11,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=10&nombre=Anchoas+Santona&precio=73&cantidad=5&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=9,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=felix&direccion=Calle+Mayor+6&cp=../../../../etc/passwd&ciudad=Malaga,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=<img+src=x+onerror=alert(1)>&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+"POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=diego&pwd=<script>alert(""xss"")</script>&remember=on&B1=Entrar",bad,POST /tienda1/publico/autenticar.jsp
+"GET http://localhost:8080/tienda1/publico/anadir.jsp?id=1+UNION+SELECT+login,pwd+FROM+usuarios--&nombre=Jamon+Iberico&precio=24&cantidad=1&B1=Anadir+al+carrito",bad,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=4,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=bruno&direccion=Calle+Mayor+2&cp=28011&ciudad=Sevilla,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=vino+tinto&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=| ping -c 3 127.0.0.1&nombre=Pimenton+Vera&precio=66&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=%3B+cat+/etc/passwd,bad,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=8&nombre=Miel+Alcarria&precio=59&cantidad=3&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=gloria&nombre=gloria&apellidos=Ruiz&email=gloria@example.com&ciudad=Murcia&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=6,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=5&nombre=Chorizo+Leon&precio=38&cantidad=5&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=4,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=alba&direccion=' OR '1'='1&cp=28010&ciudad=Madrid,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=azafran&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=lucia&pwd=clave230&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=10&nombre=Anchoas+Santona&precio=73&cantidad=5&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=alba&nombre=alba&apellidos=Garcia&email=alba@example.com&ciudad=Madrid&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=felix&nombre=felix&apellidos=Gomez&email=felix@example.com&ciudad=../../../../etc/passwd&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=<img+src=x+onerror=alert(1)>,bad,GET /tienda1/publico/caracteristicas.jsp
+"POST http://localhost:8080/tienda1/publico/anadir.jsp id=4&nombre=<script>alert(""xss"")</script>&precio=31&cantidad=1&B1=Anadir+al+carrito",bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=99,good
+"GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=1+UNION+SELECT+login,pwd+FROM+usuarios--",bad,GET /tienda1/index.jsp
+"GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=1+UNION+SELECT+login,pwd+FROM+usuarios--",bad,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=bruno&nombre=bruno&apellidos=Lopez&email=bruno@example.com&ciudad=Sevilla&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=1,good,GET /tienda1/publico/caracteristicas.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=%7C+ping+-c+3+127.0.0.1&nombre=Pimenton+Vera&precio=66&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=select+vino+from+carta&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=hugo&direccion=Calle+Mayor+8&cp=28017&ciudad=Vigo,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=cava&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=felix&pwd=clave165&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=5&nombre=Chorizo+Leon&precio=38&cantidad=5&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=8,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=alba&nombre=' OR '1'='1&apellidos=Garcia&email=alba@example.com&ciudad=Madrid&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=12,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=11&nombre=Sidra+Asturias&precio=80&cantidad=1&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=10,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=gloria&direccion=..%2F..%2F..%2FWEB-INF%2Fweb.xml&cp=28016&ciudad=Murcia,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=../../../../etc/passwd&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=<img src=x onerror=alert(1)>&pwd=clave152&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=4&nombre=%3Cscript%3Ealert(%22xss%22)%3C/script%3E&precio=31&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=4,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=carla&direccion=Calle+Mayor+3&cp=28012&ciudad=Valencia,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=queso+curado&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=alba&pwd=clave100&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=%7C+ping+-c+3+127.0.0.1,bad,GET /tienda1/index.jsp
+"POST http://localhost:8080/tienda1/publico/anadir.jsp id=1 UNION SELECT login, pwd FROM usuarios--&nombre=Jamon+Iberico&precio=24&cantidad=1&B1=Anadir+al+carrito",bad,POST /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=hugo&nombre=hugo&apellidos=Diaz&email=hugo@example.com&ciudad=Vigo&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=7,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=6&nombre=Turron+Jijona&precio=45&cantidad=1&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=5,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=bruno&direccion=Calle+Mayor+2&cp='; DROP TABLE usuarios; --&ciudad=Sevilla,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=%27+OR+%271%27%3D%271&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=marcos&pwd=clave243&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=11&nombre=Sidra+Asturias&precio=80&cantidad=1&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=hugo&nombre=hugo&apellidos=Diaz&email=hugo@example.com&ciudad=Vigo&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=gloria&nombre=..%2F..%2F..%2FWEB-INF%2Fweb.xml&apellidos=Ruiz&email=gloria@example.com&ciudad=Murcia&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=../../../../etc/passwd,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=<img src=x onerror=alert(1)>&nombre=Chorizo+Leon&precio=38&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=%3Cscript%3Ealert(%22xss%22)%3C/script%3E,bad,GET /tienda1/index.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=1&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=carla&nombre=carla&apellidos=Martin&email=carla@example.com&ciudad=Valencia&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=2,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=1&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=select+vino+from+carta&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=irene&direccion=Calle+Mayor+9&cp=28018&ciudad=Gijon,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=miel&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=gloria&pwd=clave178&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=6&nombre=Turron+Jijona&precio=45&cantidad=1&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+"GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=1+UNION+SELECT+login,pwd+FROM+usuarios--",bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=bruno&nombre=bruno&apellidos=Lopez&email=bruno@example.com&ciudad='; DROP TABLE usuarios; --&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=%27+OR+%271%27%3D%271,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=12&nombre=Azafran+Mancha&precio=87&cantidad=2&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=11,good,GET /tienda1/index.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=hugo&direccion=Calle+Mayor+8&cp=; cat /etc/passwd&ciudad=Vigo,bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=..%2F..%2F..%2FWEB-INF%2Fweb.xml&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=felix&pwd=../../../../etc/passwd&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=<img+src=x+onerror=alert(1)>&nombre=Chorizo+Leon&precio=38&cantidad=1&B1=Anadir+al+carrito,bad,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=felix&pwd=../../../../etc/passwd&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=diego&direccion=Calle+Mayor+4&cp=28013&ciudad=Bilbao,good,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=jamon&orden=precio,good,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=bruno&pwd=clave113&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=1&nombre=Vino+Rioja&precio=10&cantidad=1&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=alba&pwd=clave100&remember=on&B1=Entrar,good,POST /tienda1/publico/autenticar.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=irene&nombre=irene&apellidos=Moreno&email=irene@example.com&ciudad=Gijon&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=8,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=7&nombre=Cava+Brut&precio=52&cantidad=2&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=6,good,GET /tienda1/index.jsp
+"POST http://localhost:8080/tienda1/miembros/editar.jsp modo=editar&login=carla&direccion=1 UNION SELECT login, pwd FROM usuarios--&cp=28012&ciudad=Valencia",bad,POST /tienda1/miembros/editar.jsp
+GET http://localhost:8080/tienda1/publico/buscar.jsp?q=%27%3B+DROP+TABLE+usuarios%3B+--&orden=precio,bad,GET /tienda1/publico/buscar.jsp
+POST http://localhost:8080/tienda1/publico/autenticar.jsp modo=entrar&login=' OR '1'='1&pwd=clave100&remember=on&B1=Entrar,bad,POST /tienda1/publico/autenticar.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=12&nombre=Azafran+Mancha&precio=87&cantidad=2&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+"POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=carla&nombre=1 UNION SELECT login, pwd FROM usuarios--&apellidos=Martin&email=carla@example.com&ciudad=Valencia&B1=Registrar",bad,POST /tienda1/publico/registro.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=hugo&nombre=hugo&apellidos=Diaz&email=hugo@example.com&ciudad=; cat /etc/passwd&B1=Registrar,bad,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=..%2F..%2F..%2FWEB-INF%2Fweb.xml,bad,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=6&nombre=../../../../etc/passwd&precio=45&cantidad=1&B1=Anadir+al+carrito,bad,POST /tienda1/publico/anadir.jsp
+GET http://localhost:8080/tienda1/index.jsp?lang=es&pagina=<img+src=x+onerror=alert(1)>,bad,GET /tienda1/index.jsp
+GET http://localhost:8080/tienda1/publico/anadir.jsp?id=8&nombre=Miel+Alcarria&precio=59&cantidad=3&B1=Anadir+al+carrito,good,GET /tienda1/publico/anadir.jsp
+POST http://localhost:8080/tienda1/publico/registro.jsp modo=registro&login=diego&nombre=diego&apellidos=Sanchez&email=diego@example.com&ciudad=Bilbao&B1=Registrar,good,POST /tienda1/publico/registro.jsp
+GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?id=3,good,GET /tienda1/publico/caracteristicas.jsp
+POST http://localhost:8080/tienda1/publico/anadir.jsp id=2&nombre=Queso+Manchego&precio=17&cantidad=2&B1=Anadir+al+carrito,good,POST /tienda1/publico/anadir.jsp

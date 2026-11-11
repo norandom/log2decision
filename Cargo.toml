@@ -52,6 +52,7 @@ l2d-decide = { path = "crates/l2d-decide" }
 l2d-assess = { path = "crates/l2d-assess" }
 l2d-eval = { path = "crates/l2d-eval" }
 
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
