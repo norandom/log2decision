@@ -71,7 +71,7 @@ features on HTTP CSIC 2010.
 4. The Log Triage Tool shall produce the same baseline ratios when fitted twice on the same labelled logs with the same settings.
 5. The Log Triage Tool shall make the baseline scorer usable when no NPU and no trained encoder are available.
 6. The Log Triage Tool shall provide an option to separate or normalize routing context (e.g. method and URL path) from payload query/body tokens during feature extraction, ensuring that baseline ratios assess payload anomalies agnostically rather than memorizing endpoint identities.
-7. The Log Triage Tool shall solve the baseline logistic regression deterministically using robust numerical libraries (`faer` / `linfa`), avoiding custom stochastic line-search algorithms.
+7. The Log Triage Tool shall solve the baseline logistic regression deterministically with a library optimizer (the `argmin` L-BFGS with its library line search, as used by `linfa-logistic`), without stochastic methods and without a hand-written line search.
 
 ### Requirement 3: Training the log encoder
 **Objective:** As a log analyst, I want to train a small encoder on log text, so that the vectors carry the character-level signal that general text models miss.
