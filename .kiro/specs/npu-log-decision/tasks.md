@@ -41,7 +41,7 @@
   - _Depends: 1.1_
   - _Requirements: 2.1, 2.4_
 
-- [ ] 1.6 Fit deterministic logistic regression via numerical library
+- [x] 1.6 Fit deterministic logistic regression via numerical library
   - Implement L2-penalized logistic regression in `l2d-baseline` using robust numerical solver (`faer` / `linfa`), supporting sparse and dense rows
   - Guarantee bit-identical weights for identical inputs and settings without stochastic line-search instability
   - Done when two fits on the same rows yield bit-equal weights and toy separable data is classified with 100% accuracy
@@ -338,4 +338,9 @@
 - 1.5: `l2d_baseline::hashing`: `CharHasher::row(&str) -> SparseRow` (strictly ascending `u32` indices, `f64` values, unit L2 norm, empty text gives an empty row). FNV-1a 64-bit per n-gram; bucket = low 32 bits modulo `buckets`; sign = parity of the high 32 bits. `HashingSettings { buckets, ngram_max, routing }` with `RoutingMode::{Keep, Strip, Isolate}`.
 - 1.5: Row dimension is `CharHasher::dimension()`: `buckets` for keep and strip, `2 * buckets` (131,072 by default) for isolate, where payload features are in `0..buckets` and routing features in `buckets..2*buckets` (`routing_offset()`). Size weight vectors from `dimension()`, not from `buckets`. Isolate normalizes the whole row; masking the routing half needs renormalization.
 - 1.5: Strip and isolate are meaningful only for texts in the CSIC adapter layout. A text without `?` or line feed is routing only: strip gives an empty row. That includes every POST row of the mini fixture (space before the body) and any ordinary log line. Task 1.7 must define the ratio for an empty row and must store the routing mode in the saved settings and the revision; fixture tests use keep.
+- 1.6: `l2d_baseline::logreg`: `LogReg::{fit_sparse, fit_matrix, fit_dense, from_parts, probability_sparse, probability_dense}`, `SparseMatrix` (CSR builder), `LogRegSettings { l2, max_iter, tolerance }` (defaults 1.0 / 100 / 1e-4), fits return `(LogReg, FitReport)`; labels are `&[bool]` with `true` = bad. Objective: sum of log-losses plus `l2/2 * |w|^2`, bias not penalized.
+- 1.6: Solver deviation from the wording of requirement 2.7: `linfa-logistic` 0.8.1 fits dense arrays only, so the code calls `argmin` 0.11 L-BFGS with More-Thuente line search directly (the optimizer `linfa-logistic` uses, same settings, zero start) on sparse and dense rows. `faer` is not used; `linfa-logistic` is a dev-dependency used as a test reference. `argmin` and `ndarray` were added to the design's allowed dependencies on 2026-11-11; the texts "via `faer` / `linfa`" in requirement 2.7 and task 1.6 are met in intent, not literally.
+- 1.6: At CSIC fold size (20,000 x 65,536) the default settings stop at the 100-iteration cap (gradient norm 1.8e-4 against 1e-4, training accuracy 0.988; release 1.7 s, debug about 32 s). The tolerance is absolute on the summed-loss gradient, so it tightens with row count. `Termination::Converged` also covers the cost-change stop, so check `gradient_norm` when the gradient criterion matters. Task 1.7 must fix or store `max_iter` and tolerance, include them in the revision, and surface the termination.
+- 1.6: Weights are bit-equal across runs and processes of one build on one machine, not across toolchains or machines (platform `exp` and `ln_1p`). Row order is part of the input.
+- 1.6: Open follow-ups, not blocking: no test drives the fit to very large margins (a naive softplus would pass); the scale test adds about 30 to 45 s to every debug test run and asserts a wall-time bound that could flake on a loaded machine.
 - 1.1: The README layout table (design "Modified Files") is not owned by any task; update it when the CLI is wired (1.11).

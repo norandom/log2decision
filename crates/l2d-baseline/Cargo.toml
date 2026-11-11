@@ -8,3 +8,11 @@ publish.workspace = true
 
 [dependencies]
 l2d-core.workspace = true
+argmin.workspace = true
+argmin-math.workspace = true
+ndarray.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+linfa.workspace = true
+linfa-logistic.workspace = true
