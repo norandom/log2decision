@@ -1,45 +1,41 @@
 # Feasibility: triaging text logs with NPU embeddings and small decision heads
 
-Date: 2026-11-11 · Status: research, first measurements · Spec: `.kiro/specs/npu-log-decision/`
+Date: 2026-11-11 · Status: superseded in part, see the first section · Spec: `.kiro/specs/npu-log-decision/`
 
-> Update, same day: the embedding model measured here is too slow for triage
-> (2.3 logs/s on real requests), and general text embeddings separate attacks
-> worse than a character n-gram baseline. See
-> [Embedding speed and separability on CSIC 2010](2026-11-11-embedding-speed-benchmark.md).
-> The verdicts "Works" and "Tight" in the table below describe the route, not
-> its fitness for this workload.
+This is where the project started: could a laptop NPU produce embeddings for
+log lines, and could a small decision layer on top rank those logs for an
+analyst? The short answer on the day was yes. Within hours the benchmark showed
+the embedding model was the wrong tool, and the plan changed. The document is
+kept as the record of the starting point.
 
-## Summary
+## What became of this plan
 
-The plan is feasible on this laptop. An embedding model already runs on the NPU
-and answers over local HTTP, so a Rust program can use it without any Python.
-Venn's published decision head cannot read those vectors, so the decision part
-has to be built here; the methods behind it are small. The largest open risk is
-not the hardware. It is that raw embedding similarity follows the URL of a web
-request more than the attack inside it, so the bad/good ratio needs a fitted
-head.
-
-| Part | Verdict | Basis |
+| Part | Verdict that morning | What happened |
 | --- | --- | --- |
-| Embeddings on the NPU | Works | Measured on this machine |
-| Vector assessment tools | Feasible | Methods exist in the thesis notebooks; port needed |
-| Vector plus text database | Feasible | LanceDB recommended; not yet tried |
-| Venn as shipped, on NPU vectors | Not feasible | Venn documentation |
-| Venn's method, rebuilt in Rust | Feasible | Methods are logistic regression, nearest neighbours, a permutation test |
-| Speed | Tight | About 3 logs/s unoptimized |
+| Embeddings on the NPU | Works | The route works, but at 2.3 logs/s it is useless for triage. Dropped |
+| General text embeddings as the representation | Assumed | They separate attacks worse than character counts. Dropped as the basis of the score |
+| Vector assessment tools | Feasible | Kept; in the spec as requirement 8 |
+| Vector plus text database | Feasible, LanceDB | Kept, but the store became SQLite with its text-search extension |
+| Venn as shipped | Not feasible | Unchanged |
+| Venn's method, rebuilt in Rust | Feasible | Kept: nearest labelled logs as evidence, plus a calibration layer and a shift test |
+| Speed | Tight | The deciding problem, see the [benchmark](2026-11-11-embedding-speed-benchmark.md) |
 
-## Why this report exists
+What replaced the embedding model is a character-level baseline scorer and,
+behind a gate, a small encoder trained on log text.
+
+## Why the question came up
 
 The log2ml thesis classified Sysmon logs with a Linformer encoder and TPOT in
-Python notebooks. The goal now is different in three ways. The scope is any text
-log (web, attack traffic, CTF material). The output is a ratio of bad to good
-per log, used to score logs down for triage, not a verdict. And the work should
-run locally at low energy, in Rust.
+Python notebooks. Three things are different now. The scope is any text log:
+web requests, attack traffic, CTF material. The output is a ratio of bad to
+good per log, used to score logs down, not a verdict. And it should run locally
+at low energy, in Rust.
 
-The question was whether an NPU-only embedding route, a vector database with
-text search, and the Vector Decision Model idea from Venn fit together.
+So the question was whether three pieces fit together: an embedding route that
+uses only the NPU, a database that searches both vectors and text, and the
+Vector Decision Model idea from Venn.
 
-## 1. Embeddings on the NPU work today
+## 1. Embeddings on the NPU
 
 `../memguard_alpha` has two NPU routes on this machine (AMD Ryzen AI 9 HX 370,
 NPU driver 32.0.20102.3930). Both had only been used for chat models.
@@ -49,7 +45,7 @@ NPU driver 32.0.20102.3930). Both had only been used for chat models.
 | FastFlowLM 1.0.12 | `flm serve` starts a local OpenAI-compatible server | Chosen: has an `--embed` option |
 | Ryzen AI OGA 0.18.0 | `og.Model(dir)` in a Python environment | Not used: generative runtime, Python only |
 
-Measured on 2026-11-11 with `flm serve --embed embed-gemma:300m` on port 11560:
+Measured with `flm serve --embed embed-gemma:300m` on port 11560:
 
 - The embedder runs without a chat model next to it.
 - `POST /v1/embeddings` returns 768 dimensions, norm 0.997, and the same vector
@@ -58,13 +54,13 @@ Measured on 2026-11-11 with `flm serve --embed embed-gemma:300m` on port 11560:
 - 40 single requests took 13.3 s, about 3 logs/s. The client was PowerShell and
   nothing was tuned.
 
-Not measured: NPU utilization, power draw, batch throughput, long inputs.
-
-The model is stored in `./models` (615 MB), set through `FLM_MODEL_PATH`.
+NPU utilization, power draw, batch throughput and long inputs were not
+measured. The model is 615 MB and lives in `./models`, set through
+`FLM_MODEL_PATH`.
 
 ## 2. Raw similarity follows the endpoint, not the attack
 
-Four sample web requests were embedded in the same run:
+Four sample web requests went through the embedder in the same run:
 
 | Pair | Cosine |
 | --- | ---: |
@@ -72,16 +68,15 @@ Four sample web requests were embedded in the same run:
 | Normal request and a normal request to another page | 0.40 |
 | SQL injection and cross-site scripting, different URLs | 0.34 |
 
-Four lines are an observation, not a result. But the direction matters: a
-plain nearest-neighbour vote would find the neighbours of an injected request
-among the normal requests to the same page. The ratio therefore has to come
-from a head fitted on labelled examples, or from comparing a request with
-others on the same endpoint. The assessment tools in section 3 should test this
-first on the full dataset.
+Four lines are an observation and nothing more. But they point the wrong way
+for a nearest-neighbour vote: the neighbours of an injected request are the
+normal requests to the same page. This was the first sign of the problem the
+benchmark later measured properly, and it is why the spec now evaluates on
+endpoints the scorer has never seen.
 
 ## 3. Vector assessment: what the thesis has and what is missing
 
-The thesis notebooks contain these checks as notebook cells:
+The thesis notebooks contain these checks, as notebook cells:
 
 | Group | In the notebooks |
 | --- | --- |
@@ -90,38 +85,33 @@ The thesis notebooks contain these checks as notebook cells:
 | Properties | Cosine-similarity distribution (Linformer versus LongFormer); raw versus normalized vectors in FAISS; shape checks |
 | Downstream | TPOT classification with recall, F1, ROC AUC, confusion matrix, imbalance handling |
 
-To add for this project:
+Missing, and added to the spec:
 
-- Loss from shortening the vector: EmbeddingGemma is trained so that the first
-  512, 256 or 128 dimensions can be used alone. Measure what each cut costs.
-- Loss from quantization: compare the NPU vectors with a float reference of the
-  same model (neighbour overlap, cosine).
-- Label separability, overall and within one endpoint (follows from section 2).
+- What shortening a vector costs.
+- What quantization costs: NPU vectors against a float reference of the same
+  model.
+- Label separability, overall and within one endpoint.
 - Intrinsic dimension, anisotropy, duplicate rate.
 
-UMAP and t-SNE have weak Rust support. Projection plots can stay a small Python
-script run with `uv`; the numeric checks belong in Rust.
-
-## 4. Storage: LanceDB first
+## 4. Storage
 
 The store has to answer vector searches and text queries over the same rows.
 
 | Store | Vector and text search | Fit |
 | --- | --- | --- |
-| LanceDB | Both, in one embedded store | Recommended: Rust-native, no server, Venn has an adapter |
+| LanceDB | Both, in one embedded store | Recommended that day: Rust-native, no server |
 | Qdrant | Both | Separate server; good Rust client |
 | OpenSearch | Both | Closest to the thesis's Elasticsearch work; heavy |
 | OpenObserve | Text yes; vector unknown | Two searches found no evidence of vector support |
 
-Nothing has been loaded into any store yet.
+Nothing was loaded into any store. The spec later settled on SQLite, which is
+smaller and synchronous.
 
 ## 5. Decisions: rebuild Venn's method, do not use its head
 
 Venn calls itself a Vector Decision Model: a frozen embedding model plus small
-local heads that route, score and compare populations. It is a research
-preview in Python with PyTorch.
-
-Why it cannot be used directly:
+local heads that route, score and compare populations. It is a research preview
+in Python with PyTorch, and it cannot be used here as shipped:
 
 - Its published head is tied to EmbeddingGemma 2 in float32. The documentation
   says other vectors "cannot be mixed with `venn-1` stores or used with the
@@ -129,60 +119,46 @@ Why it cannot be used directly:
 - It has no NPU, ONNX or quantized backend.
 - Only its in-process Python outcome store accepts vectors from another model.
 
-What to build instead, in Rust, on the NPU vectors:
+The methods behind it are small, though, and can be rebuilt:
 
-1. A ratio head: logistic regression on labelled good and bad logs. Its output
-   is the bad/good ratio used to rank and score down logs. It can abstain when
-   a log is far from everything it has seen.
-2. Evidence: the nearest labelled logs from the store, shown with the score.
-3. Population shift: an RBF MMD permutation test between two groups of logs,
-   for example today's logs against a known-good baseline.
+1. A ratio per log, learned from labelled good and bad logs, with the option to
+   abstain.
+2. Evidence: the nearest labelled logs, shown with the score.
+3. A population-shift test between two groups of logs, for example today's
+   logs against a known-good baseline.
 
-Venn on CPU with its own reader can serve as a reference on the same samples.
-That is optional and would be the only Python component.
-
-For later, if prompts to a local language model are needed (for example to
-explain a triage decision), `dspy-rs` is a candidate. Version 0.7.3 has the
-COPRO, MIPROv2 and GEPA optimizers; its README warns that the API changes
-between versions. It has not been tried here.
+If prompts to a local language model are needed later, for instance to explain
+a decision, `dspy-rs` is a candidate. Version 0.7.3 has the COPRO, MIPROv2 and
+GEPA optimizers, and its README warns that the API changes between versions. It
+has not been tried.
 
 ## 6. Data: CSIC 2010 first, AIT V2 second
 
-HTTP CSIC 2010 is downloaded to `data/csic-2010/` (Kaggle upload by ispangler).
+HTTP CSIC 2010 is in `data/csic-2010/` (Kaggle upload by ispangler).
 
 - 61,065 requests: 36,000 normal, 25,065 anomalous.
-- 43,088 GET, 17,580 POST, 397 PUT; 13,498 distinct URLs.
+- 43,088 GET, 17,580 POST, 397 PUT.
 - Columns include method, URL, headers, body and a 0/1 label.
 - The requests are generated, not captured, and target one shop application.
-  Results on it will not carry over to other applications without a second set.
-
-At 3 logs/s the full set takes about 5.7 hours to embed. Deduplicating
-identical requests and batching should come before any full run.
+  Results will not carry over to other applications without a second dataset.
 
 AIT Log Data Set V2 (Zenodo) is step 2: eight testbeds, several log types,
 attack labels per line. Splunk BOTS v1 was considered as a CTF source and set
-aside, because its answer key is given on request only and its answers are not
-per-log labels.
+aside. Its answer key is given on request only, and its answers are not per-log
+labels.
 
-## What would prove this wrong
+## What would have proved this wrong, and what did
 
-- A fitted ratio head on CSIC 2010 does not separate attacks from normal
-  requests on the same endpoint. Then the embedding model, the input format, or
-  the approach has to change.
+Three conditions were written down that morning.
+
+- A fitted ratio on CSIC 2010 fails to separate attacks from normal requests on
+  the same endpoint. Not tested in this form; the spec now tests it with
+  grouped splits.
 - NPU throughput stays near 3 logs/s after batching and deduplication, and a
-  small model on the CPU reaches the same quality with less energy. Then the
-  NPU is the wrong place for this workload. See
-  [the model choice document](2026-11-11-embedding-model-choice.md).
-- The quantized NPU vectors differ enough from the float reference to change
-  triage rankings.
-
-## Next steps
-
-1. Generate requirements for the spec (`/kiro-spec-requirements npu-log-decision`).
-2. Embed a stratified, deduplicated CSIC sample and run the separability checks
-   from section 3.
-3. Fit the first ratio head and report ranking quality.
-4. Use the same vectors to settle the model choice.
+  small model on the CPU does as well for less. This is what happened. Batching
+  changed nothing, and the cheapest method tried was also the best.
+- Quantized NPU vectors differ enough from a float reference to change
+  rankings. Never reached; the model was dropped first.
 
 ## Sources
 

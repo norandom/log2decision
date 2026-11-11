@@ -1,46 +1,138 @@
 # log2decision
 
-Local, low-energy triage of text logs: embeddings on the laptop NPU, a vector
-and text store, and small decision heads that give each log a bad/good ratio.
-Successor to the [log2ml](https://github.com/norandom/log2ml) master thesis.
-Implementation language: Rust.
+`l2d` reads text logs on your own machine and tells you which ones to look at
+first. Each log gets a score between 0 and 1 for how likely it is bad, learned
+from logs you have already labelled. Logs that look good are scored down so
+your time goes to the rest.
 
-Status: research and specification. No application code yet.
+It is built for a security analyst with a laptop and too many logs. Nothing is
+sent anywhere, and the tool is designed to stay out of the way of whatever else
+the machine is doing.
+
+Status, 2026-11-11: under construction. The reading, scoring and memory parts
+exist as tested library code. The commands that tie them together are not wired
+yet, so you cannot triage a file from the command line today. See
+[what works today](#what-works-today).
+
+## What you will get
+
+For a file of logs, `l2d triage` returns three lists:
+
+| List | Meaning |
+| --- | --- |
+| Review | Logs ranked from most to least likely bad, up to the number you say you have time for |
+| Scored down | Logs the tool considers good, with the error rate that claim carries |
+| Uncertain | Logs it will not call either way, or that look unlike anything it was calibrated on |
+
+Each decision shows what it rests on: which scorer produced it and, once the
+encoder exists, the nearest labelled logs.
+
+Three things it will not do. It does not block, delete or change logs; it ranks
+and you decide. It does not send log data over a network; no network code is
+even linked into the binary. And it does not take the machine down: before it
+loads a file it reads the free memory, sizes its batches to fit, and refuses
+with a clear message when a job would not fit.
+
+## How it decides
+
+The first scorer is deliberately simple. It counts short character sequences in
+each log (think `' OR`, `%27`, `../`) and learns which ones show up in bad logs.
+That is the technique behind classic spam filters, and on web attack data it
+beat every general text-embedding model we tried, by a wide margin. The
+numbers are in the [benchmark](docs/2026-11-11-embedding-speed-benchmark.md).
+
+On top of the score sits a calibration step (conformal prediction). It turns
+"0.8" into a statement you can act on: at a 5 % error rate, this log is good,
+bad, or too close to call. Without it you have a ranking; with it you have a
+bounded risk when you skip a log.
+
+A small encoder trained on log text, running on the laptop's NPU, is the next
+stage. It has to beat the simple scorer on endpoints it has never seen before
+it is allowed in.
+
+## What works today
+
+| Part | State |
+| --- | --- |
+| Reading logs: one per line, labelled CSV or JSONL, HTTP CSIC 2010 | Done, tested |
+| Deduplication, with skipped rows reported by position and reason | Done, tested |
+| Batches sized to free memory, with a memory limit that holds | Done, measured on files up to 564 MB |
+| Character-sequence features and the scoring model | Done, tested |
+| Baseline scorer (fit, score, save, load) | Built, in review |
+| Calibrated decisions | Specified, not built |
+| Store, search, triage, evaluation | Specified, not built |
+| Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
+| Encoder on the NPU | Feasibility shown; gated behind the baseline evaluation |
+
+A measured example: HTTP CSIC 2010 (61,065 requests, 28 MB) is read and
+deduplicated to 25,608 distinct logs in about a quarter of a second, with a
+peak of 73 MiB of memory. In small batches the peak drops to about 35 MiB.
+
+## Try it
+
+You need Windows 11 and Rust 1.98 (the repository pins the toolchain). Linux
+should work for everything except the NPU, but has not been tested.
+
+```
+cargo build --release
+cargo test --workspace
+cargo run --release -p l2d-cli -- --help
+```
+
+The help lists every command and the two options that apply to all of them:
+
+| Option | Effect |
+| --- | --- |
+| `--memory-limit 2GB` | Cap the memory the tool may use. Default: half of what is free |
+| `--batch-rows 10000` | Cap the batch size. Default: 65,536 rows, fewer when memory is short |
+
+To see the reader and the memory limit at work on your own file:
+
+```
+cargo run --release -p l2d-core --example read_batched -- lines path\to\your.log --memory-limit 512MB
+```
+
+For the CSIC dataset, download it as described in [data/README.md](data/README.md)
+and replace `lines` with `csic`.
 
 ## Documents
 
 Every document in `docs/` is listed here, newest first. File names start with
-the date.
+the date. These are records of what was known on that day; where later work
+overturned something, the document says so at the top.
 
-| Date | Document | Status |
+| Date | Document | What it settles |
 | --- | --- | --- |
-| 2026-11-11 | [Embedding speed and separability on CSIC 2010](docs/2026-11-11-embedding-speed-benchmark.md) | Measured; NPU embedding too slow, general embeddings trail a character baseline |
-| 2026-11-11 | [Feasibility: triaging text logs with NPU embeddings and small decision heads](docs/2026-11-11-npu-log-decision-feasibility.md) | Research, first measurements |
-| 2026-11-11 | [Embedding model choice](docs/2026-11-11-embedding-model-choice.md) | Open; NPU default rejected on speed |
+| 2026-11-11 | [Embedding speed and separability on CSIC 2010](docs/2026-11-11-embedding-speed-benchmark.md) | General embeddings are too slow on the NPU and worse than character features; a small encoder of our own runs fast there |
+| 2026-11-11 | [Embedding model choice](docs/2026-11-11-embedding-model-choice.md) | Which embedding models were considered and why the default was dropped |
+| 2026-11-11 | [Feasibility: triaging text logs with NPU embeddings and small decision heads](docs/2026-11-11-npu-log-decision-feasibility.md) | The starting plan and what became of each part |
 
-## Specifications
+## For contributors
 
-| Spec | Phase |
-| --- | --- |
-| [npu-log-decision](.kiro/specs/npu-log-decision/requirements.md) | Requirements and [design](.kiro/specs/npu-log-decision/design.md) approved; [tasks](.kiro/specs/npu-log-decision/tasks.md) generated, awaiting approval |
-
-## Layout
+The work follows a written specification:
+[requirements](.kiro/specs/npu-log-decision/requirements.md),
+[design](.kiro/specs/npu-log-decision/design.md) and
+[tasks](.kiro/specs/npu-log-decision/tasks.md). The task file also holds the
+notes each finished task left for the next one.
 
 | Path | Content |
 | --- | --- |
+| `crates/` | The Rust workspace: `l2d-core` (input, memory), `l2d-baseline` (features, scorer), `l2d-cli`, and crates reserved for the store, decisions, assessment, evaluation and encoder |
+| `tests/fixtures/` | A small labelled fixture used by the tests |
 | `docs/` | Dated research and decision documents, indexed above |
-| `data/<dataset>/` | One directory per dataset, registered in [data/README.md](data/README.md); the data itself is not tracked |
-| `models/` | Model weights (`FLM_MODEL_PATH`); never on C:; not tracked |
-| `.kiro/specs/` | Specifications |
-| `log2ml/` | Local reference copy of the thesis repository; not tracked |
+| `data/<dataset>/` | One directory per dataset, registered in [data/README.md](data/README.md); the data is not tracked |
+| `models/` | Fitted scorers and model weights; not tracked |
+| `.kiro/specs/` | Specification |
+| `log2ml/` | Local reference copy of the [thesis repository](https://github.com/norandom/log2ml) this project grew out of; not tracked |
 
-## Project rules
+Rules of the house:
 
-- Rust is the implementation language. Python is not developed here; `uv` may
-  run one-off analysis scripts.
-- On this host, agents use PowerShell. No Git Bash and no `wsl` commands.
-  Containers run through `docker` and `docker compose`.
+- Rust only. Python is not part of the tool; `uv` may run one-off analysis
+  scripts during development.
+- Polars is the one data layer. Tabular data moves between crates as Polars
+  frames.
+- No crate that can open a network connection. A test fails if one appears in
+  the lock file.
 - New documents go to `docs/` with a date prefix and get a row in the table
-  above.
-- Datasets go to `data/<dataset>/` and get a row in `data/README.md`.
-- Models go to `models/`.
+  above. Datasets go to `data/<dataset>/` and get a row in `data/README.md`.
+- On the development host, agents use PowerShell: no Git Bash, no `wsl`.
