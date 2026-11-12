@@ -88,6 +88,14 @@ After the NPU encoder (order unchanged):
    encoder exists and the linear head has shown what a head adds; numeric
    outcomes; the generic text head.
 
+## Decided on 2026-11-12
+
+The owner chose point 2 (the three small additions) and confirmed point 3 as
+the reading of "score and decision model align later". The amendment draft is
+`.kiro/specs/npu-log-decision/amendment-2026-11-12-vector-decision-heads.md`.
+It replaces "spread" by per-label counts, because the spread of good/bad labels
+follows from the ratio.
+
 ## Open
 
 - Venn's defaults for `k`, `min_support`, the shift kernel and the permutation
