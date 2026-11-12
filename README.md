@@ -107,6 +107,7 @@ overturned something, the document says so at the top.
 | 2026-11-11 | [Embedding speed and separability on CSIC 2010](docs/2026-11-11-embedding-speed-benchmark.md) | General embeddings are too slow on the NPU and worse than character features; a small encoder of our own runs fast there |
 | 2026-11-11 | [Embedding model choice](docs/2026-11-11-embedding-model-choice.md) | Which embedding models were considered and why the default was dropped |
 | 2026-11-11 | [Feasibility: triaging text logs with NPU embeddings and small decision heads](docs/2026-11-11-npu-log-decision-feasibility.md) | The starting plan and what became of each part |
+| 2026-11-12 | [Venn's operations against the log2decision spec](docs/2026-11-12-venn-vdm-gap-list.md) | Which Vector Decision Model operations the spec covers, which are missing, and a proposal for after the NPU encoder |
 
 ## For contributors
 
