@@ -94,8 +94,11 @@ refusal names what was found and what was expected and changes nothing. Its test
 State of 2026-11-12: `pypi.amd.com` answered every request from the reference host with
 403 "Access Denied" (the URL above and the 1.8.0 URL of the sibling project alike), so
 the wheel was not fetched through this environment and there is no `tools/runtime/uv.lock`
-yet. The hashes of the table are those of the wheel's own `RECORD` in the environment
-named above. The step itself was run with `--site-packages` pointing at that
+yet. That the index serves the wheel under that URL is known from pip's cache on the host:
+it holds the download of 2026-11-08 under the key of exactly that URL (307,779,608 bytes,
+SHA-256 `0f4b98625c4217832d4001acd4beb4306e65123c679afc5e5bb3282fc9064c8b`), and the five
+files inside it have the sizes and hashes of the table. uv does not read pip's cache, so
+`uv lock` has to wait for the index and should then record that hash. The step itself was run with `--site-packages` pointing at that
 environment and `--accept-unrecorded-origin` (pip records no URL for a package from an
 index) into a scratch directory; the five files it placed are byte for byte those of
 `runtime/ryzenai/`.

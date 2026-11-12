@@ -13,9 +13,14 @@
 #
 # State of 2026-11-12 (task 2.3): there is no `uv.lock` yet. `pypi.amd.com` answered
 # every request from the reference host with 403 "Access Denied" that day, this URL and
-# the 1.8.0 URL of the sibling project alike, so the URL below is the expected one and
-# was not fetched. Run `uv lock --project tools/runtime` when the index answers, and
-# commit the result. Whatever is fetched, `provision.py` copies only files that have the
+# the 1.8.0 URL of the sibling project alike, so the wheel was not
+# fetched by uv. That the index serves it under this URL is known from pip's cache on
+# the host, which holds the download of 2026-11-08 under the key of exactly this URL:
+# 307,779,608 bytes, SHA-256
+# 0f4b98625c4217832d4001acd4beb4306e65123c679afc5e5bb3282fc9064c8b, and its five files
+# have the manifest's hashes. uv does not read pip's cache (`uv lock --offline` fails).
+# Run `uv lock --project tools/runtime` when the index answers, expect that hash in
+# `uv.lock`, and commit the result. Whatever is fetched, `provision.py` copies only files that have the
 # sizes and SHA-256 values of `runtime/ryzenai.manifest.json`.
 [project]
 name = "l2d-runtime-provisioning"
