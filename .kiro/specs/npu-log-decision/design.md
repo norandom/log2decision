@@ -305,9 +305,9 @@ flowchart TD
 | 6.1 | Ratio from labelled logs | NeighbourScorer | `Scorer::score` | Triage |
 | 6.2 | Evidence | NeighbourScorer | `Evidence` | Triage |
 | 6.3 | Abstain below support | NeighbourScorer | `Decision::Abstain` | Triage |
-| 6.4 | Ranking, abstained separate | Triage | `TriageResult` | Triage |
-| 6.5 | Review budget | Triage | `TriageResult.review`, `.scored_down` | Triage |
-| 6.6 | Name the scorer | Triage | `ScoredLog.by` | Triage |
+| 6.4 | Ranking, abstained separate | Triage | Triage frame: `list`, `rank` | Triage |
+| 6.5 | Review budget | Triage | `TriageSettings.review_budget`; `scored_down_by` | Triage |
+| 6.6 | Name the scorer | Triage | Triage frame: `scorer`, `ratio_<kind>` | Triage |
 | 6.7 | Never alter logs | Triage, Store | read-only inputs; store rows only added | |
 | 7.1 | Statistic and p-value | ShiftTest | `shift_test` | |
 | 7.2 | Group sizes, permutations | ShiftTest | `ShiftResult` | |
@@ -361,7 +361,7 @@ flowchart TD
 | 11.3 | Calibrate per label | ConformalCalibrator | per-label score lists | |
 | 11.4 | Calibrate per group, state which was used | ConformalCalibrator | `Stratum` | |
 | 11.5 | Refuse unsupported error rates | ConformalCalibrator | `CalibrationError::TooFewLogs` | |
-| 11.6 | Scored down, review, uncertain, unlike | Triage | `TriageResult`, `AbstainReason` | Triage |
+| 11.6 | Scored down, review, uncertain, unlike | Triage | Triage frame: `list`, `label_set`, `abstain_reason` | Triage |
 | 11.7 | Calibration or budget scored it down | Triage | `ScoredDownBy` | Triage |
 | 11.8 | Achieved against chosen error rate | Evaluator | `ScorerResult.coverage` | |
 | 11.9 | State the assumption | CLI output | `output.rs` text | |
@@ -834,37 +834,43 @@ impl Store {
 **Contracts**: Service [x]
 
 ```rust
-pub enum ScorerKind { Baseline, Neighbour }
+pub enum ScorerKind { Baseline, Neighbour }   // `Linear` joins with task 2.10
 
-pub struct Evidence {
-    pub neighbours: DataFrame,   // rows of the hits frame (task 1.9)
-    pub used: u32,
-    pub same_group_count: u32,
-    pub cross_group_count: u32,
-}
-
-pub enum Decision {
-    Ratio { value: f32, evidence: Option<Evidence> },
-    Abstain { found: u32, required: u32 },
-}
+// As built by task 1.10: scorers and triage exchange frames, not structs.
+pub struct ScoringCost { pub fixed_bytes: u64, pub row_bytes: u64, pub evidence_row_bytes: u64, pub evidence_columns: u32 }
 
 pub trait Scorer {
     fn kind(&self) -> ScorerKind;
-    fn score(&mut self, texts: &[&str]) -> Result<Vec<Decision>, L2dError>;
+    fn revision(&self) -> &str;
+    fn cost(&self, logs: &LogsFrame) -> ScoringCost;                        // the scorer's own statement; triage plans from it
+    fn score(&mut self, logs: &LogsFrame) -> Result<DataFrame, L2dError>;   // the Scores frame, plus the scorer's evidence columns
 }
 
-pub struct ScoredLog { pub text: String, pub occurrences: u32, pub by: Vec<(ScorerKind, Decision)> }
+pub struct TriageSettings { pub primary: ScorerKind, pub review_budget: Option<u64>, pub calibration: Option<TriageCalibration> }
+pub struct TriageCalibration { pub calibrator: /* the loaded calibration */, pub error_rate: f32 }
 
-pub struct TriageResult {
-    pub review: Vec<ScoredLog>,        // highest ratios, at most the budget
-    pub scored_down: Vec<ScoredLog>,
-    pub abstained: Vec<ScoredLog>,
+pub enum TriageList { Review, ScoredDown, Abstained }
+pub enum AbstainReason { ScorerAbstained, Uncertain, UnlikeCalibration }
+pub enum ScoredDownBy { Calibration, BudgetOnly }
+
+pub fn triage(logs: &LogsFrame, scorers: &mut [&mut dyn Scorer], settings: &TriageSettings) -> Result<TriageResult, TriageError>;
+pub fn triage_with(logs: &LogsFrame, scorers: &mut [&mut dyn Scorer], settings: &TriageSettings, budget: &mut MemoryBudget)
+    -> Result<TriageResult, TriageError>;
+
+impl TriageResult {
+    pub fn frame(&self) -> &DataFrame;            // one row per input log, in input order (the Triage frame, see "Data frames")
+    pub fn review(&self) -> DataFrame;            // views of that frame: ranked, at most the budget
+    pub fn scored_down(&self) -> DataFrame;
+    pub fn abstained(&self) -> DataFrame;
+    pub fn counts(&self) -> TriageCounts;
+    pub fn calibration(&self) -> Option<&CalibrationUse>;   // revision, error rate, the note of 11.9, logs judged on a group's list against the pooled list per label, label-set counts
 }
-
-pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: ScorerKind, budget: Option<usize>)
-    -> Result<TriageResult, L2dError>;
 ```
-- Postcondition: every input text appears in exactly one of the three lists.
+- Postcondition: every input log is one row of the frame and its `list` column names exactly one of the three lists. Triage has no access to a store and takes the logs by shared reference (requirement 6.9).
+- Ranking: ratio descending; equal ratios keep the order of the logs frame, also at the budget cut. The budget counts logs (rows), not occurrences.
+- With a calibration, logs are placed by label set exactly as requirement 11.6 says, with no special treatment of endpoints the calibration logs do not cover (owner decision of 2026-11-12); the budget applies to the ranked logs only.
+- Evidence: triage keeps the evidence columns of the primary scorer only. They must be String, Boolean or numeric, at most as many as the scorer's cost states; a list per log is written as such columns (per neighbour place, or one String per log). A scorer run as a secondary loses its evidence, so the neighbour scorer is the primary where its evidence is wanted (tasks 2.8, 3.7).
+- Memory: triage runs in batches under the budget and gives the same frame whatever the batch size. It holds the result frame (256 bytes per log), three times the evidence bytes plus 48 KiB per evidence column, and the loaded calibration (`ConformalCalibrator::held_bytes`). The three list views are not counted; a command that prints them holds them itself.
 
 #### ConformalCalibrator
 
@@ -941,7 +947,7 @@ impl ConformalCalibrator {
 pub enum AbstainReason { ScorerAbstained, Uncertain, UnlikeCalibration }
 pub enum ScoredDownBy { Calibration, BudgetOnly }
 ```
-- `ScoredLog` gains `calibrated: Option<Calibrated>`; entries of `TriageResult.abstained` carry an `AbstainReason`, entries of `scored_down` a `ScoredDownBy`.
+- In the triage frame a calibrated log carries `label_set`, `p_good`, `p_bad` and the two strata; abstained rows carry an `abstain_reason`, scored-down rows a `scored_down_by` (task 1.10).
 - With a calibrated primary scorer, triage places a log by its label set: bad alone goes to the review ranking, good alone to `scored_down` (by calibration), both and neither to `abstained`. The review budget then applies to the review ranking; logs beyond it are `scored_down` by budget only.
 - Evaluation reports, per label and per stratum, the share of test logs whose true label is missing from the set (achieved error rate) next to the chosen rate, and the share of each set kind (`ScorerResult.coverage`).
 
@@ -1073,7 +1079,7 @@ pub struct EvaluationReport {
 | `l2d baseline fit` / `score` | Fit or apply the baseline | `--input`, `--name` | identity or ratios |
 | `l2d encoder train` / `encode` / `info` | Train, encode, show identity | `--seed`, `--allow-cpu` | identity, `RunRecord` |
 | `l2d store add` / `search` | Fill and query a store | `--store`, `--text`, `--like`, `--label`, `--source`, `--k` | counts or hits |
-| `l2d triage` | Rank logs | `--store`, `--baseline`, `--budget`, `--primary` | `TriageResult` |
+| `l2d triage` | Rank logs | `--store`, `--baseline`, `--budget`, `--primary`, `--calibration`, `--error-rate` | the triage frame and its counts |
 | `l2d calibrate` | Calibrate a fitted scorer on held-out labelled logs | `--input`, `--baseline` or `--store`, `--name`, `--min-per-group` | calibration identity, counts per stratum |
 | `l2d shift` | Compare two groups | `--a`, `--b`, `--permutations`, `--seed` | `ShiftResult` |
 | `l2d assess` | Vector-set measurements | `--store`, `--kind`, `--reference`, `--out` | reports |
@@ -1108,6 +1114,7 @@ Frames exchanged between crates. Column names and types are fixed; a crate may a
 | Stored rows | `id` String, then the store rows columns, in insertion order | `Store::text_search`, `Store::vectors` | assessment, shift test, evaluation |
 | Hits | `query` (index of the query vector), `distance` Float32 (squared L2), `id`, `text`, `source`, `occurrences`, `label`, `group`, `truncated`; no vector | `Store::nearest` | neighbour scorer, outlier ranking, evidence |
 | Predictions | `text`, `label`, `group`, `fold` UInt32, `scorer`, `ratio`, `label_set` String nullable | evaluation harness | metrics, reports |
+| Triage | the Logs columns, then `scorer`, `ratio` (null where abstained), `abstained`, `list` (`review`, `scored_down`, `abstained`), `rank` UInt32 (ranked logs), `scored_down_by` (`calibration`, `budget_only`), `abstain_reason` (`scorer_abstained`, `uncertain`, `unlike_calibration`), with a calibration `label_set`, `p_good`, `p_bad`, `good_stratum`, `bad_stratum`, then `ratio_<kind>` per further scorer and the primary scorer's evidence columns; one row per input log in input order | triage | commands, evaluation |
 
 - Row order is meaningful: the logs frame is in first-occurrence order, and frames derived from it keep that order unless a column says otherwise.
 - Numeric code receives plain slices, `ndarray` arrays or sparse rows taken from these frames in row order; it never iterates a frame from several threads.

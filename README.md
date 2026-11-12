@@ -62,7 +62,8 @@ it is allowed in.
 | Calibrated decisions (label sets at a chosen error rate) | Library done and tested, not yet wired to a command. The error rate holds on endpoints the calibration logs cover (about 5 % measured on CSIC); on endpoints it has never seen, 32 % to 79 % of good logs were wrongly ruled out and none were called good |
 | Store: one SQLite file per store with a text index and the vectors | Library done and tested, not yet wired to a command. CSIC's 25,608 distinct logs are added in about 3.5 s into a 46 MiB file. A single log text may be at most 1 MiB |
 | Search in a store: by phrase (with or without case), by label and source, and by nearest vectors | Library done and tested, not yet wired to a command. On CSIC's 25,608 logs a nearest-vector search takes about 36 ms and the first 100 phrase matches about 1.5 ms. A search that does not fit the memory limit is refused |
-| Triage, evaluation | Specified, not built |
+| Triage: ranking, review budget, and with a calibration the split into review, scored down, uncertain and unlike | Library done and tested, not yet wired to a command. Triage of CSIC's 25,608 logs takes under a second |
+| Evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
 | Encoder on the NPU | Hardware gate passed: an 8-bit model with random weights runs on the AMD NPU from Rust, 36 of 38 nodes on the NPU, at 22,000 to 36,000 logs per second. Whether a trained encoder beats the simple scorer is being measured; the encoder itself is not built |
 

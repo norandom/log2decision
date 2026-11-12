@@ -520,6 +520,13 @@ impl MemoryBudget {
         self.usable_bytes().saturating_sub(self.held_bytes)
     }
 
+    /// What the operation has said it holds ([`MemoryBudget::hold`]). An operation that
+    /// holds a share of its own on top of the caller's reads this first and puts it
+    /// back when it is done; the figure can be more than the limit leaves.
+    pub fn held_bytes(&self) -> u64 {
+        self.held_bytes
+    }
+
     /// The largest batch: the analyst's, or [`DEFAULT_MAX_BATCH_ROWS`].
     pub fn max_batch_rows(&self) -> u64 {
         self.settings

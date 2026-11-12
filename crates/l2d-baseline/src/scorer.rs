@@ -856,6 +856,17 @@ impl BaselineScorer {
         self.model.bias()
     }
 
+    /// The memory hashing one text of `longest_text_bytes` bytes is estimated to take
+    /// while it is scored, in bytes: the figure the fit's estimate uses for its longest
+    /// text (40 bytes per n-gram, `ngram_max` n-grams per byte). Texts are scored one
+    /// after another, so the longest text of a set decides (task 1.10, for the memory
+    /// budget of triage).
+    pub fn scoring_bytes(&self, longest_text_bytes: u64) -> u64 {
+        longest_text_bytes
+            .saturating_mul(u64::from(self.settings.ngram_max))
+            .saturating_mul(HASHING_BYTES_PER_NGRAM)
+    }
+
     /// The ratio of `text` and whether the text has no features.
     fn score_one(&self, text: &str) -> (f32, bool) {
         let row = self.hasher.row(text);

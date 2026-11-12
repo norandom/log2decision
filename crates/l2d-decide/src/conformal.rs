@@ -73,6 +73,21 @@
 //! [`ConformalCalibrator::fit_with`] checks [`estimated_bytes`] with
 //! [`MemoryBudget::require_whole`] before it allocates anything.
 //!
+//! A calibration, fitted or loaded, is not transient: it keeps its lists for as long as
+//! it lives. [`ConformalCalibrator::held_bytes`] states how much (8 bytes per value of
+//! every list, and a little per list and group), and an operation that uses a
+//! calibration holds that figure in its memory budget (requirement 12.9); triage does.
+//! [`ConformalCalibrator::load`] itself takes no budget: while it runs it takes about
+//! twice what the calibration then keeps, up to three times for a calibration of many
+//! small groups (measured in `tests/triage_memory.rs`).
+//!
+//! # Abstentions
+//!
+//! A log its scorer abstained on has no ratio and is not a calibration log:
+//! [`calibration_points`] leaves it out. [`ConformalCalibrator::fit_baseline`] and
+//! [`ConformalCalibrator::fit_scorer`] (any scorer under the [`Scorer`] contract) go
+//! through it.
+//!
 //! # Saved form
 //!
 //! [`ConformalCalibrator::save`] writes `models/calibrations/<name>-<rev12>/` with two
@@ -140,6 +155,7 @@ use l2d_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::ScorerKind;
+use crate::scorer::{Scorer, check_scores};
 
 /// The error rate used when the analyst names none (decision of 2026-11-11).
 pub const DEFAULT_ERROR_RATE: f32 = 0.05;
@@ -180,6 +196,10 @@ const ESTIMATE_PER_GROUP_BYTE: u64 = 2;
 const ESTIMATE_FIXED_BYTES: u64 = 1024 * 1024;
 /// Memory per row of the scores frame of [`ConformalCalibrator::fit_baseline`].
 const SCORING_BYTES_PER_ROW: u64 = 48;
+/// What one group costs in the index of the groups beside its name: the entry (the
+/// name's 24 bytes and the 8 of the list's number) in a tree whose nodes are at least
+/// half full, with the nodes above them. See [`ConformalCalibrator::held_bytes`].
+pub const GROUP_INDEX_ENTRY_BYTES: usize = 96;
 
 /// The memory a calibration of `points` rows, whose group keys take `group_bytes` bytes
 /// in all, is estimated to need at its peak, in bytes:
@@ -437,6 +457,53 @@ pub fn points_frame(points: &[CalibrationPoint]) -> Result<DataFrame, L2dError> 
     .map_err(|error| L2dError::Runtime {
         detail: format!("building the calibration points frame failed: {error}"),
     })
+}
+
+/// The calibration points frame ([`points_schema`]) of `logs` and the scores frame a
+/// scorer gave for them, row for row: the ratio from `scores`, label and group from
+/// `logs`, in the order of the logs.
+///
+/// A log the scorer abstained on has no ratio and is not a calibration log: its row is
+/// left out. The flag `abstained` decides, whatever the ratio column holds on that row.
+/// Rows labelled `unknown` stay; [`ConformalCalibrator::fit_with`] ignores them.
+///
+/// A scores frame with another number of rows than `logs` is
+/// [`CalibrationError::InvalidPoints`].
+pub fn calibration_points(
+    scores: &DataFrame,
+    logs: &LogsFrame,
+) -> Result<DataFrame, CalibrationError> {
+    if scores.height() != logs.len() {
+        return Err(CalibrationError::InvalidPoints {
+            detail: format!(
+                "the scores frame has {} rows for {} logs",
+                scores.height(),
+                logs.len()
+            ),
+        });
+    }
+    let polars = |error: PolarsError| internal("building the calibration points", error);
+    let column = |frame: &DataFrame, from: &str, to: &str| {
+        frame
+            .column(from)
+            .map(|column| column.clone().with_name(to.into()))
+            .map_err(polars)
+    };
+    let points = DataFrame::new(vec![
+        column(scores, SCORES_RATIO, POINTS_RATIO)?,
+        column(logs.frame(), LogsFrame::LABEL, POINTS_LABEL)?,
+        column(logs.frame(), LogsFrame::GROUP, POINTS_GROUP)?,
+    ])
+    .map_err(polars)?;
+    let abstained = scores
+        .column(SCORES_ABSTAINED)
+        .and_then(Column::bool)
+        .map_err(polars)?;
+    if abstained.any() {
+        points.filter(&!abstained).map_err(polars)
+    } else {
+        Ok(points)
+    }
 }
 
 /// Refuses calibration logs the scorer was fitted on (requirement 11.1).
@@ -945,50 +1012,89 @@ impl ConformalCalibrator {
         budget: &MemoryBudget,
     ) -> Result<Self, CalibrationError> {
         require_held_out(scorer, inputs)?;
+        let scoring_bytes = (logs.len() as u64).saturating_mul(SCORING_BYTES_PER_ROW);
+        Self::fit_scored(
+            ScorerKind::Baseline,
+            scorer.revision(),
+            |logs| scorer.score(logs),
+            scoring_bytes,
+            logs,
+            settings,
+            budget,
+        )
+    }
+
+    /// Calibrates any scorer on `logs` through the [`Scorer`] contract: scores the
+    /// rows, leaves out those the scorer abstained on ([`calibration_points`]) and
+    /// calibrates on the rest that are labelled good or bad. See
+    /// [`ConformalCalibrator::fit_with`].
+    ///
+    /// This is what [`ConformalCalibrator::fit_baseline`] does after its check of the
+    /// inputs. The caller has made sure that the scorer was not fitted on these logs:
+    /// [`require_held_out`] knows the baseline scorer only. The memory asked for is
+    /// that of the calibration plus what the scorer says scoring all of `logs` at once
+    /// costs ([`Scorer::cost`]).
+    pub fn fit_scorer(
+        scorer: &mut dyn Scorer,
+        logs: &LogsFrame,
+        settings: &CalibrationSettings,
+        budget: &MemoryBudget,
+    ) -> Result<Self, CalibrationError> {
+        let kind = scorer.kind();
+        let revision = scorer.revision().to_owned();
+        let cost = scorer.cost(logs);
+        let scoring_bytes = cost.fixed_bytes.saturating_add(
+            (logs.len() as u64)
+                .saturating_mul(cost.row_bytes.saturating_add(cost.evidence_row_bytes)),
+        );
+        Self::fit_scored(
+            kind,
+            &revision,
+            |logs| scorer.score(logs),
+            scoring_bytes,
+            logs,
+            settings,
+            budget,
+        )
+    }
+
+    /// The common path of [`ConformalCalibrator::fit_baseline`] and
+    /// [`ConformalCalibrator::fit_scorer`]: the memory check, the scores of `score`,
+    /// the calibration points without the abstentions, the calibration.
+    fn fit_scored(
+        kind: ScorerKind,
+        revision: &str,
+        score: impl FnOnce(&LogsFrame) -> Result<DataFrame, L2dError>,
+        scoring_bytes: u64,
+        logs: &LogsFrame,
+        settings: &CalibrationSettings,
+        budget: &MemoryBudget,
+    ) -> Result<Self, CalibrationError> {
         let rows = logs.len() as u64;
-        let polars = |error: PolarsError| internal("building the calibration points", error);
         let group_bytes = logs
             .frame()
             .column(LogsFrame::GROUP)
             .and_then(string_bytes)
-            .map_err(polars)?;
+            .map_err(|error| internal("building the calibration points", error))?;
         budget
             .require_whole(
-                estimated_bytes(rows, group_bytes)
-                    .saturating_add(rows.saturating_mul(SCORING_BYTES_PER_ROW)),
+                estimated_bytes(rows, group_bytes).saturating_add(scoring_bytes),
                 OPERATION,
             )
             .map_err(CalibrationError::Memory)?;
 
-        let scores = scorer.score(logs).map_err(CalibrationError::Scorer)?;
-        let column = |frame: &DataFrame, from: &str, to: &str| {
-            frame
-                .column(from)
-                .map(|column| column.clone().with_name(to.into()))
-                .map_err(polars)
-        };
-        let mut points = DataFrame::new(vec![
-            column(&scores, SCORES_RATIO, POINTS_RATIO)?,
-            column(logs.frame(), LogsFrame::LABEL, POINTS_LABEL)?,
-            column(logs.frame(), LogsFrame::GROUP, POINTS_GROUP)?,
-        ])
-        .map_err(polars)?;
-        // A log the scorer abstained on has no ratio and is not a calibration log.
-        let abstained = scores
-            .column(SCORES_ABSTAINED)
-            .and_then(Column::bool)
-            .map_err(polars)?;
-        if abstained.any() {
-            points = points.filter(&!abstained).map_err(polars)?;
-        }
+        let scores = score(logs).map_err(CalibrationError::Scorer)?;
+        check_scores(&scores, logs, kind).map_err(|detail| {
+            CalibrationError::Scorer(L2dError::Runtime {
+                detail: format!(
+                    "the {} scorer returned an unusable scores frame: {detail}",
+                    kind.as_str()
+                ),
+            })
+        })?;
+        let points = calibration_points(&scores, logs)?;
         drop(scores);
-        Self::fit_with(
-            &points,
-            ScorerKind::Baseline,
-            scorer.revision(),
-            settings,
-            budget,
-        )
+        Self::fit_with(&points, kind, revision, settings, budget)
     }
 
     /// Builds a calibrator from its lists after checking their shape: the fixed order,
@@ -1119,6 +1225,43 @@ impl ConformalCalibrator {
                 logs: list.logs(),
             })
             .collect()
+    }
+
+    /// The memory the calibration keeps for as long as it lives, fitted or loaded, in
+    /// bytes (requirement 12.9): 8 bytes per value of every list (a log of a group with
+    /// a list of its own is in two lists), and for each list its description and, for
+    /// a group's list, the group's name twice (in the list and in the index of the
+    /// groups) with [`GROUP_INDEX_ENTRY_BYTES`] for its index entry.
+    ///
+    /// An operation that uses a calibration holds this figure in its memory budget
+    /// for as long as it runs; triage does ([`crate::triage`]).
+    /// `tests/triage_memory.rs` measures it against the heap of a loaded calibration:
+    /// the figure is never below what the heap shows and at most an eighth above (the
+    /// most for a calibration of many small groups).
+    pub fn held_bytes(&self) -> u64 {
+        let lists: usize = self
+            .lists
+            .iter()
+            .map(|list| {
+                let name = match &list.stratum {
+                    Stratum::Pooled => 0,
+                    Stratum::Group(group) => group.len(),
+                };
+                list.scores.capacity() * size_of::<f64>() + name
+            })
+            .sum();
+        let index: usize = self
+            .groups
+            .iter()
+            .flat_map(BTreeMap::keys)
+            .map(|group| group.len() + GROUP_INDEX_ENTRY_BYTES)
+            .sum();
+        (size_of::<Self>()
+            + self.lists.capacity() * size_of::<List>()
+            + lists
+            + index
+            + self.scorer_revision.len()
+            + self.revision.len()) as u64
     }
 
     /// The smallest error rate the calibration supports: `1 / (n + 1)` of its shortest

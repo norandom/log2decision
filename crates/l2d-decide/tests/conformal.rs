@@ -18,8 +18,9 @@ use l2d_decide::ScorerKind;
 use l2d_decide::conformal::{
     Calibrated, CalibrationError, CalibrationPoint, CalibrationSettings, ConformalCalibrator,
     DEFAULT_ERROR_RATE, DEFAULT_MIN_PER_GROUP, EXCHANGEABILITY_NOTE, LabelSet, MANIFEST_FILE,
-    SCORES_FILE, Stratum, estimated_bytes, points_frame,
+    SCORES_FILE, Stratum, calibration_points, estimated_bytes, points_frame,
 };
+use l2d_decide::scorer::{Scorer, ScoringCost};
 
 // ---------------------------------------------------------------------------------------
 // Helpers
@@ -428,8 +429,14 @@ fn a_higher_ratio_never_makes_good_more_plausible_or_bad_less() {
 /// conformal prediction then errs, per label, at a rate whose expectation is at most
 /// the chosen rate and which varies with the calibration draw by about
 /// `sqrt(e (1 - e) / n)`: 0.005 for `e = 0.05` and `n = 2,000`, 0.009 for `e = 0.2`.
-/// 20,000 test logs per label add 0.002 to 0.003. The tolerance of 0.03 is three to
-/// six of those standard deviations; the draws are fixed, so the outcome is too.
+/// 20,000 test logs per label add sqrt(e (1 - e) / 20,000), 0.002 to 0.003.
+///
+/// The tolerance is three standard deviations of the two together,
+/// 3 sqrt(e (1 - e) (1/2,000 + 1/20,000)): 0.0153 at 0.05, 0.0211 at 0.1 and 0.0281 at
+/// 0.2 (it was 0.03 at every rate until task 1.10, which is six standard deviations at
+/// 0.05). The draws are fixed, so the outcome is too: measured 0.0460 and 0.0521 at
+/// 0.05, 0.1029 and 0.1048 at 0.1, 0.2036 and 0.1981 at 0.2 (good, bad), at most 0.005
+/// from the chosen rate.
 #[test]
 fn the_chosen_error_rate_is_achieved_per_label_on_known_distributions() {
     let mut draws = Draws(2010);
@@ -441,12 +448,16 @@ fn the_chosen_error_rate_is_achieved_per_label_on_known_distributions() {
 
     for error_rate in [0.05_f32, 0.1, 0.2] {
         let chosen = f64::from(error_rate);
+        let tolerance = 3.0 * (chosen * (1.0 - chosen) * (1.0 / 2_000.0 + 1.0 / 20_000.0)).sqrt();
+        if error_rate == 0.05 {
+            assert!((0.015..0.016).contains(&tolerance), "{tolerance}");
+        }
         for (label, ratios) in [(Label::Good, &test_good), (Label::Bad, &test_bad)] {
             let achieved = achieved_error(&calibrator, ratios, label, None, error_rate);
             println!("L2D_CONFORMAL_SYNTHETIC e={error_rate} {label:?} achieved={achieved:.4}");
             assert!(
-                (achieved - chosen).abs() <= 0.03,
-                "{label:?} at {error_rate}: achieved {achieved:.4}"
+                (achieved - chosen).abs() <= tolerance,
+                "{label:?} at {error_rate}: achieved {achieved:.4}, tolerance {tolerance:.4}"
             );
         }
         // The sets are not trivially right: most logs get exactly one label.
@@ -964,6 +975,8 @@ fn a_calibration_above_the_memory_limit_is_refused_with_estimate_and_limit() {
             budget,
         )
     };
+    assert_eq!(estimate, MIB + 200 * 120_000);
+    assert_eq!(tight.left_bytes(), MIB);
     match fit(&tight) {
         Err(CalibrationError::Memory(error @ L2dError::Refused { .. })) => {
             let message = error.to_string();
@@ -971,6 +984,23 @@ fn a_calibration_above_the_memory_limit_is_refused_with_estimate_and_limit() {
             assert!(
                 message.contains("needs the whole dataset in memory"),
                 "{message}"
+            );
+            // Requirement 12.5: the refusal states the estimate and the limit, and what
+            // the limit leaves, in bytes.
+            assert!(
+                message.contains(&format!("estimated 23.9 MiB ({estimate} bytes)")),
+                "the estimate is not named: {message}"
+            );
+            assert!(
+                message.contains(&format!(
+                    "the memory limit of 33.0 MiB ({} bytes)",
+                    33 * MIB
+                )),
+                "the limit is not named: {message}"
+            );
+            assert!(
+                message.contains(&format!("but 1.0 MiB ({MIB} bytes) is left")),
+                "what is left is not named: {message}"
             );
             assert_eq!(
                 L2dError::from(CalibrationError::Memory(error)).exit_code(),
@@ -980,6 +1010,24 @@ fn a_calibration_above_the_memory_limit_is_refused_with_estimate_and_limit() {
         other => panic!("expected a memory refusal, got {other:?}"),
     }
     assert!(fit(&budget()).is_ok());
+    // The estimate is the figure that is held against the limit: a limit that leaves
+    // exactly the estimate is enough, one byte less is refused naming both.
+    let enough = 32 * MIB + estimate;
+    assert!(fit(&budget_with_limit(Some(enough))).is_ok());
+    match fit(&budget_with_limit(Some(enough - 1))) {
+        Err(CalibrationError::Memory(L2dError::Refused { reason })) => {
+            assert!(reason.contains(&format!("({estimate} bytes)")), "{reason}");
+            assert!(
+                reason.contains(&format!("({} bytes) is left", estimate - 1)),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(&format!("({} bytes)", enough - 1)),
+                "{reason}"
+            );
+        }
+        other => panic!("expected a memory refusal, got {other:?}"),
+    }
     // The estimate grows with the number of points.
     assert!(estimated_bytes(0, 0) < estimated_bytes(1_000, 0));
     assert!(estimated_bytes(1_000, 0) < estimated_bytes(1_000_000, 0));
@@ -1601,4 +1649,262 @@ fn group_names_of_any_content_survive_saving() {
         assert_eq!(decision.good_stratum, Stratum::Group(group.into()));
         assert_eq!(decision, calibrator.predict(0.5, Some(group), 0.1).unwrap());
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Abstentions are not calibration logs; what a calibration keeps (task 1.10)
+// ---------------------------------------------------------------------------------------
+
+/// A scorer under the `Scorer` contract that abstains on every text that starts with
+/// `?` and gives every other text the ratio written in it.
+struct Abstaining {
+    kind: ScorerKind,
+}
+
+impl Scorer for Abstaining {
+    fn kind(&self) -> ScorerKind {
+        self.kind
+    }
+
+    fn revision(&self) -> &str {
+        REVISION
+    }
+
+    fn cost(&self, _logs: &LogsFrame) -> ScoringCost {
+        ScoringCost::default()
+    }
+
+    fn score(&mut self, logs: &LogsFrame) -> Result<DataFrame, L2dError> {
+        let texts: Vec<String> = logs.records().map(|record| record.text).collect();
+        let ratios: Vec<Option<f32>> = texts
+            .iter()
+            .map(|text| {
+                (!text.starts_with('?')).then(|| {
+                    text.split(' ')
+                        .next()
+                        .and_then(|ratio| ratio.parse().ok())
+                        .expect("the text starts with its ratio")
+                })
+            })
+            .collect();
+        let abstained: Vec<bool> = ratios.iter().map(Option::is_none).collect();
+        let rows = texts.len();
+        Ok(DataFrame::new(vec![
+            Column::new("text".into(), texts),
+            Column::new("scorer".into(), vec![self.kind.as_str(); rows]),
+            Column::new("ratio".into(), ratios),
+            Column::new("abstained".into(), abstained),
+        ])
+        .unwrap())
+    }
+}
+
+/// Labelled logs whose text starts with the ratio the scorer gives them; every fourth
+/// log is one the scorer abstains on. Returns the logs and the calibration rows of
+/// those it does not abstain on.
+fn logs_with_abstentions() -> (LogsFrame, Vec<Row<'static>>) {
+    let mut draws = Draws(41);
+    let mut records = Vec::new();
+    let mut kept = Vec::new();
+    for index in 0..240_u32 {
+        let label = match index % 3 {
+            0 => Label::Good,
+            1 => Label::Bad,
+            _ => Label::Unknown,
+        };
+        let group = [Some("/a"), Some("/b"), None][(index / 3 % 3) as usize];
+        let ratio = draws.ratio(if label == Label::Bad { 0.7 } else { 0.3 }, 0.1);
+        let abstains = index % 4 == 0;
+        let text = if abstains {
+            format!("? log {index}")
+        } else {
+            format!("{ratio} log {index}")
+        };
+        if !abstains {
+            // The ratio as the scorer reads it back from the text.
+            kept.push((
+                text.split(' ').next().unwrap().parse().unwrap(),
+                label,
+                group,
+            ));
+        }
+        records.push(l2d_core::LogRecord {
+            text,
+            label,
+            group: group.map(str::to_owned),
+            first_position: u64::from(index) + 1,
+            occurrences: 1,
+        });
+    }
+    (LogsFrame::from_records(&records).unwrap(), kept)
+}
+
+/// Review of task 1.13: the filter that keeps abstentions out of the calibration logs
+/// was never exercised, because the baseline scorer never abstains. `fit_scorer` is the
+/// path `fit_baseline` takes after its provenance check; here a scorer that abstains
+/// goes down it.
+#[test]
+fn logs_the_scorer_abstained_on_are_not_calibration_logs() {
+    let (logs, kept) = logs_with_abstentions();
+    assert_eq!(logs.len(), 240);
+    assert_eq!(kept.len(), 180, "the scorer abstains on 60 of 240 logs");
+
+    // The points: one row per log the scorer gave a ratio, in the order of the logs.
+    let mut scorer = Abstaining {
+        kind: ScorerKind::Neighbour,
+    };
+    let scores = scorer.score(&logs).unwrap();
+    assert_eq!(scores.column("ratio").unwrap().null_count(), 60);
+    let points = calibration_points(&scores, &logs).unwrap();
+    assert!(
+        points.equals_missing(&frame(&kept)),
+        "the points are not those of the logs with a ratio: {points}"
+    );
+    assert_eq!(points.column("ratio").unwrap().null_count(), 0);
+
+    // The calibration: exactly that of the logs with a ratio.
+    let calibrator = ConformalCalibrator::fit_scorer(&mut scorer, &logs, &settings(20), &budget())
+        .expect("the logs with a ratio calibrate");
+    let direct = ConformalCalibrator::fit_with(
+        &frame(&kept),
+        ScorerKind::Neighbour,
+        REVISION,
+        &settings(20),
+        &budget(),
+    )
+    .unwrap();
+    assert_eq!(calibrator, direct);
+    assert_eq!(calibrator.scorer_kind(), ScorerKind::Neighbour);
+    let count = |label: Label| kept.iter().filter(|(_, found, _)| *found == label).count() as u64;
+    assert_eq!(
+        (calibrator.good(), calibrator.bad()),
+        (count(Label::Good), count(Label::Bad))
+    );
+    assert_eq!(calibrator.good() + calibrator.bad(), 120);
+
+    // Without the filter the abstentions would be calibration points without a ratio,
+    // which a calibration refuses: the frame of all 240 rows is not usable as it is.
+    let unfiltered = DataFrame::new(vec![
+        scores.column("ratio").unwrap().clone(),
+        logs.frame().column("label").unwrap().clone(),
+        logs.frame().column("group").unwrap().clone(),
+    ])
+    .unwrap();
+    assert!(matches!(
+        ConformalCalibrator::fit_with(
+            &unfiltered,
+            ScorerKind::Neighbour,
+            REVISION,
+            &settings(20),
+            &budget()
+        ),
+        Err(CalibrationError::InvalidPoints { .. })
+    ));
+
+    // The flag decides, not the ratio: an abstention that carries a number is left out.
+    let mut ratios: Vec<Option<f32>> = scores
+        .column("ratio")
+        .unwrap()
+        .f32()
+        .unwrap()
+        .iter()
+        .collect();
+    assert_eq!(ratios[0], None);
+    ratios[0] = Some(0.99);
+    let mut with_number = scores.clone();
+    with_number
+        .with_column(Column::new("ratio".into(), ratios))
+        .unwrap();
+    assert!(
+        calibration_points(&with_number, &logs)
+            .unwrap()
+            .equals_missing(&points)
+    );
+
+    // Scores of other logs are not accepted.
+    let fewer = LogsFrame::new(logs.frame().head(Some(10))).unwrap();
+    assert!(calibration_points(&scores, &fewer).is_err());
+}
+
+#[test]
+fn a_scorer_that_abstains_on_every_log_leaves_nothing_to_calibrate_on() {
+    let records: Vec<l2d_core::LogRecord> = (0..40_u32)
+        .map(|index| l2d_core::LogRecord {
+            text: format!("? log {index}"),
+            label: if index % 2 == 0 {
+                Label::Good
+            } else {
+                Label::Bad
+            },
+            group: None,
+            first_position: u64::from(index) + 1,
+            occurrences: 1,
+        })
+        .collect();
+    let logs = LogsFrame::from_records(&records).unwrap();
+    let mut scorer = Abstaining {
+        kind: ScorerKind::Neighbour,
+    };
+    assert_eq!(
+        ConformalCalibrator::fit_scorer(&mut scorer, &logs, &settings(20), &budget()).unwrap_err(),
+        CalibrationError::TooFewLogs {
+            good: 0,
+            bad: 0,
+            smallest_supported: 1.0
+        }
+    );
+}
+
+/// Requirement 12.9: a calibration says how much memory it keeps, so that an operation
+/// that uses it can count it. `tests/triage_memory.rs` measures the figure against the
+/// heap.
+#[test]
+fn a_calibration_states_the_memory_it_keeps() {
+    let mut draws = Draws(5);
+    let small = fitted(
+        &ungrouped(&draws.ratios(100, 0.3, 0.1), &draws.ratios(100, 0.7, 0.1)),
+        100,
+    );
+    let large = fitted(
+        &ungrouped(
+            &draws.ratios(10_000, 0.3, 0.1),
+            &draws.ratios(10_000, 0.7, 0.1),
+        ),
+        100,
+    );
+    // Eight bytes per value of every list, and something for the rest.
+    assert!(small.held_bytes() > 8 * 200, "{}", small.held_bytes());
+    assert!(
+        small.held_bytes() < 8 * 200 + 2_048,
+        "{}",
+        small.held_bytes()
+    );
+    assert!(large.held_bytes() > 8 * 20_000);
+    assert!(large.held_bytes() < 8 * 20_000 + 2_048);
+
+    // A list of its own for a group is kept beside the pooled list.
+    let rows: Vec<Row<'_>> = (0..400)
+        .map(|index| {
+            let label = if index % 2 == 0 {
+                Label::Good
+            } else {
+                Label::Bad
+            };
+            (
+                draws.ratio(0.5, 0.1),
+                label,
+                Some(["/a", "/b"][index / 2 % 2]),
+            )
+        })
+        .collect();
+    let pooled_only = fitted(&rows, 1_000);
+    let per_group = fitted(&rows, 100);
+    assert_eq!(per_group.strata().len(), 6);
+    assert!(per_group.held_bytes() >= pooled_only.held_bytes() + 8 * 400);
+
+    // A loaded calibration keeps what the fitted one keeps.
+    let scratch = Scratch::new("held");
+    let dir = per_group.save(&scratch.paths(), "held").unwrap();
+    let loaded = ConformalCalibrator::load(&dir).unwrap();
+    assert_eq!(loaded.held_bytes(), per_group.held_bytes());
 }
