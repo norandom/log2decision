@@ -443,7 +443,7 @@ Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (
 - Entry selection: glob patterns over the entry path (`--entry`, repeatable). Without a pattern every entry is tried.
 - Text check on the first 8 KiB of an entry: a NUL byte or invalid UTF-8 marks the entry as not text.
 - A gzip entry (by magic bytes, not by name) is read through a second decompressor. Every other nested archive (`.zip`, `.bz2`, `.xz`, `.tar`) is skipped and reported (owner decision).
-- Maximum record length: default 1 MiB, option `--max-record-bytes`. It must not exceed the longest text the store accepts.
+- Maximum record length: default 64 KiB (owner decision of 2026-11-12), option `--max-record-bytes`, at most the 8 MiB the store accepts. The default follows from the store's charge of 192 times the longest text: an add then holds about 28 MiB, against about 208 MiB at 1 MiB and about 1.5 GiB at 8 MiB.
 - The archive's content hash is SHA-256 over the archive file, computed in one streaming pass. Entry checksums are verified when an entry is read to its end.
 
 **Batches and memory**
@@ -858,7 +858,7 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 
 **Responsibilities & Constraints**
 - Method: split (inductive) conformal prediction, label-conditional. It works on the ratio of any `Scorer`, so it covers the baseline and the encoder-based scorer alike and needs no refit.
-- Calibration input: ratios of labelled logs that were not used to fit the scorer. The caller holds out the calibration split. A saved scorer records the content hashes of its fitting inputs; calibration refuses an input whose content hash is among them. The evaluation harness calibrates on a part of each fold's fitting side that the scorer did not see.
+- Calibration input: ratios of labelled logs that were not used to fit the scorer. The caller holds out the calibration split. A saved scorer records the content hashes of its fitting inputs; calibration refuses an input whose content hash is among them. From task 1.11 on (owner decision of 2026-11-12) the scorer also records a hash of each distinct text it was fitted on, and calibration drops the calibration logs whose text is among them and reports the count, because the whole-file check does not see the same logs in a reordered, re-exported or subset file. The evaluation harness calibrates on a part of each fold's fitting side that the scorer did not see.
 - Nonconformity of a log for a label: `ratio` for good, `1 - ratio` for bad. A higher value means the log fits the label worse.
 - P-value of a new log for a label: `(1 + number of calibration logs of that label with nonconformity >= the new log's) / (n_label + 1)`. Ties count as greater or equal; no randomization.
 - Default error rate: 0.05; the analyst can set another per run.

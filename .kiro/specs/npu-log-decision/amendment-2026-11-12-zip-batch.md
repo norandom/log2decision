@@ -9,7 +9,9 @@ of the options considered.
 Owner's answers to the open points in section 6: both tasks, 1.16 first; gzip
 is the only nested format read; the default work directory is
 `<project>/work/<run>/`; parallel reading of entries is a follow-up task
-(1.19); the AIT label adapter is a separate amendment later.
+(1.19); the AIT label adapter is a separate amendment later. Later the same
+day the owner set the default maximum record length to 64 KiB (this file's
+section 4 still says 1 MiB).
 
 Requested by the owner on 2026-11-12: "we should be able to process zipped
 files in batch mode, mem capped", with the questions whether Rust has a memory
