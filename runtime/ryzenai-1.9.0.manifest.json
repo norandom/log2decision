@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "release": "1.9.0",
+  "onnxruntime": "1.30.0",
+  "source": {
+    "kind": "wheel",
+    "index": "https://pypi.amd.com/ryzenai_llm/1.9.0/windows/simple/",
+    "package": "onnxruntime-vitisai",
+    "version": "1.30.0",
+    "wheel": "onnxruntime_vitisai-1.30.0-py3-none-win_amd64.whl",
+    "directory": "onnxruntime/capi"
+  },
+  "files": [
+    {
+      "name": "onnxruntime.dll",
+      "bytes": 25442896,
+      "sha256": "152d62cf8d52eff8c203bdb19aa0ecc8ab698c10425782d84926b8550d4f96fd",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_providers_shared.dll",
+      "bytes": 117840,
+      "sha256": "a9ee9253bcecc4c8c6e3010bbf80f85350f30b0d566b4e44db4668750f92fdb4",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_providers_vitisai.dll",
+      "bytes": 466000,
+      "sha256": "941193bb53ab056967ec62def14b36334ac6032d37dc8f0c0e755d4517aadc03",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_vitisai_ep.dll",
+      "bytes": 517920336,
+      "sha256": "416ada2dd0c79638ed9aa50ba29205e80785882faa8931d8125cf805df73f74a",
+      "version": "1.9.0"
+    },
+    {
+      "name": "dyn_dispatch_core.dll",
+      "bytes": 169647696,
+      "sha256": "60073393b6a4dcbbea454012104217de064c5e5948c1e68a917a5ca52d0dfc34",
+      "version": "1.9.0"
+    }
+  ]
+}

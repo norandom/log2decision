@@ -65,7 +65,7 @@ it is allowed in.
 | Triage: ranking, review budget, and with a calibration the split into review, scored down, uncertain and unlike | Library done and tested, not yet wired to a command. Triage of CSIC's 25,608 logs takes under a second |
 | Evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
-| Encoder on the NPU | Hardware gate passed: an 8-bit model with random weights runs on the AMD NPU from Rust, 36 of 38 nodes on the NPU, at 22,000 to 36,000 logs per second. Whether a trained encoder beats the simple scorer is being measured; the encoder itself is not built |
+| Encoder on the NPU | Hardware gate passed: an 8-bit model with random weights runs on the AMD NPU from Rust, 36 of 38 nodes on the NPU, at 22,000 to 36,000 logs per second. Open: on the NPU a row's output depends on its position in the batch, which the test model could not reveal; this is settled before the encoder is built. The runtime files are checked against a manifest before anything is loaded. Whether a trained encoder beats the simple scorer is being measured; the encoder itself is not built |
 
 A measured example: HTTP CSIC 2010 (61,065 requests, 28 MB) is read and
 deduplicated to 25,608 distinct logs in about a quarter of a second, with a

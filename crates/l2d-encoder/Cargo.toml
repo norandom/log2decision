@@ -6,11 +6,28 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# The release of the AMD runtime the tool is built for. ONE choice, the default below:
+# it selects the manifest compiled into the tool (`runtime/ryzenai-<release>.manifest.json`)
+# and the API level `ort` asks the runtime for (ONNX Runtime 1.30 for Ryzen AI 1.9, 1.27
+# for 1.8). To build for the other release, change the one name in `default`; enabling
+# both, or neither, does not compile. `runtime/README.md` names the release too, and a
+# test holds it to this choice.
+[features]
+default = ["ryzenai-1-9"]
+ryzenai-1-9 = ["ort/api-30"]
+ryzenai-1-8 = ["ort/api-27"]
+
 [dependencies]
 l2d-core.workspace = true
+# The runtime manifest and the provisioning record are JSON; the full file check hashes.
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+# The NPU device query (configuration manager) and the file version of a DLL that does
+# not match the manifest (version resource, read as data; the DLL is not loaded).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 ort.workspace = true
-sha2.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties"] }
-serde_json.workspace = true

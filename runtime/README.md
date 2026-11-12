@@ -11,15 +11,24 @@ not part of the repository and is not downloaded by the build.
 
 ## Required files in `runtime/ryzenai/`
 
-AMD Ryzen AI 1.9, as shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author
-Advanced Micro Devices, Inc.; file versions as the DLLs report them). All five must be
-present. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
-files in the directory.
+The tool is built for **AMD Ryzen AI 1.9.0** (ONNX Runtime 1.30.0).
+
+That is one choice, the default feature of `crates/l2d-encoder/Cargo.toml`
+(`ryzenai-1-9`, or `ryzenai-1-8`). It selects the manifest the tool has compiled in
+(`runtime/ryzenai-<release>.manifest.json`: for each file its size, SHA-256 and file
+version) and the API level `ort` asks the runtime for. The line above and the tables
+below are held to the choice and to the manifests by tests. A directory that holds the
+files of the other release is refused, and the message names both releases.
 
 The files are not in the repository: `runtime/ryzenai/` is ignored by git, and each
-user obtains them from AMD's package and places them here. Task 2.3 adds a
-provisioning step for that, after the method of the sibling project
-`npu_rag_from_folder`.
+user obtains them from AMD's package and places them here (section "Provisioning").
+
+### AMD Ryzen AI 1.9.0 (the built release)
+
+As shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author Advanced Micro
+Devices, Inc.; file versions as the DLLs report them). All five must be present, and no
+other DLL. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
+files in the directory.
 
 | File | Bytes | File version | SHA-256 |
 | --- | ---: | --- | --- |
@@ -31,7 +40,34 @@ provisioning step for that, after the method of the sibling project
 
 Total: 713,594,768 bytes (680.5 MiB).
 
-What each is for:
+### AMD Ryzen AI 1.8.0 (not the built release: it fails the hardware gate)
+
+As shipped in `RyzenAI_Deployment.1.8.0.nupkg` inside AMD's `ryzen_ai_nuget_1.8.0.zip`
+(directory `runtimes/win-x64/native/`). Six files: in this release the compiler is a
+file of its own, `aiecompiler_client.dll`, and with only the five names of 1.9.0 the
+process dies with an access violation while the provider is registered.
+
+| File | Bytes | File version | SHA-256 |
+| --- | ---: | --- | --- |
+| `onnxruntime.dll` | 24,030,800 | 1.27.0 | `ed7b4a54d327c258e836fdec647e3fbd2a68a7e8811c17ed54c24bb43763e4bb` |
+| `onnxruntime_providers_shared.dll` | 117,840 | 1.27.0 | `84f4c81c2fe4996ea22236f7c7d95eb0ea690d3d758af6b8dd25ba92e3de4580` |
+| `onnxruntime_providers_vitisai.dll` | 465,488 | 1.27.0 | `b1311df645b8509c5df36a3290547ebaad523f255ab58344ee997dced7227e97` |
+| `onnxruntime_vitisai_ep.dll` | 119,166,032 | 1.8.0 | `9a5409060c9637b91123462715419871779dd4846b5eb33eb31a3ff3a14e94c0` |
+| `dyn_dispatch_core.dll` | 158,389,328 | 1.8.0 | `14355332ba63c60c5cdfc84edc953eb565ec2e52407494224926673d3ca54d6e` |
+| `aiecompiler_client.dll` | 149,486,160 | 1.8.0 | `00a571e30d6e23a6f32cdbcdfc73ad21ddcb5e915e0208a88e90de9c5b4a0450` |
+
+Total: 451,655,648 bytes (430.7 MiB).
+
+Tried on 2026-11-12 on the reference host (the tool built with `ryzenai-1-8`, `ort` at
+API level 27, the same model and test as for 1.9.0, four runs, all alike): the model
+compiles, 36 of its 38 nodes are placed on the NPU, and it runs at 28,000 to 29,300 logs
+per second; but the output differs more from the CPU provider's than the tool allows:
+lowest cosine 0.9777 against the required 0.99 (1.9.0: 0.9958). The hardware gate
+therefore fails on 1.8.0, and the tool is not built for it. The manifest and the feature
+are kept so that the trial can be repeated; there is no provisioning route for 1.8.0.
+
+## What the files are for (1.9.0)
+
 
 - `onnxruntime.dll`: ONNX Runtime 1.30.0, the library `ort` loads. Also holds the CPU
   provider.
@@ -49,17 +85,72 @@ of them, removed): `DirectML.dll`, `onnxruntime_providers_ryzenai.dll`,
 Python module `onnxruntime_pybind11_state.pyd`. No `vaip_config.json` and no `.xclbin`
 file is passed to the provider.
 
-## Where the files come from on the reference host
+## Where the files come from
 
-Copied unchanged (hashes compared) from
+AMD's wheel `onnxruntime-vitisai` 1.30.0 of the index for Ryzen AI 1.9.0 (section
+"Provisioning"). Python is only the packaging the files arrive in; nothing of Python is
+loaded at run time. On the reference host the files of `runtime/ryzenai/` were copied by
+hand on 2026-11-12, unchanged, from the environment that pip had installed that wheel
+into for the spike of 2026-11-11:
 
     D:\Source\memguard_alpha\tools\oga-venv\Lib\site-packages\onnxruntime\capi\
 
-which is the Python environment the spike of 2026-11-11 ran in. Python is only the
-packaging the files arrived in; nothing of Python is loaded at run time.
+## Another location: `L2D_RUNTIME_DIR`
 
-To use another location, set `L2D_RUNTIME_DIR` to the directory that holds the five
-files (the gate test reads it; default `runtime/ryzenai/` of the workspace).
+The tool reads the files from `runtime/ryzenai/` of the project. Set `L2D_RUNTIME_DIR`
+to read them from another directory instead; an empty value counts as not set. The
+files are 714 MB and the same for every checkout on a host, so one copy can serve
+several working copies. It is the only location an environment variable moves:
+`models/`, `data/` and the provider's cache `runtime/cache/` stay in the project. The
+directory is checked against the same manifest wherever it is.
+
+Precedence: a directory given by an option of a command, then `L2D_RUNTIME_DIR`, then
+`runtime/ryzenai/`. A relative value is relative to the current directory of the
+process, not to the project.
+
+## Provisioning (development step, needs `uv`)
+
+    uv run --project tools/runtime python tools/runtime/provision.py
+    uv run --project tools/runtime python tools/runtime/provision.py --target <directory>
+
+`tools/runtime/` is a `uv` project with one dependency: AMD's wheel `onnxruntime-vitisai`
+1.30.0, pinned by its URL on AMD's index for Ryzen AI 1.9.0,
+`https://pypi.amd.com/ryzenai_llm/1.9.0/windows/simple/`. All five files are in that
+wheel, in `onnxruntime/capi/`. What the wheel declares as requirements is not installed
+(`voe` 1.9.0 would bring `torch` and `transformers`; it holds no DLL), and nothing of
+the environment is imported or needed to run `l2d`. The environment is
+`tools/runtime/.venv` (ignored by git); uv's cache is where `UV_CACHE_DIR` points.
+
+`provision.py` requires the installed package to be the manifest's version from the
+manifest's index, compares the wheel's `RECORD` and the SHA-256 of each file with the
+manifest before it copies anything, refuses a target that holds a DLL the manifest does
+not name, copies what is missing or different, and writes `provisioned.json` into the
+target (release, source, and for each file its size, SHA-256 and modification time). A
+refusal names what was found and what was expected and changes nothing. Its tests:
+
+    uv run --no-project --python 3.12 python -m unittest discover -s tools/runtime
+
+State of 2026-11-12: `pypi.amd.com` answered every request from the reference host with
+403 "Access Denied" (the URL above and the 1.8.0 URL of the sibling project alike), so
+the wheel was not fetched through this environment, there is no `tools/runtime/uv.lock`
+yet, and the command above has not run by its default route. That the index serves the
+wheel under that URL is known from pip's cache on the host: it holds the download of
+2026-11-08 under the key of exactly that URL (307,779,608 bytes, SHA-256
+`0f4b98625c4217832d4001acd4beb4306e65123c679afc5e5bb3282fc9064c8b`), and the five files
+inside it have the sizes and hashes of the table. uv does not read pip's cache, so
+`uv lock` has to wait for the index and should then record that hash. The step itself
+was run with `--site-packages` pointing at the environment named under "Where the files
+come from" and `--accept-unrecorded-origin` (pip records no URL for a package from an
+index) into a scratch directory; the five files it placed are byte for byte those of
+`runtime/ryzenai/`.
+
+There is no route without the index today. AMD's NuGet package
+`RyzenAI_Deployment.1.9.0.nupkg` holds five files of the same names and sizes, but they
+are other builds of them (their CRC-32 values differ from the wheel's files), so they do
+not pass the check against the 1.9.0 manifest; a route from it would need a manifest of
+its own and a run of the hardware gate. The NuGet ZIP of release 1.8.0
+(`ryzen_ai_nuget_1.8.0.zip`) was tried that way on 2026-11-12 and fails the gate (section
+"AMD Ryzen AI 1.8.0" above), so `provision.py` has no ZIP route.
 
 ## What must be on the host besides these files
 
@@ -73,10 +164,44 @@ files (the gate test reads it; default `runtime/ryzenai/` of the workspace).
 
 ## Checking
 
+The tool checks the directory before it loads anything from it
+(`l2d_encoder::RuntimeFiles::check`). The rule: a file is used without being hashed only
+when the record `provisioned.json` in the directory says it was hashed with the
+modification time it has now.
+
+- At every start: the directory exists; every file of the manifest is there, is a file
+  and has its size; no other DLL is in the directory; the record, if there is one, has
+  a known format and names the built release; a file whose modification time differs
+  from the record, or that the record does not name, is hashed. When it is right, the
+  record gets its new time and a note `reverified` (by the check, when, which files),
+  and keeps who wrote it and where the files came from; the start after it is fast
+  again. With a record and unchanged files a start takes 0.3 to 2.2 ms.
+- In a directory without a record (filled by hand): every file is hashed (0.84 s), and
+  when all are right the check writes the record itself, marked `"written_by": "check"`
+  and without a source, so that later starts are fast. If the directory cannot be
+  written to, every start hashes, and the tool says so.
+- On request (the full check, 0.84 to 0.89 s): the SHA-256 of every file, record or not.
+
+The record of the provisioning step (`"written_by": "provisioning"`, with the source)
+and the record of the check are used and invalidated alike.
+
+A missing file is reported with its expected path (exit code 3). A file of the wrong
+size or content, a folder in the place of a file, a DLL that is not in the table, and a
+directory whose record names another release or format are refused (exit code 4); the
+message names each file, what was found and what was expected, and the file version a
+wrong DLL reports. Not found at a start: a file replaced by another of the same size
+whose modification time was set back to the recorded one, and a record written by hand;
+the full check finds both.
+
+    cargo test -p l2d-encoder --test runtime_files -- --ignored --nocapture
+
+runs the checks against the directory and prints their times (in a directory without a
+record it writes the record). The hardware gate:
+
     $env:L2D_RUNTIME_DIR = "<path>\runtime\ryzenai"   # only if not the default
     cargo test -p l2d-encoder --test npu_gate -- --ignored --nocapture
 
-The test fails when the runtime files or the NPU device are missing, and when a Python
+The test runs the full file check first (and writes the record into a directory that has none). It fails when the runtime files or the NPU device are missing, and when a Python
 interpreter is on `PATH`. With `L2D_GATE_ALLOW_SKIP=1` it prints `SKIPPED` and passes
 in the first two cases and only reports the interpreter in the third.
 

@@ -55,7 +55,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 - `argmin` and `ndarray`, the optimizer and array types underneath `linfa-logistic`, used directly where `linfa-logistic` cannot take sparse input.
 - `burn` 0.22.1 (confined to optional training module `l2d-train`).
 - No crate that opens network connections may be added.
-- No Python interpreter at runtime; development scripts in `uv` are permitted for offline model architecture exploration and static quantization.
+- No Python interpreter at runtime; development scripts in `uv` are permitted for offline model architecture exploration, static quantization, and provisioning the runtime files.
 - Dependency direction between workspace crates is fixed (see Architecture); a crate imports only from crates to its left.
 
 ### Revalidation Triggers
@@ -158,7 +158,8 @@ crates/
 │   ├── arch.rs                    # EncoderArch: layer definitions, input length, dimension
 │   ├── package.rs                 # EncoderPackage: artifact files, identity verification, revision hash
 │   ├── bytes.rs                   # Text to fixed-length byte ids, truncation flag, table lookup
-│   ├── runtime.rs                 # RuntimeFiles check, ort initialisation, NPU device and driver query
+│   ├── runtime.rs                 # RuntimeFiles check against the compiled-in manifest, the record, file versions
+│   ├── npu.rs                     # NPU device and driver query
 │   └── session.rs                 # EncoderSession: NPU or CPU execution via ort, placement evidence
 ├── l2d-train/src/                 # Optional / offline training module
 │   ├── lib.rs
@@ -665,7 +666,12 @@ impl EncoderPackage {
 | Requirements | 1.5, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7 |
 
 **Responsibilities & Constraints**
-- `RuntimeFiles::check` verifies the DLLs in `runtime/ryzenai/` against the list in `runtime/README.md` and names any missing file.
+- `RuntimeFiles::check` (task 2.3) verifies the runtime directory against the manifest of the release the tool is built for, compiled in from `runtime/ryzenai-<release>.manifest.json` (file names, sizes, SHA-256, file versions). It runs before any DLL is loaded. A missing file or directory is `L2dError::Missing` with the path; a wrong file, a stray DLL or a directory of another release is `L2dError::Refused`, naming every finding and both releases.
+  - Depth: a file is trusted without hashing only when the record `provisioned.json` in the runtime directory names it with its current modification time (under a millisecond). Otherwise it is hashed (about 0.9 s for all five), and on success the check writes or refreshes that record itself, marked as written or re-verified by the check. The check therefore writes into the runtime directory, also when `L2D_RUNTIME_DIR` points outside the project. A full check hashes everything on request.
+  - Release: a cargo feature of `l2d-encoder` chooses the release (`ryzenai-1-9`, the default, with `ort/api-30`; `ryzenai-1-8` with `ort/api-27` for trials); exactly one must be enabled, so `--all-features` does not compile.
+  - Runtime directory: an explicit option beats `L2D_RUNTIME_DIR` beats `runtime/ryzenai/` in the project; a relative value is relative to the current directory; the path is made absolute and plain before the runtime is loaded. `runtime/cache/` stays in the project.
+  - Device query (`npu.rs`): presence of the AMD NPU and its driver version through the Windows configuration manager, saying whether the device was matched by a known device id or only by vendor; a run record states which.
+  - Provisioning (`tools/runtime/`, development only): a `uv` project that pins AMD's wheel for the release and a script that verifies and copies the files and writes the record. From AMD's index it is outstanding: the index answered 403 from the reference host on 2026-11-12.
 - The runtime is loaded with `ort` `load-dynamic` from that directory. The Vitis AI provider is registered with `error_on_failure`, cache directory `runtime/cache/`, cache key equal to the encoder revision, cache kept on disk.
 - The environment variable for the provider's placement report is set in-process before the session is created; `Placement` is read from that report.
 - NPU presence and driver version are read through a Windows device query.
@@ -674,7 +680,7 @@ impl EncoderPackage {
 - The CPU path runs the same `model.int8.onnx` through the CPU provider of the same runtime.
 
 **Dependencies**
-- External: `ort`, AMD runtime DLLs — encoder execution (P0). Proven from Rust by the hardware gate of task 2.2 on 2026-11-12: the 8-bit spike model ran with 36 of 38 nodes on the NPU (the two on the CPU are the input quantize and the output dequantize), at 22,000 to 36,000 logs per second in batches of 32 against about 4,000 on the CPU provider, with a cosine of 0.9958 against the CPU output, and no Python on `PATH`. Five DLLs are needed in `runtime/ryzenai/` (`runtime/README.md`); a missing `dyn_dispatch_core.dll` ends the process with an access violation and no error, so the file check of task 2.3 runs before anything is loaded. The device query uses `windows-sys`.
+- External: `ort`, AMD runtime DLLs — encoder execution (P0). Proven from Rust by the hardware gate of task 2.2 on 2026-11-12: the 8-bit spike model ran with 36 of 38 nodes on the NPU (the two on the CPU are the input quantize and the output dequantize), at 22,000 to 36,000 logs per second in batches of 32 against about 4,000 on the CPU provider, with a cosine of 0.9958 against the CPU output, and no Python on `PATH`. Caveat found in the review of task 2.3: that cosine does not establish requirement 4.6. The spike model has random weights and its output is nearly the same for every input (any two rows of the CPU output agree to 0.9998), so the comparison cannot tell a correct row from a wrong one; and on the NPU a row's output depends on its position in the batch (the same row repeated 32 times gives one exact row and 31 others, on both releases). Task 2.12 settles this before the encoder session is built. Five DLLs are needed in `runtime/ryzenai/` (`runtime/README.md`); a missing `dyn_dispatch_core.dll` ends the process with an access violation and no error, so the file check of task 2.3 runs before anything is loaded. The device query uses `windows-sys`.
 
 **Contracts**: Service [x]
 
@@ -706,7 +712,7 @@ impl ByteCodec {
 - `open` with `allow_cpu = false` returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed.
 
 **Implementation Notes**
-- Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest. It is `api-30` (task 2.2). The gate test finds the runtime directory through `L2D_RUNTIME_DIR`, with `runtime/ryzenai/` as the default; task 2.3 decides whether the tool reads that variable.
+- Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest. It is `api-30` (task 2.2). The gate test finds the runtime directory through `L2D_RUNTIME_DIR`, with `runtime/ryzenai/` as the default; the tool reads that variable too (task 2.3).
 - Validation: a test opens the same package on NPU and CPU and checks cosine ≥ 0.99 per vector (4.6); a benchmark checks 1,000 logs/s over 10,000 logs (4.2) and readiness within 30 s (4.7).
 - Placement (confirmed by task 2.2): the provider writes its report `vitisai_ep_report.json` only when it compiles a model, and only with the environment variable `XLNX_ONNX_EP_REPORT_FILE` set before the runtime is loaded; a warm start from the cache writes none. The report of the compile stays in the cache folder `runtime/cache/<key>/`, where a later session reads the counts. The report names the CPU device `VITIS_EP_CPU`. ONNX Runtime's profile additionally shows which provider executed the nodes.
 

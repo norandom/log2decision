@@ -17,14 +17,17 @@
 //! registered with `error_on_failure`, zero nodes on the NPU fail the test, and so does an
 //! output that is the CPU provider's.
 //!
-//! This file holds everything the proof needs and nothing of the encoder itself:
-//! `RuntimeFiles::check` is task 2.3, the session is task 2.6.
+//! This file holds what the proof needs and nothing of the encoder itself (the session is
+//! task 2.6). The runtime directory, the file check and the device query are the library's
+//! (task 2.3): `RuntimeFiles::check` runs before anything of the runtime is loaded.
 
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use l2d_core::{L2dError, ProjectPaths};
+use l2d_encoder::{CheckDepth, NpuStatus, RuntimeFiles};
 use ort::ep::Vitis;
 use ort::session::Session;
 use ort::value::TensorRef;
@@ -38,23 +41,6 @@ const FIXTURE_SHA256: &str = "6901c42a8d1187b71b986eaaae6b7306914e9da675a17a0f4e
 const BATCH: usize = 32;
 const WARM_UP_BATCHES: usize = 5;
 const TIMED_BATCHES: usize = 300;
-
-/// The files the proof needs in the runtime directory (`runtime/README.md` has the table).
-/// The presence check is not a courtesy: with `dyn_dispatch_core.dll` missing the process
-/// dies with an access violation while the provider is registered, and no error is
-/// returned.
-const RUNTIME_FILES: &[&str] = &[
-    "onnxruntime.dll",
-    "onnxruntime_providers_shared.dll",
-    "onnxruntime_providers_vitisai.dll",
-    "onnxruntime_vitisai_ep.dll",
-    "dyn_dispatch_core.dll",
-];
-
-/// Device setup class `ComputeAccelerator`, the class the AMD NPU driver installs under.
-const COMPUTE_ACCELERATOR_CLASS: &str = "{F01A9D53-3FF6-48D2-9F97-C8A7004BE10C}";
-/// PCI vendor id of AMD.
-const AMD_PCI_PREFIX: &str = "PCI\\VEN_1022&";
 
 /// The file the provider writes its placement report to, inside the cache directory of
 /// the model. The provider reads the name from this environment variable.
@@ -103,117 +89,6 @@ fn python_on_path() -> (Vec<PathBuf>, Vec<PathBuf>) {
         }
     }
     (real, aliases)
-}
-
-#[derive(Debug)]
-struct NpuDevice {
-    instance_id: String,
-    description: String,
-    driver_version: String,
-}
-
-impl NpuDevice {
-    /// A PCI device of AMD. The device id is not compared: the NPU of the reference host
-    /// is `DEV_17F0`, other processor generations have other ids.
-    fn is_amd(&self) -> bool {
-        self.instance_id
-            .to_ascii_uppercase()
-            .starts_with(AMD_PCI_PREFIX)
-    }
-}
-
-/// Every present device of the class `ComputeAccelerator`, as the Windows configuration
-/// manager reports it, in the manager's order.
-fn compute_accelerators() -> Result<Vec<NpuDevice>, String> {
-    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_PRESENT, CM_Get_Device_ID_List_SizeW,
-        CM_Get_Device_ID_ListW, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CR_SUCCESS,
-    };
-    use windows_sys::Win32::Devices::Properties::{
-        DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_DriverVersion,
-    };
-
-    let class: Vec<u16> = COMPUTE_ACCELERATOR_CLASS
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let flags = CM_GETIDLIST_FILTER_CLASS | CM_GETIDLIST_FILTER_PRESENT;
-    let mut length = 0u32;
-    // SAFETY: `class` is a NUL-terminated UTF-16 string and `length` a valid output.
-    let status = unsafe { CM_Get_Device_ID_List_SizeW(&mut length, class.as_ptr(), flags) };
-    if status != CR_SUCCESS {
-        return Err(format!("CM_Get_Device_ID_List_SizeW failed with {status}"));
-    }
-    let mut list = vec![0u16; length as usize];
-    // SAFETY: `list` has the `length` elements the size call asked for.
-    let status =
-        unsafe { CM_Get_Device_ID_ListW(class.as_ptr(), list.as_mut_ptr(), length, flags) };
-    if status != CR_SUCCESS {
-        return Err(format!("CM_Get_Device_ID_ListW failed with {status}"));
-    }
-    let mut devices = Vec::new();
-    for id in list.split(|unit| *unit == 0).filter(|id| !id.is_empty()) {
-        let instance_id = String::from_utf16_lossy(id);
-        let id_z: Vec<u16> = id.iter().copied().chain(Some(0)).collect();
-        let mut node = 0u32;
-        // SAFETY: `id_z` is a NUL-terminated device instance id.
-        let status =
-            unsafe { CM_Locate_DevNodeW(&mut node, id_z.as_ptr(), CM_LOCATE_DEVNODE_NORMAL) };
-        if status != CR_SUCCESS {
-            return Err(format!(
-                "CM_Locate_DevNodeW({instance_id}) failed with {status}"
-            ));
-        }
-        let description = device_string(node, &DEVPKEY_Device_DeviceDesc)
-            .map_err(|error| format!("description of {instance_id}: {error}"))?;
-        let driver_version = device_string(node, &DEVPKEY_Device_DriverVersion)
-            .map_err(|error| format!("driver version of {instance_id}: {error}"))?;
-        devices.push(NpuDevice {
-            instance_id,
-            description,
-            driver_version,
-        });
-    }
-    Ok(devices)
-}
-
-/// A string property of a device node.
-fn device_string(
-    node: u32,
-    key: &windows_sys::Win32::Foundation::DEVPROPKEY,
-) -> Result<String, String> {
-    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        CM_Get_DevNode_PropertyW, CR_SUCCESS,
-    };
-    use windows_sys::Win32::Devices::Properties::DEVPROP_TYPE_STRING;
-
-    let mut kind = 0u32;
-    let mut buffer = vec![0u16; 512];
-    let mut bytes = (buffer.len() * 2) as u32;
-    // SAFETY: `buffer` is `bytes` bytes long and aligned for UTF-16; the other pointers
-    // are valid for the call.
-    let status = unsafe {
-        CM_Get_DevNode_PropertyW(
-            node,
-            key,
-            &mut kind,
-            buffer.as_mut_ptr().cast(),
-            &mut bytes,
-            0,
-        )
-    };
-    if status != CR_SUCCESS {
-        return Err(format!("CM_Get_DevNode_PropertyW failed with {status}"));
-    }
-    if kind != DEVPROP_TYPE_STRING {
-        return Err(format!("property has type {kind}, not a string"));
-    }
-    let units = &buffer[..(bytes as usize / 2).min(buffer.len())];
-    let end = units
-        .iter()
-        .position(|unit| *unit == 0)
-        .unwrap_or(units.len());
-    Ok(String::from_utf16_lossy(&units[..end]))
 }
 
 /// Node counts of the provider's placement report.
@@ -419,15 +294,33 @@ fn infer(session: &mut Session, input_name: &str, shape: &[i64], data: &[f32]) -
 #[ignore = "hardware gate: needs the AMD runtime files and the NPU; run on request"]
 fn the_spike_model_runs_on_the_npu_through_ort() {
     // --- Preconditions: where the hardware proof cannot run, fail (or skip on request). ---
-    let runtime_dir = std::env::var_os("L2D_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("runtime").join("ryzenai"));
-    if !runtime_dir.is_dir() {
-        return skip(&format!(
-            "the runtime directory {} does not exist (set L2D_RUNTIME_DIR; see runtime/README.md)",
-            runtime_dir.display()
-        ));
-    }
+    // The directory is the one the tool reads: `L2D_RUNTIME_DIR`, or `runtime/ryzenai/`.
+    let runtime_dir = ProjectPaths::new(workspace_root())
+        .runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref());
+    // The file check of task 2.3 comes first, before anything is loaded: with
+    // `dyn_dispatch_core.dll` missing the process would die while the provider is
+    // registered, without an error. The full check is used (every file is hashed), so the
+    // proof is about the files of the manifest and no others.
+    let started = Instant::now();
+    let files = match RuntimeFiles::check(&runtime_dir, CheckDepth::Full) {
+        Ok(files) => files,
+        // The gate cannot run here: a failure, or a skip on request.
+        Err(error @ L2dError::Missing { .. }) => return skip(&error.to_string()),
+        // Files that are not the release's are a failure whatever was asked for.
+        Err(error) => panic!("the runtime file check failed: {error}"),
+    };
+    println!(
+        "npu_gate: runtime files of AMD Ryzen AI {} (ONNX Runtime {}) in {}: {} hashed in \
+         {:.2} s; record: {}",
+        files.release,
+        files.onnxruntime,
+        files.dir.display(),
+        files.hashed.len(),
+        started.elapsed().as_secs_f64(),
+        [files.record.describe(), files.refresh.describe()]
+            .join(" ")
+            .trim_end()
+    );
     let runtime_dir = runtime_dir
         .canonicalize()
         .unwrap_or_else(|error| panic!("resolving {}: {error}", runtime_dir.display()));
@@ -439,54 +332,16 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
             .trim_start_matches(r"\\?\")
             .to_string(),
     );
-    let missing: Vec<&str> = RUNTIME_FILES
-        .iter()
-        .copied()
-        .filter(|name| !runtime_dir.join(name).is_file())
-        .collect();
-    if !missing.is_empty() {
-        return skip(&format!(
-            "runtime files missing in {}: {}",
-            runtime_dir.display(),
-            missing.join(", ")
-        ));
+    let npu = NpuStatus::query().unwrap_or_else(|error| panic!("{error}"));
+    for line in npu.log_lines() {
+        println!("npu_gate: {line}");
     }
-    let accelerators = compute_accelerators()
-        .unwrap_or_else(|error| panic!("the Windows device query failed: {error}"));
-    println!(
-        "npu_gate: present devices of the class ComputeAccelerator: {}",
-        accelerators.len()
-    );
-    for (index, found) in accelerators.iter().enumerate() {
-        println!(
-            "npu_gate:   {}. {} ({}), driver {}{}",
-            index + 1,
-            found.description,
-            found.instance_id,
-            found.driver_version,
-            if found.is_amd() {
-                ""
-            } else {
-                " - not an AMD device, passed over"
-            }
-        );
-    }
-    let Some(device) = accelerators.iter().find(|found| found.is_amd()) else {
-        return skip(
-            "no present AMD device of the class ComputeAccelerator: this host has no NPU or \
-             its driver is not installed",
-        );
+    let NpuStatus::Present { taken: device, .. } = &npu else {
+        return skip("no AMD NPU device on this host (see the device lines above)");
     };
-    println!(
-        "npu_gate: NPU device taken (the first AMD one of {}): {} ({})",
-        accelerators.iter().filter(|found| found.is_amd()).count(),
-        device.description,
-        device.instance_id
-    );
-    println!("npu_gate: NPU driver version: {}", device.driver_version);
     assert!(
-        !device.driver_version.is_empty(),
-        "the driver version is empty"
+        npu.driver_version().is_some(),
+        "the driver version of the NPU is not known"
     );
 
     let (pythons, aliases) = python_on_path();
@@ -532,7 +387,9 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
             .trim_start_matches(r"\\?\")
             .to_string(),
     );
-    let cache_key = format!("gate-2.2-{}", &digest[..12]);
+    // The release is part of the key: a model compiled by one release of the runtime is
+    // not offered to another.
+    let cache_key = format!("gate-2.2-{}-{}", files.release, &digest[..12]);
     let model_cache = cache_dir.join(&cache_key);
     let report_path = model_cache.join(REPORT_FILE);
     // The provider writes its report only when it compiles, not when it loads a compiled

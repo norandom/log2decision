@@ -183,7 +183,11 @@ faer = { version = "0.24", default-features = false, features = ["std"] }
 #   packages in the lock file, but they are not in the dependency tree and are not
 #   compiled (`cargo tree -i ndarray@0.17.2 -e all --target all` and `-i tracing` print
 #   nothing). No network crate; the guard test over `Cargo.lock` stays green.
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "vitis", "api-30"] }
+# - The API level is not set here since task 2.3: it belongs to the release of the AMD
+#   runtime the tool is built for, which is one choice in `crates/l2d-encoder/Cargo.toml`
+#   (feature `ryzenai-1-9` sets `ort/api-30`, `ryzenai-1-8` sets `ort/api-27`). Without
+#   either, `ort` would ask for its lowest level and the encoder crate does not compile.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "vitis"] }
 # Test-only reference implementation for the dense path.
 linfa = "0.8.1"
 linfa-logistic = "0.8.1"
@@ -194,4 +198,10 @@ linfa-logistic = "0.8.1"
 # workspace in parallel then exhausted the memory of the reference host from time to
 # time (`link.exe` failed with 0xe0000001).
 [profile.dev.package."*"]
+debug = false
+# SHA-256 is optimized in debug builds too. The full check of the runtime files hashes
+# 714 MB (task 2.3): unoptimized that took 24 s (29 MB/s), against 0.7 s in a release
+# build, and the hardware gate test runs that check in a debug build.
+[profile.dev.package.sha2]
+opt-level = 3
 debug = false
