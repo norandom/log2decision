@@ -1,5 +1,7 @@
 # log2decision
 
+![Before: an operator buried in paper and alarms at a control desk. After: the same operator at ease in front of a short checked list.](docs/images/before-after.png)
+
 `l2d` reads text logs on your own machine and tells you which ones to look at
 first. Each log gets a score between 0 and 1 for how likely it is bad, learned
 from logs you have already labelled. Logs that look good are scored down so
@@ -9,8 +11,8 @@ It is built for a security analyst with a laptop and too many logs. Nothing is
 sent anywhere, and the tool is designed to stay out of the way of whatever else
 the machine is doing.
 
-Status, 2026-11-11: under construction. The reading, scoring and memory parts
-exist as tested library code. The commands that tie them together are not wired
+Status, 2026-11-12: under construction. The reading, scoring, calibration,
+store, search and triage parts exist as tested library code. The commands that tie them together are not wired
 yet, so you cannot triage a file from the command line today. See
 [what works today](#what-works-today).
 
