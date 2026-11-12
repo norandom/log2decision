@@ -9,7 +9,8 @@ places AMD's native files where the tool loads them from (`runtime/README.md`).
 package: AMD's wheel `onnxruntime-vitisai`, pinned by its URL on AMD's release-specific
 index and by its SHA-256 in `uv.lock`. The script imports nothing from it. It
 
-1. reads the tracked manifest `runtime/ryzenai.manifest.json` (release, source, and for
+1. reads the tracked manifest `runtime/ryzenai-<release>.manifest.json` of the release
+   the tool is built for (release, source, and for
    each file its size and SHA-256);
 2. requires the installed package to be the manifest's version, installed from the
    manifest's index, and its `RECORD` to list the manifest's sizes and hashes;
@@ -39,12 +40,36 @@ import os
 import shutil
 import sys
 import sysconfig
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MANIFEST = REPO_ROOT / "runtime" / "ryzenai.manifest.json"
+
+
+def built_release(repo_root: Path = REPO_ROOT) -> str:
+    """The release of the AMD runtime the tool is built for: the one default feature of
+    `crates/l2d-encoder/Cargo.toml` (`ryzenai-1-9` is release 1.9.0). The manifest of
+    that release is the one provisioned unless `--manifest` names another."""
+    path = repo_root / "crates" / "l2d-encoder" / "Cargo.toml"
+    try:
+        default = tomllib.loads(path.read_text(encoding="utf-8"))["features"]["default"]
+    except (OSError, ValueError, KeyError) as error:
+        raise ProvisioningError(f"the built release cannot be read from {path}: {error}") from error
+    releases = [name for name in default if name.startswith("ryzenai-")]
+    if len(releases) != 1:
+        raise ProvisioningError(
+            f"{path} must name exactly one release among its default features, found {releases}"
+        )
+    major, _, minor = releases[0].removeprefix("ryzenai-").partition("-")
+    return f"{major}.{minor}.0"
+
+
+def default_manifest(repo_root: Path = REPO_ROOT) -> Path:
+    return repo_root / "runtime" / f"ryzenai-{built_release(repo_root)}.manifest.json"
+
+
 DEFAULT_TARGET = REPO_ROOT / "runtime" / "ryzenai"
 RECEIPT_FILE = "provisioned.json"
 MANIFEST_FORMAT = 1
@@ -95,6 +120,11 @@ def load_manifest(path: Path) -> Manifest:
         )
     try:
         source = data["source"]
+        if source["kind"] != "wheel":
+            raise ProvisioningError(
+                f"the manifest {path} (AMD Ryzen AI {data['release']}) names a source of the "
+                f"kind {source['kind']!r}; this script provisions from AMD's wheel only"
+            )
         files = tuple(
             ManifestFile(
                 str(entry["name"]), int(entry["bytes"]), str(entry["sha256"]), str(entry["version"])
@@ -396,8 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=DEFAULT_MANIFEST,
-        help="manifest to provision (default: runtime/ryzenai.manifest.json)",
+        default=None,
+        help="manifest to provision (default: runtime/ryzenai-<release>.manifest.json of "
+        "the release the tool is built for)",
     )
     parser.add_argument(
         "--accept-unrecorded-origin",
@@ -411,7 +442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
         report = provision(
-            manifest_path=arguments.manifest,
+            manifest_path=arguments.manifest or default_manifest(),
             site_packages=arguments.site_packages,
             target=arguments.target,
             accept_unrecorded_origin=arguments.accept_unrecorded_origin,

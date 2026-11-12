@@ -21,7 +21,7 @@
 # have the manifest's hashes. uv does not read pip's cache (`uv lock --offline` fails).
 # Run `uv lock --project tools/runtime` when the index answers, expect that hash in
 # `uv.lock`, and commit the result. Whatever is fetched, `provision.py` copies only files that have the
-# sizes and SHA-256 values of `runtime/ryzenai.manifest.json`.
+# sizes and SHA-256 values of `runtime/ryzenai-1.9.0.manifest.json`.
 [project]
 name = "l2d-runtime-provisioning"
 version = "0.0.0"

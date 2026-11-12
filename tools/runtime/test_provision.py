@@ -51,6 +51,7 @@ class Scratch(unittest.TestCase):
             "release": release,
             "onnxruntime": "1.30.0",
             "source": {
+                "kind": "wheel",
                 "index": INDEX,
                 "package": "runtime-package",
                 "version": version,
@@ -295,8 +296,23 @@ class ProvisionTests(Scratch):
 class PinningTests(unittest.TestCase):
     """The environment pins exactly the wheel the tracked manifest names."""
 
+    def test_the_default_manifest_is_that_of_the_built_release(self) -> None:
+        cargo = tomllib.loads(
+            (provision.REPO_ROOT / "crates" / "l2d-encoder" / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(cargo["features"]["default"], ["ryzenai-1-9"])
+        self.assertEqual(provision.built_release(), "1.9.0")
+        self.assertEqual(provision.default_manifest().name, "ryzenai-1.9.0.manifest.json")
+
+    def test_a_manifest_whose_source_is_not_a_wheel_is_refused(self) -> None:
+        other = provision.REPO_ROOT / "runtime" / "ryzenai-1.8.0.manifest.json"
+        with self.assertRaises(provision.ProvisioningError) as caught:
+            provision.load_manifest(other)
+        self.assertIn("'nuget'", str(caught.exception))
+        self.assertIn("1.8.0", str(caught.exception))
+
     def test_pyproject_pins_the_wheel_of_the_tracked_manifest(self) -> None:
-        manifest = provision.load_manifest(provision.DEFAULT_MANIFEST)
+        manifest = provision.load_manifest(provision.default_manifest())
         project = tomllib.loads(
             (Path(__file__).parent / "pyproject.toml").read_text(encoding="utf-8")
         )
@@ -309,7 +325,7 @@ class PinningTests(unittest.TestCase):
         self.assertIn("voe", project["tool"]["uv"]["exclude-dependencies"])
 
     def test_the_tracked_manifest_names_the_five_files(self) -> None:
-        manifest = provision.load_manifest(provision.DEFAULT_MANIFEST)
+        manifest = provision.load_manifest(provision.default_manifest())
         self.assertEqual(manifest.release, "1.9.0")
         self.assertEqual(len(manifest.files), 5)
         self.assertEqual(sum(entry.bytes for entry in manifest.files), 713_594_768)

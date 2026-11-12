@@ -387,7 +387,9 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
             .trim_start_matches(r"\\?\")
             .to_string(),
     );
-    let cache_key = format!("gate-2.2-{}", &digest[..12]);
+    // The release is part of the key: a model compiled by one release of the runtime is
+    // not offered to another.
+    let cache_key = format!("gate-2.2-{}-{}", files.release, &digest[..12]);
     let model_cache = cache_dir.join(&cache_key);
     let report_path = model_cache.join(REPORT_FILE);
     // The provider writes its report only when it compiles, not when it loads a compiled

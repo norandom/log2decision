@@ -6,6 +6,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# The release of the AMD runtime the tool is built for. ONE choice, the default below:
+# it selects the manifest compiled into the tool (`runtime/ryzenai-<release>.manifest.json`)
+# and the API level `ort` asks the runtime for (ONNX Runtime 1.30 for Ryzen AI 1.9, 1.27
+# for 1.8). To build for the other release, change the one name in `default`; enabling
+# both, or neither, does not compile. `runtime/README.md` names the release too, and a
+# test holds it to this choice.
+[features]
+default = ["ryzenai-1-9"]
+ryzenai-1-9 = ["ort/api-30"]
+ryzenai-1-8 = ["ort/api-27"]
+
 [dependencies]
 l2d-core.workspace = true
 # The runtime manifest and the provisioning record are JSON; the full file check hashes.

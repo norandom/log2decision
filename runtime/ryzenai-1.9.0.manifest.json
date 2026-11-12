@@ -3,6 +3,7 @@
   "release": "1.9.0",
   "onnxruntime": "1.30.0",
   "source": {
+    "kind": "wheel",
     "index": "https://pypi.amd.com/ryzenai_llm/1.9.0/windows/simple/",
     "package": "onnxruntime-vitisai",
     "version": "1.30.0",

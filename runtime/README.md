@@ -11,17 +11,24 @@ not part of the repository and is not downloaded by the build.
 
 ## Required files in `runtime/ryzenai/`
 
-AMD Ryzen AI 1.9, as shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author
-Advanced Micro Devices, Inc.; file versions as the DLLs report them). All five must be
-present. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
-files in the directory.
+The tool is built for **AMD Ryzen AI 1.9.0** (ONNX Runtime 1.30.0).
+
+That is one choice, the default feature of `crates/l2d-encoder/Cargo.toml`
+(`ryzenai-1-9`, or `ryzenai-1-8`). It selects the manifest the tool has compiled in
+(`runtime/ryzenai-<release>.manifest.json`: for each file its size, SHA-256 and file
+version) and the API level `ort` asks the runtime for. The line above and the tables
+below are held to the choice and to the manifests by tests. A directory that holds the
+files of the other release is refused, and the message names both releases.
 
 The files are not in the repository: `runtime/ryzenai/` is ignored by git, and each
-user obtains them from AMD's package and places them here with the provisioning step
-below.
+user obtains them from AMD's package and places them here (section "Provisioning").
 
-The table is also the tracked manifest `runtime/ryzenai.manifest.json`, which the tool
-has compiled in and checks the directory against (a test holds the two together).
+### AMD Ryzen AI 1.9.0 (the built release)
+
+As shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author Advanced Micro
+Devices, Inc.; file versions as the DLLs report them). All five must be present, and no
+other DLL. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
+files in the directory.
 
 | File | Bytes | File version | SHA-256 |
 | --- | ---: | --- | --- |
@@ -33,7 +40,34 @@ has compiled in and checks the directory against (a test holds the two together)
 
 Total: 713,594,768 bytes (680.5 MiB).
 
-What each is for:
+### AMD Ryzen AI 1.8.0 (not the built release: it fails the hardware gate)
+
+As shipped in `RyzenAI_Deployment.1.8.0.nupkg` inside AMD's `ryzen_ai_nuget_1.8.0.zip`
+(directory `runtimes/win-x64/native/`). Six files: in this release the compiler is a
+file of its own, `aiecompiler_client.dll`, and with only the five names of 1.9.0 the
+process dies with an access violation while the provider is registered.
+
+| File | Bytes | File version | SHA-256 |
+| --- | ---: | --- | --- |
+| `onnxruntime.dll` | 24,030,800 | 1.27.0 | `ed7b4a54d327c258e836fdec647e3fbd2a68a7e8811c17ed54c24bb43763e4bb` |
+| `onnxruntime_providers_shared.dll` | 117,840 | 1.27.0 | `84f4c81c2fe4996ea22236f7c7d95eb0ea690d3d758af6b8dd25ba92e3de4580` |
+| `onnxruntime_providers_vitisai.dll` | 465,488 | 1.27.0 | `b1311df645b8509c5df36a3290547ebaad523f255ab58344ee997dced7227e97` |
+| `onnxruntime_vitisai_ep.dll` | 119,166,032 | 1.8.0 | `9a5409060c9637b91123462715419871779dd4846b5eb33eb31a3ff3a14e94c0` |
+| `dyn_dispatch_core.dll` | 158,389,328 | 1.8.0 | `14355332ba63c60c5cdfc84edc953eb565ec2e52407494224926673d3ca54d6e` |
+| `aiecompiler_client.dll` | 149,486,160 | 1.8.0 | `00a571e30d6e23a6f32cdbcdfc73ad21ddcb5e915e0208a88e90de9c5b4a0450` |
+
+Total: 451,655,648 bytes (430.7 MiB).
+
+Tried on 2026-11-12 on the reference host (the tool built with `ryzenai-1-8`, `ort` at
+API level 27, the same model and test as for 1.9.0, four runs, all alike): the model
+compiles, 36 of its 38 nodes are placed on the NPU, and it runs at 28,000 to 29,300 logs
+per second; but the output differs more from the CPU provider's than the tool allows:
+lowest cosine 0.9777 against the required 0.99 (1.9.0: 0.9958). The hardware gate
+therefore fails on 1.8.0, and the tool is not built for it. The manifest and the feature
+are kept so that the trial can be repeated; there is no provisioning route for 1.8.0.
+
+## What the files are for (1.9.0)
+
 
 - `onnxruntime.dll`: ONNX Runtime 1.30.0, the library `ort` loads. Also holds the CPU
   provider.
@@ -110,9 +144,13 @@ come from" and `--accept-unrecorded-origin` (pip records no URL for a package fr
 index) into a scratch directory; the five files it placed are byte for byte those of
 `runtime/ryzenai/`.
 
-AMD's NuGet package `RyzenAI_Deployment.1.9.0.nupkg` holds five files of the same names
-and sizes, but they are other builds of them (their CRC-32 values differ from the
-wheel's files), so they do not pass the check against this manifest.
+There is no route without the index today. AMD's NuGet package
+`RyzenAI_Deployment.1.9.0.nupkg` holds five files of the same names and sizes, but they
+are other builds of them (their CRC-32 values differ from the wheel's files), so they do
+not pass the check against the 1.9.0 manifest; a route from it would need a manifest of
+its own and a run of the hardware gate. The NuGet ZIP of release 1.8.0
+(`ryzen_ai_nuget_1.8.0.zip`) was tried that way on 2026-11-12 and fails the gate (section
+"AMD Ryzen AI 1.8.0" above), so `provision.py` has no ZIP route.
 
 ## What must be on the host besides these files
 
@@ -133,9 +171,11 @@ modification time it has now.
 
 - At every start: the directory exists; every file of the manifest is there, is a file
   and has its size; no other DLL is in the directory; the record, if there is one, has
-  a known format and names release 1.9.0; a file whose modification time differs from
-  the record, or that the record does not name, is hashed. With a record and unchanged
-  files this takes 0.3 to 2.2 ms.
+  a known format and names the built release; a file whose modification time differs
+  from the record, or that the record does not name, is hashed. When it is right, the
+  record gets its new time and a note `reverified` (by the check, when, which files),
+  and keeps who wrote it and where the files came from; the start after it is fast
+  again. With a record and unchanged files a start takes 0.3 to 2.2 ms.
 - In a directory without a record (filled by hand): every file is hashed (0.84 s), and
   when all are right the check writes the record itself, marked `"written_by": "check"`
   and without a source, so that later starts are fast. If the directory cannot be

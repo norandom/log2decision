@@ -6,8 +6,9 @@
 //!
 //! # What is expected
 //!
-//! [`RuntimeManifest::expected`] is the tracked file `runtime/ryzenai.manifest.json`,
-//! compiled into the tool: the release, where its files come from, and for each file its
+//! [`RuntimeManifest::expected`] is a tracked file, `runtime/ryzenai-<release>.manifest.json`,
+//! compiled into the tool (which release: the feature `ryzenai-1-9` or `ryzenai-1-8` of
+//! this crate, one choice that also sets the API level of `ort`): the release, where its files come from, and for each file its
 //! name, size, SHA-256 and file version. It is compiled in because the tool is built for
 //! one release (the `api-30` feature of `ort` is the API level of that release's ONNX
 //! Runtime), and because the runtime directory may lie outside the project
@@ -86,20 +87,25 @@ pub struct ManifestFile {
     pub version: String,
 }
 
-/// Where the files of a release come from.
+/// Where the files of a release come from. Which package that is depends on the kind:
+/// AMD's wheel on its release-specific package index (`wheel`), or AMD's NuGet package
+/// inside the ZIP AMD publishes (`nuget`). The two hold different builds of the same
+/// files, so a manifest is for one of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestSource {
-    /// AMD's release-specific package index.
-    pub index: String,
+    /// `wheel` or `nuget`.
+    pub kind: String,
     /// The package that carries the files, and its version.
     pub package: String,
     pub version: String,
-    /// File name of the wheel on the index.
-    pub wheel: String,
-    /// Directory inside the wheel that holds the files.
+    /// Directory inside the package that holds the files.
     pub directory: String,
+    /// What else names the source. For `wheel`: `index` (AMD's index) and `wheel` (the
+    /// file name there). For `nuget`: `archive` (the ZIP as AMD names it), `nupkg` (the
+    /// package inside it) and `nupkg_sha256`.
+    #[serde(flatten)]
+    pub detail: std::collections::BTreeMap<String, String>,
 }
-
 /// The required runtime files of one AMD Ryzen AI release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeManifest {
@@ -113,13 +119,34 @@ pub struct RuntimeManifest {
     pub files: Vec<ManifestFile>,
 }
 
+// The release the tool is built for is one choice: the feature `ryzenai-1-9` or
+// `ryzenai-1-8` of this crate (its default, `crates/l2d-encoder/Cargo.toml`). The feature
+// selects the manifest compiled in here and the API level `ort` asks the runtime for.
+#[cfg(all(feature = "ryzenai-1-9", feature = "ryzenai-1-8"))]
+compile_error!(
+    "the features `ryzenai-1-9` and `ryzenai-1-8` are both enabled: the tool is built for \
+     one release of the AMD runtime"
+);
+#[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
+compile_error!(
+    "neither `ryzenai-1-9` nor `ryzenai-1-8` is enabled: choose the release of the AMD \
+     runtime the tool is built for"
+);
+
+#[cfg(feature = "ryzenai-1-9")]
+const EXPECTED_MANIFEST: &str = include_str!("../../../runtime/ryzenai-1.9.0.manifest.json");
+#[cfg(all(feature = "ryzenai-1-8", not(feature = "ryzenai-1-9")))]
+const EXPECTED_MANIFEST: &str = include_str!("../../../runtime/ryzenai-1.8.0.manifest.json");
+#[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
+const EXPECTED_MANIFEST: &str = "";
+
 static EXPECTED: LazyLock<RuntimeManifest> = LazyLock::new(|| {
-    RuntimeManifest::parse(include_str!("../../../runtime/ryzenai.manifest.json"))
+    RuntimeManifest::parse(EXPECTED_MANIFEST)
         .unwrap_or_else(|error| panic!("the compiled-in runtime manifest is unusable: {error}"))
 });
 
 impl RuntimeManifest {
-    /// The manifest this build of the tool expects: `runtime/ryzenai.manifest.json` as it
+    /// The manifest this build of the tool expects: `runtime/ryzenai-<release>.manifest.json` as it
     /// was when the tool was compiled.
     pub fn expected() -> &'static RuntimeManifest {
         &EXPECTED

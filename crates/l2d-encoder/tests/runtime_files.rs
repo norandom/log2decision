@@ -44,11 +44,17 @@ fn manifest() -> RuntimeManifest {
         release: "2.0.0".into(),
         onnxruntime: "1.30.0".into(),
         source: ManifestSource {
-            index: "https://example.invalid/2.0.0/simple/".into(),
+            kind: "wheel".into(),
             package: "runtime-package".into(),
             version: "1.30.0".into(),
-            wheel: "runtime_package-1.30.0-py3-none-win_amd64.whl".into(),
             directory: "onnxruntime/capi".into(),
+            detail: [
+                ("index", "https://example.invalid/2.0.0/simple/"),
+                ("wheel", "runtime_package-1.30.0-py3-none-win_amd64.whl"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
         },
         files: FILES
             .iter()
@@ -630,64 +636,174 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-/// The manifest compiled into the tool is the tracked file `runtime/ryzenai.manifest.json`,
-/// and the table in `runtime/README.md` says the same.
-#[test]
-fn the_compiled_in_manifest_is_the_tracked_one_and_agrees_with_the_readme() {
-    let expected = RuntimeManifest::expected();
-    let tracked = std::fs::read_to_string(
-        workspace_root()
-            .join("runtime")
-            .join("ryzenai.manifest.json"),
-    )
-    .unwrap();
-    assert_eq!(&RuntimeManifest::parse(&tracked).unwrap(), expected);
-
-    assert_eq!(expected.release, "1.9.0");
-    assert_eq!(expected.onnxruntime, "1.30.0");
-    assert_eq!(expected.source.package, "onnxruntime-vitisai");
-    assert_eq!(expected.source.version, "1.30.0");
-    assert!(
-        expected.source.index.contains("/1.9.0/"),
-        "{}",
-        expected.source.index
-    );
-    assert_eq!(expected.files.len(), 5);
-    assert_eq!(expected.files[0].name, "onnxruntime.dll");
-    assert_eq!(expected.total_bytes(), 713_594_768);
-
-    // Rows of the README table: | `name` | bytes | version | `sha256` |
-    let readme =
-        std::fs::read_to_string(workspace_root().join("runtime").join("README.md")).unwrap();
-    let rows: Vec<(String, u64, String, String)> = readme
-        .lines()
-        .filter(|line| line.starts_with("| `") && line.contains(".dll`"))
-        .map(|line| {
-            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-            assert_eq!(cells.len(), 4, "{line}");
-            (
-                cells[0].trim_matches('`').to_string(),
-                cells[1].replace(',', "").parse().unwrap(),
-                cells[2].to_string(),
-                cells[3].trim_matches('`').to_string(),
-            )
-        })
-        .collect();
-    let manifest_rows: Vec<(String, u64, String, String)> = expected
-        .files
-        .iter()
-        .map(|file| {
-            (
-                file.name.clone(),
-                file.bytes,
-                file.version.clone(),
-                file.sha256.clone(),
-            )
-        })
-        .collect();
-    assert_eq!(rows, manifest_rows);
+fn tracked_manifest(release: &str) -> RuntimeManifest {
+    let path = workspace_root()
+        .join("runtime")
+        .join(format!("ryzenai-{release}.manifest.json"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    RuntimeManifest::parse(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+/// The release the tool is built for is one choice, and everything that names it agrees:
+/// the feature of this crate, the manifest compiled in, the API level of `ort`, and
+/// `runtime/README.md`.
+#[test]
+fn the_built_release_is_one_choice_that_everything_agrees_on() {
+    let expected = RuntimeManifest::expected();
+    let by_feature = if cfg!(feature = "ryzenai-1-9") {
+        "1.9.0"
+    } else {
+        "1.8.0"
+    };
+    assert_eq!(expected.release, by_feature);
+    assert_eq!(&tracked_manifest(by_feature), expected);
+
+    // `ort` asks the runtime for the API level of the release's ONNX Runtime (1.NN.x).
+    let minor: u32 = expected
+        .onnxruntime
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        ort::MINOR_VERSION,
+        minor,
+        "the `ort` API level and ONNX Runtime {} of AMD Ryzen AI {}",
+        expected.onnxruntime,
+        expected.release
+    );
+
+    let readme =
+        std::fs::read_to_string(workspace_root().join("runtime").join("README.md")).unwrap();
+    let stated: Vec<&str> = readme
+        .lines()
+        .filter(|line| line.starts_with("The tool is built for **AMD Ryzen AI "))
+        .collect();
+    assert_eq!(
+        stated,
+        vec![
+            format!(
+                "The tool is built for **AMD Ryzen AI {}** (ONNX Runtime {}).",
+                expected.release, expected.onnxruntime
+            )
+            .as_str()
+        ]
+    );
+}
+
+/// Both releases have a tracked manifest, and the tables of `runtime/README.md` say the
+/// same as the manifests.
+#[test]
+fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
+    let readme =
+        std::fs::read_to_string(workspace_root().join("runtime").join("README.md")).unwrap();
+    for (release, onnxruntime, kind, count, total) in [
+        ("1.9.0", "1.30.0", "wheel", 5, 713_594_768u64),
+        ("1.8.0", "1.27.0", "nuget", 6, 451_655_648u64),
+    ] {
+        let manifest = tracked_manifest(release);
+        assert_eq!(manifest.release, release);
+        assert_eq!(manifest.onnxruntime, onnxruntime);
+        assert_eq!(manifest.source.kind, kind);
+        assert_eq!(manifest.files.len(), count);
+        assert_eq!(manifest.files[0].name, "onnxruntime.dll");
+        assert_eq!(manifest.total_bytes(), total);
+
+        // The section of the release: from its heading to the next heading.
+        let heading = format!("### AMD Ryzen AI {release}");
+        let section: Vec<&str> = readme
+            .lines()
+            .skip_while(|line| !line.starts_with(&heading))
+            .skip(1)
+            .take_while(|line| !line.starts_with('#'))
+            .collect();
+        assert!(!section.is_empty(), "no section {heading:?} in the README");
+        // Rows of the table: | `name` | bytes | version | `sha256` |
+        let rows: Vec<(String, u64, String, String)> = section
+            .iter()
+            .filter(|line| line.starts_with("| `") && line.contains(".dll`"))
+            .map(|line| {
+                let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+                assert_eq!(cells.len(), 4, "{line}");
+                (
+                    cells[0].trim_matches('`').to_string(),
+                    cells[1].replace(',', "").parse().unwrap(),
+                    cells[2].to_string(),
+                    cells[3].trim_matches('`').to_string(),
+                )
+            })
+            .collect();
+        let manifest_rows: Vec<(String, u64, String, String)> = manifest
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.name.clone(),
+                    file.bytes,
+                    file.version.clone(),
+                    file.sha256.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, manifest_rows, "{release}");
+    }
+    let wheel = tracked_manifest("1.9.0");
+    assert_eq!(wheel.source.package, "onnxruntime-vitisai");
+    assert!(wheel.source.detail["index"].contains("/1.9.0/"));
+    let nuget = tracked_manifest("1.8.0");
+    assert_eq!(nuget.source.package, "RyzenAI_Deployment");
+    assert_eq!(
+        nuget.source.detail["nupkg"],
+        "RyzenAI_Deployment.1.8.0.nupkg"
+    );
+    assert_eq!(nuget.source.detail["nupkg_sha256"].len(), 64);
+}
+
+/// A runtime directory of the other release is refused, and both releases are named: by
+/// its record, and without a record by its files.
+#[test]
+fn a_directory_of_the_other_release_is_refused_naming_both() {
+    let built = RuntimeManifest::expected();
+    let other = tracked_manifest(if built.release == "1.9.0" {
+        "1.8.0"
+    } else {
+        "1.9.0"
+    });
+    // The files of the other release, by name and size (their content does not matter
+    // here: the sizes already differ), without a record.
+    let dir = scratch("other-release-files");
+    for file in &other.files {
+        let handle = std::fs::File::create(dir.join(&file.name)).unwrap();
+        handle.set_len(file.bytes.min(4096)).unwrap();
+    }
+    let reason = refusal(RuntimeFiles::check(&dir, CheckDepth::Fast));
+    assert!(reason.contains(&built.release), "{reason}");
+    assert!(reason.contains(&built.onnxruntime), "{reason}");
+    assert!(reason.contains("onnxruntime.dll"), "{reason}");
+
+    // With the record a check built for the other release wrote, or provisioning did.
+    std::fs::write(
+        dir.join(RECEIPT_FILE),
+        serde_json::json!({
+            "format": 1, "release": other.release, "onnxruntime": other.onnxruntime,
+            "written_by": "check", "files": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let reason = refusal(RuntimeFiles::check(&dir, CheckDepth::Fast));
+    for part in [
+        &built.release,
+        &built.onnxruntime,
+        &other.release,
+        &other.onnxruntime,
+    ] {
+        assert!(reason.contains(part.as_str()), "{part}: {reason}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
 // --- File versions (Windows) ------------------------------------------------------------
 
 /// The version of a real DLL is read, and a refusal names it: on a copy of a system
@@ -778,7 +894,7 @@ fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
         let checked = RuntimeFiles::check(&dir, CheckDepth::Fast)
             .unwrap_or_else(|error| panic!("fast check: {error}"));
         let elapsed = started.elapsed();
-        assert_eq!(checked.release, "1.9.0");
+        assert_eq!(checked.release, RuntimeManifest::expected().release);
         println!(
             "runtime_files: fast check {elapsed:?}, hashed {}, record: {}",
             checked.hashed.len(),
