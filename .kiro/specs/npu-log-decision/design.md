@@ -48,7 +48,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 
 ### Allowed Dependencies
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
-- Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (feature `bundled`; release 0.32 has no `fts5` feature, the bundled SQLite 3.46.0 is compiled with FTS5), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
+- Rust crates: `ort` (pinned `=2.0.0-rc.15`, default features off because they download a runtime; features `std`, `load-dynamic`, `vitis`, `api-30`), `rusqlite` 0.32 (feature `bundled`; release 0.32 has no `fts5` feature, the bundled SQLite 3.46.0 is compiled with FTS5), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows-sys` (free memory, process times, device query).
 - `polars` for data frames, pinned to `=0.52.0` with default features off: facade features `lazy` and `ndarray` only, and the CSV and JSON readers enabled on `polars-io` directly. The facade's own `csv` and `json` features, and releases from 0.53 on, link network client crates and are not used. Other crates import Polars only through `l2d_core::polars`. Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
 - For zip input and result parts (requirement 13): `zip` 2.x with default features off and the feature `deflate` only, `flate2` (arrives with `zip`) for gzip entries, and the `polars-io` features `parquet` and `zstd`. Checked on 2026-11-12 in a scratch copy: the resolved lock file names no network crate. The check is repeated when the task adds them.
 - No crate for the conformal calibration layer: the method is a few lines and is written in `l2d-decide` (owner decision of 2026-11-12, which replaces the adoption of `conformal-prediction`; task 1.18 removes the crate).
@@ -121,7 +121,7 @@ graph LR
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
 | CLI | Rust 1.98, `clap` 4, `serde_json` | Subcommands, JSON output, exit codes | Binary name `l2d` |
-| Encoder execution | `ort` 2.0.0-rc.15, features `load-dynamic`, `vitis`, `std`, `ndarray`, one `api-NN` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | `api-NN` fixed from DLL version |
+| Encoder execution | `ort` =2.0.0-rc.15, default features off, features `std`, `load-dynamic`, `vitis`, `api-30` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | Proven by the hardware gate (task 2.2). `api-30` because Ryzen AI 1.9 ships ONNX Runtime 1.30.0; `api-31` is refused by that DLL |
 | NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
 | Data layer | `polars` (default features off; CSV, JSON, lazy, `ndarray` conversion) | Parsing of log data; frames between crates; grouping and joins in calibration, evaluation and reports | No cloud or HTTP features; lives in `l2d-core` |
 | Calibration | own code in `l2d-decide` | Conformal label sets at a stated error rate | `conformal-prediction` is removed by task 1.18 |
@@ -674,7 +674,7 @@ impl EncoderPackage {
 - The CPU path runs the same `model.int8.onnx` through the CPU provider of the same runtime.
 
 **Dependencies**
-- External: `ort`, AMD runtime DLLs — encoder execution (P0). Unproven from Rust; task 1 gates it.
+- External: `ort`, AMD runtime DLLs — encoder execution (P0). Proven from Rust by the hardware gate of task 2.2 on 2026-11-12: the 8-bit spike model ran with 36 of 38 nodes on the NPU (the two on the CPU are the input quantize and the output dequantize), at 22,000 to 36,000 logs per second in batches of 32 against about 4,000 on the CPU provider, with a cosine of 0.9958 against the CPU output, and no Python on `PATH`. Five DLLs are needed in `runtime/ryzenai/` (`runtime/README.md`); a missing `dyn_dispatch_core.dll` ends the process with an access violation and no error, so the file check of task 2.3 runs before anything is loaded. The device query uses `windows-sys`.
 
 **Contracts**: Service [x]
 
@@ -706,9 +706,9 @@ impl ByteCodec {
 - `open` with `allow_cpu = false` returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed.
 
 **Implementation Notes**
-- Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest.
+- Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest. It is `api-30` (task 2.2). The gate test finds the runtime directory through `L2D_RUNTIME_DIR`, with `runtime/ryzenai/` as the default; task 2.3 decides whether the tool reads that variable.
 - Validation: a test opens the same package on NPU and CPU and checks cosine ≥ 0.99 per vector (4.6); a benchmark checks 1,000 logs/s over 10,000 logs (4.2) and readiness within 30 s (4.7).
-- Risks: placement report may not regenerate on a warm cache; the first compile stores the counts in `runtime/cache/<revision>/placement.json` for reuse.
+- Placement (confirmed by task 2.2): the provider writes its report `vitisai_ep_report.json` only when it compiles a model, and only with the environment variable `XLNX_ONNX_EP_REPORT_FILE` set before the runtime is loaded; a warm start from the cache writes none. The report of the compile stays in the cache folder `runtime/cache/<key>/`, where a later session reads the counts. The report names the CPU device `VITIS_EP_CPU`. ONNX Runtime's profile additionally shows which provider executed the nodes.
 
 ### Training
 

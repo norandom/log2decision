@@ -8,3 +8,9 @@ publish.workspace = true
 
 [dependencies]
 l2d-core.workspace = true
+
+[dev-dependencies]
+ort.workspace = true
+sha2.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties"] }
+serde_json.workspace = true

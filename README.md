@@ -64,7 +64,7 @@ it is allowed in.
 | Search in a store: by phrase (with or without case), by label and source, and by nearest vectors | Library done and tested, not yet wired to a command. On CSIC's 25,608 logs a nearest-vector search takes about 36 ms and the first 100 phrase matches about 1.5 ms. A search that does not fit the memory limit is refused |
 | Triage, evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
-| Encoder on the NPU | Feasibility shown; gated behind the baseline evaluation |
+| Encoder on the NPU | Hardware gate passed: an 8-bit model with random weights runs on the AMD NPU from Rust, 36 of 38 nodes on the NPU, at 22,000 to 36,000 logs per second. Whether a trained encoder beats the simple scorer is being measured; the encoder itself is not built |
 
 A measured example: HTTP CSIC 2010 (61,065 requests, 28 MB) is read and
 deduplicated to 25,608 distinct logs in about a quarter of a second, with a

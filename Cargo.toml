@@ -159,6 +159,31 @@ rusqlite = { version = "0.32", default-features = false, features = ["bundled"] 
 # platforms" by their own description: a distance can differ in its last bits between
 # CPUs of different SIMD widths, never between runs on one host.
 faer = { version = "0.24", default-features = false, features = ["std"] }
+# ONNX Runtime binding (requirement 4, hardware gate of task 2.2). So far a
+# dev-dependency of `l2d-encoder` only: the gate test `tests/npu_gate.rs` is its one user.
+#
+# - The version is pinned: 2.0.0-rc.15 is a release candidate (there is no stable 2.x),
+#   and it wraps ONNX Runtime 1.31. AMD's Ryzen AI 1.9 ships ONNX Runtime 1.30.0, so the
+#   feature `api-30` is set: `ort` then asks the DLL for API level 30. With the default
+#   `api-31` the DLL in `runtime/ryzenai/` would be refused at load.
+# - Default features are off. The defaults include `download-binaries` and `tls-native`,
+#   which make the build script of `ort-sys` fetch a runtime over HTTPS (`ureq`,
+#   `native-tls`), and `copy-dylibs`. None of that is wanted: the runtime is AMD's own
+#   DLL, loaded at run time from `runtime/ryzenai/` (`load-dynamic`), and nothing is
+#   linked or downloaded at build time. `vitis` only compiles the provider's option
+#   names; `std` is needed for paths and for `load-dynamic`. `ndarray`, `tracing` and
+#   `fetch-models` are off.
+# - What it brings in (`cargo tree -p ort -e all --target all`, 2026-11-12): `ort`,
+#   `ort-sys` (no build dependency with these features), `libloading` 0.9.0 (with
+#   `cfg-if` and `windows-link`, both present already) and `smallvec` (present already).
+#   `Cargo.lock` grows by six packages (from 203 to 209 on its branch; 253 after the
+#   merge with task 1.9, which added `faer`): those three, and `ndarray`
+#   0.17.2, `tracing` 0.1.44 and `tracing-core` 0.1.36, which are optional dependencies
+#   that the feature `std` names (`ndarray?/std`, `tracing?/std`). Cargo records such
+#   packages in the lock file, but they are not in the dependency tree and are not
+#   compiled (`cargo tree -i ndarray@0.17.2 -e all --target all` and `-i tracing` print
+#   nothing). No network crate; the guard test over `Cargo.lock` stays green.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "vitis", "api-30"] }
 # Test-only reference implementation for the dense path.
 linfa = "0.8.1"
 linfa-logistic = "0.8.1"

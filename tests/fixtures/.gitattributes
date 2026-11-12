@@ -1,0 +1,2 @@
+# Tests depend on the bytes and the line numbers of these files: no line-ending conversion.
+*.csv -text
