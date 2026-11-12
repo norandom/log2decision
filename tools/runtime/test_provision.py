@@ -304,12 +304,24 @@ class PinningTests(unittest.TestCase):
         self.assertEqual(provision.built_release(), "1.9.0")
         self.assertEqual(provision.default_manifest().name, "ryzenai-1.9.0.manifest.json")
 
-    def test_a_manifest_whose_source_is_not_a_wheel_is_refused(self) -> None:
-        other = provision.REPO_ROOT / "runtime" / "ryzenai-1.8.0.manifest.json"
-        with self.assertRaises(provision.ProvisioningError) as caught:
-            provision.load_manifest(other)
-        self.assertIn("'nuget'", str(caught.exception))
-        self.assertIn("1.8.0", str(caught.exception))
+    def test_the_tracked_manifest_of_1_8_0_is_of_the_kind_nuget(self) -> None:
+        manifest = provision.load_manifest(provision.manifest_of("1.8.0"))
+        self.assertEqual(manifest.kind, "nuget")
+        self.assertEqual(manifest.package, "RyzenAI_Deployment")
+        self.assertEqual(manifest.version, "1.8.0")
+        self.assertEqual(manifest.detail["nupkg"], "RyzenAI_Deployment.1.8.0.nupkg")
+        self.assertEqual(len(manifest.files), 6)
+        self.assertEqual(sum(entry.bytes for entry in manifest.files), 451_655_648)
+
+    def test_a_manifest_of_an_unknown_kind_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="l2d-provision-test-") as scratch:
+            data = json.loads(provision.manifest_of("1.8.0").read_text(encoding="utf-8"))
+            data["source"]["kind"] = "msi"
+            path = Path(scratch) / "manifest.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(provision.ProvisioningError) as caught:
+                provision.load_manifest(path)
+            self.assertIn("'msi'", str(caught.exception))
 
     def test_pyproject_pins_the_wheel_of_the_tracked_manifest(self) -> None:
         manifest = provision.load_manifest(provision.default_manifest())
@@ -319,8 +331,9 @@ class PinningTests(unittest.TestCase):
         self.assertEqual(
             project["project"]["dependencies"], [f"{manifest.package} @ {manifest.wheel_url}"]
         )
-        self.assertIn(f"/{manifest.release}/", manifest.index)
-        self.assertIn(manifest.version, manifest.wheel)
+        self.assertEqual(manifest.kind, "wheel")
+        self.assertIn(f"/{manifest.release}/", manifest.detail["index"])
+        self.assertIn(manifest.version, manifest.detail["wheel"])
         # Nothing the wheel asks for is installed: it is unpacked, never imported.
         self.assertIn("voe", project["tool"]["uv"]["exclude-dependencies"])
 
