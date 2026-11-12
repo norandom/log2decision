@@ -321,17 +321,22 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
             .join(" ")
             .trim_end()
     );
-    let runtime_dir = runtime_dir
+    // The library is the one the check names: the first file of the manifest.
+    let dll = files.onnxruntime_dll();
+    let dll = dll
         .canonicalize()
-        .unwrap_or_else(|error| panic!("resolving {}: {error}", runtime_dir.display()));
+        .unwrap_or_else(|error| panic!("resolving {}: {error}", dll.display()));
     // `canonicalize` gives a `\\?\` path. The plain drive path is used from here on: it is
     // what the spike passed, and the `\\?\` form was not tried with the provider.
-    let runtime_dir = PathBuf::from(
-        runtime_dir
-            .to_string_lossy()
+    let dll = PathBuf::from(
+        dll.to_string_lossy()
             .trim_start_matches(r"\\?\")
             .to_string(),
     );
+    let runtime_dir = dll
+        .parent()
+        .expect("the library lies in the runtime directory")
+        .to_path_buf();
     let npu = NpuStatus::query().unwrap_or_else(|error| panic!("{error}"));
     for line in npu.log_lines() {
         println!("npu_gate: {line}");
@@ -415,7 +420,6 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
 
     // --- Load ONNX Runtime from the runtime directory and open the model on the NPU. ---
     let started = Instant::now();
-    let dll = runtime_dir.join("onnxruntime.dll");
     let environment = ort::init_from(&dll)
         .unwrap_or_else(|error| panic!("loading {} failed: {error}", dll.display()))
         .with_name("l2d-gate-2.2")

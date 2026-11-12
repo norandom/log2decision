@@ -433,21 +433,218 @@ fn a_directory_recorded_for_another_release_is_refused_with_both_versions() {
 }
 
 #[test]
-fn an_unreadable_record_and_a_record_of_another_format_are_refused() {
-    let dir = complete("bad-record");
+fn a_record_of_another_format_is_refused_naming_it() {
+    let dir = complete("format-record");
     let path = dir.join(RECEIPT_FILE);
-    std::fs::write(&path, "{ not json").unwrap();
-    let reason = refusal(fast(&dir));
-    assert!(reason.contains(&path.display().to_string()), "{reason}");
-
     write_provisioning_record(&dir, "2.0.0", "1.30.0");
     let mut record = read_record(&dir);
     record["format"] = 7.into();
     std::fs::write(&path, record.to_string()).unwrap();
+    let before = std::fs::read(&path).unwrap();
     let reason = refusal(fast(&dir));
     assert!(reason.contains(&path.display().to_string()), "{reason}");
     assert!(reason.contains("format 7"), "the format found: {reason}");
     assert!(reason.contains("format 1"), "the format read: {reason}");
+    assert!(reason.contains("remove it"), "how to recover: {reason}");
+
+    // Also when the rest of it does not have the shape this build knows.
+    std::fs::write(&path, r#"{"format": 9, "anything": true}"#).unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(reason.contains("format 9"), "{reason}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        r#"{"format": 9, "anything": true}"#
+    );
+    drop(before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A record that cannot be read is treated as no record: the files decide. Every file is
+/// hashed, and when all are right a new record replaces the unreadable one, so the user
+/// has nothing to repair by hand.
+#[test]
+fn a_record_that_cannot_be_read_is_treated_as_no_record_and_replaced() {
+    for (name, content) in [
+        ("not-json", "{ not json"),
+        ("empty", ""),
+        ("not-a-record", r#"{"format": 1, "release": "2.0.0"}"#),
+        ("a-list", "[1, 2, 3]"),
+    ] {
+        let dir = complete(&format!("unreadable-{name}"));
+        let path = dir.join(RECEIPT_FILE);
+        std::fs::write(&path, content).unwrap();
+
+        let checked = fast(&dir).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(checked.hashed, ALL, "{name}: nothing is trusted");
+        let RecordState::Replaced { reason } = &checked.record else {
+            panic!("{name}: {:?}", checked.record);
+        };
+        assert!(reason.contains(&path.display().to_string()), "{reason}");
+        assert!(
+            checked.record.describe().contains("new record"),
+            "{}",
+            checked.record.describe()
+        );
+        // The new record is the check's, and the next start is fast.
+        assert_eq!(read_record(&dir)["written_by"], "check");
+        let again = fast(&dir).unwrap();
+        assert!(again.hashed.is_empty(), "{name}: {:?}", again.hashed);
+        assert_eq!(again.record, RecordState::Check);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // With a wrong file the directory is refused, and the unreadable record stays.
+    let dir = complete("unreadable-and-wrong");
+    let path = dir.join(RECEIPT_FILE);
+    std::fs::write(&path, "{ not json").unwrap();
+    std::fs::write(dir.join("provider.dll"), ALTERED).unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(reason.contains(&sha256_hex(ALTERED)), "{reason}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // A folder in the record's place cannot be read or replaced: the check passes, hashes
+    // at every start and says both.
+    let dir = complete("unreadable-folder");
+    std::fs::create_dir(dir.join(RECEIPT_FILE)).unwrap();
+    let checked = fast(&dir).unwrap();
+    assert_eq!(checked.hashed, ALL);
+    assert!(
+        matches!(checked.record, RecordState::NotWritten { .. }),
+        "{:?}",
+        checked.record
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- The record is bound to the manifest -------------------------------------------------
+
+/// The same release from two sources (AMD's wheel and AMD's NuGet package hold different
+/// builds of the same files, of the same sizes). A directory provisioned and recorded
+/// from the other source is not trusted by a build that carries this manifest: the
+/// record's hashes are not the manifest's, so the files are hashed, and refused.
+#[test]
+fn a_record_whose_hashes_belong_to_another_source_does_not_make_files_trusted() {
+    let dir = scratch("other-source");
+    // The other source's files: same names, same sizes, other content.
+    let other: Vec<(&str, Vec<u8>)> = FILES
+        .iter()
+        .map(|(name, content, _)| (*name, content.to_ascii_uppercase()))
+        .collect();
+    for (name, content) in &other {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+    // Its record is right about them in every respect: release, sizes, times, hashes.
+    let files: Vec<serde_json::Value> = other
+        .iter()
+        .map(|(name, content)| {
+            serde_json::json!({
+                "name": name,
+                "bytes": content.len(),
+                "sha256": sha256_hex(content),
+                "modified_unix_ns": modified_ns(&dir.join(name)),
+            })
+        })
+        .collect();
+    let record = serde_json::json!({
+        "format": 1, "release": "2.0.0", "onnxruntime": "1.30.0",
+        "written_by": "provisioning",
+        "source": { "kind": "nuget", "package": "OtherPackage" },
+        "files": files,
+    });
+    std::fs::write(dir.join(RECEIPT_FILE), record.to_string()).unwrap();
+    let before = std::fs::read(dir.join(RECEIPT_FILE)).unwrap();
+
+    let reason = refusal(fast(&dir));
+    for ((name, content), file) in other.iter().zip(&manifest().files) {
+        assert!(
+            reason.contains(&dir.join(name).display().to_string()),
+            "{reason}"
+        );
+        assert!(reason.contains(&sha256_hex(content)), "found: {reason}");
+        assert!(reason.contains(&file.sha256), "expected: {reason}");
+    }
+    assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).unwrap(), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A record without sizes and hashes, or with other ones, over files that are right: the
+/// files are hashed once, found right, and the record gets the manifest's values.
+#[test]
+fn a_record_without_the_manifests_hashes_is_not_trusted_and_is_brought_up_to_date() {
+    for strip in [true, false] {
+        let dir = complete(if strip {
+            "record-no-hashes"
+        } else {
+            "record-other-hashes"
+        });
+        write_provisioning_record(&dir, "2.0.0", "1.30.0");
+        let mut record = read_record(&dir);
+        for entry in record["files"].as_array_mut().unwrap() {
+            let entry = entry.as_object_mut().unwrap();
+            if strip {
+                entry.remove("sha256");
+                entry.remove("bytes");
+            } else {
+                entry.insert("sha256".into(), "0".repeat(64).into());
+            }
+        }
+        std::fs::write(dir.join(RECEIPT_FILE), record.to_string()).unwrap();
+
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.hashed, ALL, "strip {strip}");
+        assert_eq!(
+            checked.refresh,
+            RecordRefresh::Refreshed {
+                files: ALL.iter().map(|name| name.to_string()).collect()
+            }
+        );
+        let after = read_record(&dir);
+        for (entry, file) in after["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&manifest().files)
+        {
+            assert_eq!(entry["sha256"], file.sha256);
+            assert_eq!(entry["bytes"], file.bytes);
+        }
+        assert_eq!(after["written_by"], "provisioning");
+        assert!(fast(&dir).unwrap().hashed.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Temporary record files left by an interrupted write are removed by the next write
+/// that succeeds; a young one (a write that may be under way) and other files are left.
+#[test]
+fn leftover_partial_record_files_are_removed_by_the_next_successful_write() {
+    let dir = complete("leftovers");
+    let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let old_names = [
+        format!(".{RECEIPT_FILE}.4242.partial"),
+        format!(".{RECEIPT_FILE}.partial"),
+    ];
+    for name in &old_names {
+        std::fs::write(dir.join(name), "{").unwrap();
+        set_modified(&dir.join(name), hour_ago);
+    }
+    let young = dir.join(format!(".{RECEIPT_FILE}.4343.partial"));
+    std::fs::write(&young, "{").unwrap();
+    let unrelated = dir.join(".onnxruntime.dll.partial");
+    std::fs::write(&unrelated, "half a file of the provisioning step").unwrap();
+    set_modified(&unrelated, hour_ago);
+
+    assert_eq!(fast(&dir).unwrap().record, RecordState::Written);
+    for name in &old_names {
+        assert!(!dir.join(name).exists(), "{name} is still there");
+    }
+    assert!(
+        young.exists(),
+        "a write that may be under way is left alone"
+    );
+    assert!(unrelated.exists(), "only record files are removed");
+    assert!(dir.join(RECEIPT_FILE).is_file());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -771,17 +968,35 @@ fn a_directory_of_the_other_release_is_refused_naming_both() {
     } else {
         "1.9.0"
     });
-    // The files of the other release, by name and size (their content does not matter
-    // here: the sizes already differ), without a record.
+    // The files of the other release, by name and size, without a record. Their content
+    // does not matter: nothing of that size is read, except where the two releases have
+    // a file of the same size, and that one is then refused by its hash.
     let dir = scratch("other-release-files");
     for file in &other.files {
         let handle = std::fs::File::create(dir.join(&file.name)).unwrap();
-        handle.set_len(file.bytes.min(4096)).unwrap();
+        handle.set_len(file.bytes).unwrap();
     }
     let reason = refusal(RuntimeFiles::check(&dir, CheckDepth::Fast));
-    assert!(reason.contains(&built.release), "{reason}");
-    assert!(reason.contains(&built.onnxruntime), "{reason}");
+    // Both releases are named although no record says which one the directory holds.
+    for part in [
+        &built.release,
+        &built.onnxruntime,
+        &other.release,
+        &other.onnxruntime,
+    ] {
+        assert!(reason.contains(part.as_str()), "{part}: {reason}");
+    }
+    assert!(
+        reason.contains(&format!(
+            "{} of the {} files of AMD Ryzen AI {}",
+            other.files.len(),
+            other.files.len(),
+            other.release
+        )),
+        "{reason}"
+    );
     assert!(reason.contains("onnxruntime.dll"), "{reason}");
+    assert!(!dir.join(RECEIPT_FILE).exists());
 
     // With the record a check built for the other release wrote, or provisioning did.
     std::fs::write(
@@ -878,7 +1093,7 @@ fn the_file_version_of_a_wrong_dll_is_named_in_the_refusal() {
 /// cargo test -p l2d-encoder --test runtime_files -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "needs the AMD runtime files (714 MB) and may write the record; run on request"]
+#[ignore = "needs the AMD runtime files and may write the record; run on request"]
 fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
     let dir = ProjectPaths::new(workspace_root())
         .runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref());
@@ -911,7 +1126,10 @@ fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
     let checked = RuntimeFiles::check(&dir, CheckDepth::Full)
         .unwrap_or_else(|error| panic!("full check: {error}"));
     let full = started.elapsed();
-    assert_eq!(checked.hashed.len(), 5);
+    assert_eq!(
+        checked.hashed.len(),
+        RuntimeManifest::expected().files.len()
+    );
     let megabytes = RuntimeManifest::expected().total_bytes() as f64 / 1e6;
     println!(
         "runtime_files: full check {full:?} over {megabytes:.1} MB ({:.0} MB/s), release {} \

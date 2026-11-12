@@ -7,11 +7,12 @@
 //! # What is expected
 //!
 //! [`RuntimeManifest::expected`] is a tracked file, `runtime/ryzenai-<release>.manifest.json`,
-//! compiled into the tool (which release: the feature `ryzenai-1-9` or `ryzenai-1-8` of
-//! this crate, one choice that also sets the API level of `ort`): the release, where its files come from, and for each file its
-//! name, size, SHA-256 and file version. It is compiled in because the tool is built for
-//! one release (the `api-30` feature of `ort` is the API level of that release's ONNX
-//! Runtime), and because the runtime directory may lie outside the project
+//! compiled into the tool: the release, where its files come from, and for each file its
+//! name, size, SHA-256 and file version. Which release that is, is one choice: the feature
+//! `ryzenai-1-9` or `ryzenai-1-8` of this crate, which also sets the API level `ort` asks
+//! the runtime for (`api-30` for the ONNX Runtime 1.30 of release 1.9.0, `api-27` for the
+//! 1.27 of release 1.8.0). The manifest is compiled in because the tool is built for one
+//! release, and because the runtime directory may lie outside the project
 //! ([`l2d_core::paths::RUNTIME_DIR_VARIABLE`]), where no tracked file is at hand.
 //!
 //! # The record in the directory
@@ -31,11 +32,13 @@
 //! Always ([`CheckDepth::Fast`]; measured 0.3 to 2.2 ms on the reference host when a record
 //! is there, 0.84 s for the one start that hashes and writes it):
 //! - the directory exists;
-//! - the record, if there is one, has a known format and names the expected release;
+//! - the record, if there is one, has a known format and names the expected release (a
+//!   record that cannot be read at all is treated as no record and replaced);
 //! - every file of the manifest is present, is a file and has the expected size;
 //! - no other DLL is in the directory;
-//! - a file whose modification time differs from the record, or that the record does not
-//!   name, is hashed; when it is right the record is brought up to date (the file's new
+//! - a file whose modification time differs from the record, that the record does not
+//!   name, or that the record has with another size or SHA-256 than the manifest (a
+//!   directory verified against another source of the release), is hashed; when it is right the record is brought up to date (the file's new
 //!   time, and a note `reverified` saying that this check did it and when), so that the
 //!   start after it is fast again. Who wrote the record and where the files came from
 //!   stay as they were;
@@ -133,19 +136,33 @@ compile_error!(
      runtime the tool is built for"
 );
 
+/// The tracked manifests, all compiled in: the one the tool is built for is checked
+/// against, the others only serve to say which release a wrong directory holds.
+const MANIFEST_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.manifest.json");
+const MANIFEST_1_8_0: &str = include_str!("../../../runtime/ryzenai-1.8.0.manifest.json");
+
 #[cfg(feature = "ryzenai-1-9")]
-const EXPECTED_MANIFEST: &str = include_str!("../../../runtime/ryzenai-1.9.0.manifest.json");
+const EXPECTED_MANIFEST: &str = MANIFEST_1_9_0;
 #[cfg(all(feature = "ryzenai-1-8", not(feature = "ryzenai-1-9")))]
-const EXPECTED_MANIFEST: &str = include_str!("../../../runtime/ryzenai-1.8.0.manifest.json");
+const EXPECTED_MANIFEST: &str = MANIFEST_1_8_0;
 #[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
 const EXPECTED_MANIFEST: &str = "";
 
-static EXPECTED: LazyLock<RuntimeManifest> = LazyLock::new(|| {
-    RuntimeManifest::parse(EXPECTED_MANIFEST)
-        .unwrap_or_else(|error| panic!("the compiled-in runtime manifest is unusable: {error}"))
-});
+fn compiled_in(text: &str) -> RuntimeManifest {
+    RuntimeManifest::parse(text)
+        .unwrap_or_else(|error| panic!("a compiled-in runtime manifest is unusable: {error}"))
+}
+
+static EXPECTED: LazyLock<RuntimeManifest> = LazyLock::new(|| compiled_in(EXPECTED_MANIFEST));
+static KNOWN: LazyLock<Vec<RuntimeManifest>> =
+    LazyLock::new(|| vec![compiled_in(MANIFEST_1_9_0), compiled_in(MANIFEST_1_8_0)]);
 
 impl RuntimeManifest {
+    /// Every release the repository has a manifest for, the built one among them.
+    pub fn known() -> &'static [RuntimeManifest] {
+        &KNOWN
+    }
+
     /// The manifest this build of the tool expects: `runtime/ryzenai-<release>.manifest.json` as it
     /// was when the tool was compiled.
     pub fn expected() -> &'static RuntimeManifest {
@@ -285,8 +302,11 @@ pub enum RecordState {
     Check,
     /// There was none: every file was hashed and the record written by this check.
     Written,
-    /// There was none and it could not be written: every file was hashed, and will be
-    /// again at every start until the directory is writable.
+    /// There was one that could not be read (the reason): it was treated as none, every
+    /// file was hashed, and a new record replaced it.
+    Replaced { reason: String },
+    /// There was none (or none that could be read) and it could not be written: every
+    /// file was hashed, and will be again at every start until the directory is writable.
     NotWritten { reason: String },
 }
 
@@ -299,6 +319,10 @@ impl RecordState {
             RecordState::Written => {
                 "there was none; every file was hashed and the record written".into()
             }
+            RecordState::Replaced { reason } => format!(
+                "the one found could not be read ({reason}); every file was hashed and a \
+                 new record written in its place"
+            ),
             RecordState::NotWritten { reason } => format!(
                 "there is none and it could not be written ({reason}); every file is hashed \
                  at every start"
@@ -310,7 +334,6 @@ impl RecordState {
 /// The record in the directory; only what the check uses is read.
 #[derive(Debug, Deserialize)]
 struct Receipt {
-    format: u32,
     release: String,
     onnxruntime: String,
     /// `provisioning` or `check`; a record without it is the provisioning step's.
@@ -327,6 +350,20 @@ struct Receipt {
 struct ReceiptFile {
     name: String,
     modified_unix_ns: u64,
+    /// What was verified under that modification time. A record without them (or with
+    /// those of another source of the release) does not make a file trusted.
+    #[serde(default)]
+    bytes: Option<u64>,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+/// What `provisioned.json` of a directory gave.
+enum ReceiptRead {
+    None,
+    Found(Box<Receipt>),
+    /// It is there but cannot be used as a record: the reason. Treated as no record.
+    Unreadable(String),
 }
 
 impl RuntimeFiles {
@@ -361,7 +398,16 @@ impl RuntimeFiles {
                 detail: "runtime manifest: it names no file".into(),
             });
         }
-        let receipt = read_receipt(manifest, dir)?;
+        // A record that cannot be read is treated as no record: every file is hashed, and
+        // when all are right a new record replaces it. The record is only what lets a
+        // start skip hashing; the hashes decide, and refusing a directory whose files
+        // are right would gain nothing. (A record of another release or of another
+        // format can be read, says something, and is refused below.)
+        let (receipt, unreadable) = match read_receipt(manifest, dir)? {
+            ReceiptRead::None => (None, None),
+            ReceiptRead::Found(receipt) => (Some(*receipt), None),
+            ReceiptRead::Unreadable(reason) => (None, Some(reason)),
+        };
 
         let mut missing: Vec<&ManifestFile> = Vec::new();
         let mut wrong: Vec<String> = Vec::new();
@@ -396,14 +442,21 @@ impl RuntimeFiles {
             }
             let modified = modified_unix_ns(&metadata);
             // Trusted without a hash only when a record names the file with this
-            // modification time. Without a record nothing is.
+            // modification time AND with the size and SHA-256 this manifest has for it.
+            // The second part binds the record to the manifest: a directory verified
+            // against another source of the same release (the wheel and the NuGet package
+            // hold different builds) is not trusted by a build that carries this one.
+            // Without a record nothing is trusted.
             let recorded_as_it_is = receipt.as_ref().is_some_and(|receipt| {
-                let recorded = receipt
+                receipt
                     .files
                     .iter()
                     .find(|recorded| recorded.name.eq_ignore_ascii_case(&file.name))
-                    .map(|recorded| recorded.modified_unix_ns);
-                recorded.is_some() && recorded == modified
+                    .is_some_and(|recorded| {
+                        Some(recorded.modified_unix_ns) == modified
+                            && recorded.bytes == Some(file.bytes)
+                            && recorded.sha256.as_deref() == Some(file.sha256.as_str())
+                    })
             });
             if depth == CheckDepth::Full || !recorded_as_it_is {
                 let found = sha256_of(&path)?;
@@ -450,10 +503,12 @@ impl RuntimeFiles {
             );
             return Err(L2dError::Refused {
                 reason: format!(
-                    "the runtime directory {} does not hold the files of {}: {} ({PROVISION_HINT})",
+                    "the runtime directory {} does not hold the files of {}: {}{} \
+                     ({PROVISION_HINT})",
                     dir.display(),
                     manifest.release_text(),
-                    wrong.join("; ")
+                    wrong.join("; "),
+                    other_release_note(manifest, dir)
                 ),
             });
         }
@@ -483,10 +538,15 @@ impl RuntimeFiles {
                 RecordState::Check
             }
             Some(_) => RecordState::Provisioning,
-            // No record: every file was hashed above and is right.
-            None => match write_receipt(manifest, dir, &verified) {
-                Ok(()) => RecordState::Written,
-                Err(reason) => RecordState::NotWritten { reason },
+            // No record, or none that could be read: every file was hashed above and is
+            // right.
+            None => match (write_receipt(manifest, dir, &verified), unreadable) {
+                (Ok(()), None) => RecordState::Written,
+                (Ok(()), Some(reason)) => RecordState::Replaced { reason },
+                (Err(reason), None) => RecordState::NotWritten { reason },
+                (Err(reason), Some(unreadable)) => RecordState::NotWritten {
+                    reason: format!("{unreadable}; {reason}"),
+                },
             },
         };
         // Every file is right here. A record that no longer has their modification times
@@ -524,40 +584,48 @@ impl RuntimeFiles {
     }
 }
 
-/// The record of `dir`, if there is one, whoever wrote it. A record of another release
-/// is a refusal that names both; so is a record of another format or one that cannot be
-/// read.
-fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt>, L2dError> {
+/// The record of `dir`, whoever wrote it. A record of another release is a refusal that
+/// names both, and so is a record of another format: both can be read and say that the
+/// directory is not for this build. A record that cannot be read at all (not JSON, not
+/// the shape of a record, not a readable file) is reported as such and treated as no
+/// record by the caller.
+fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<ReceiptRead, L2dError> {
     let path = dir.join(RECEIPT_FILE);
+    let unreadable = |error: &dyn std::fmt::Display| {
+        ReceiptRead::Unreadable(format!("{} cannot be read: {error}", path.display()))
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReceiptRead::None);
+        }
+        Err(error) => return Ok(unreadable(&error)),
+    };
+    let whole: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(whole) => whole,
+        Err(error) => return Ok(unreadable(&error)),
+    };
+    // The format is looked at before the shape: a record of a later format need not have
+    // the shape this build knows, and must not be replaced by this build.
+    match whole.get("format").and_then(|format| format.as_u64()) {
+        Some(format) if format == u64::from(RECEIPT_FORMAT) => {}
+        Some(format) => {
             return Err(L2dError::Refused {
-                reason: format!("the record {} cannot be read: {error}", path.display()),
+                reason: format!(
+                    "the record {} has format {format}, this build of l2d reads format \
+                     {RECEIPT_FORMAT}; remove it to have the files verified again, or \
+                     provision again ({PROVISION_HINT})",
+                    path.display()
+                ),
             });
         }
-    };
-    let unreadable = |error: serde_json::Error| L2dError::Refused {
-        reason: format!(
-            "the record {} cannot be read: {error} ({PROVISION_HINT})",
-            path.display()
-        ),
-    };
-    let whole: serde_json::Value = serde_json::from_str(&text).map_err(unreadable)?;
-    let mut receipt: Receipt = serde_json::from_value(whole.clone()).map_err(unreadable)?;
-    receipt.whole = whole;
-    if receipt.format != RECEIPT_FORMAT {
-        return Err(L2dError::Refused {
-            reason: format!(
-                "the record {} has format {}, this build of l2d reads format {RECEIPT_FORMAT}; \
-                 remove it to have the files verified again, or provision again \
-                 ({PROVISION_HINT})",
-                path.display(),
-                receipt.format
-            ),
-        });
+        None => return Ok(unreadable(&"it states no format")),
     }
+    let mut receipt: Receipt = match serde_json::from_value(whole.clone()) {
+        Ok(receipt) => receipt,
+        Err(error) => return Ok(unreadable(&error)),
+    };
+    receipt.whole = whole;
     if receipt.release != manifest.release || receipt.onnxruntime != manifest.onnxruntime {
         return Err(L2dError::Refused {
             reason: format!(
@@ -571,7 +639,7 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt
             ),
         });
     }
-    Ok(Some(receipt))
+    Ok(ReceiptRead::Found(Box::new(receipt)))
 }
 
 /// `written_by` of a record this check wrote.
@@ -659,10 +727,70 @@ fn write_record(dir: &Path, record: &serde_json::Value) -> Result<(), String> {
     let written = std::fs::write(&partial, text + "\n")
         .and_then(|()| std::fs::rename(&partial, &path))
         .map_err(|error| format!("writing {}: {error}", path.display()));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&partial);
+    match &written {
+        Ok(()) => remove_leftover_partials(dir),
+        Err(_) => {
+            let _ = std::fs::remove_file(&partial);
+        }
     }
     written
+}
+
+/// Temporary record files that an interrupted write left in `dir` (of this tool or of
+/// the provisioning step) are removed once a record was written. Only files older than a
+/// minute: a younger one may be another process's write that is under way.
+fn remove_leftover_partials(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!(".{RECEIPT_FILE}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with(&prefix) && name.ends_with(".partial")) {
+            continue;
+        }
+        let old = entry.metadata().is_ok_and(|metadata| {
+            metadata.is_file()
+                && metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > 60)
+        });
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// For a directory that is refused: whether it looks like another release the repository
+/// has a manifest for, so that the refusal names both releases also when no record says
+/// which one the directory holds. It does when most files of that release are there with
+/// that release's sizes (two at least: one size can be the same in two releases).
+fn other_release_note(manifest: &RuntimeManifest, dir: &Path) -> String {
+    for other in RuntimeManifest::known() {
+        if other.release == manifest.release {
+            continue;
+        }
+        let present = other
+            .files
+            .iter()
+            .filter(|file| {
+                std::fs::metadata(dir.join(&file.name))
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
+            })
+            .count();
+        if present >= 2 && present * 2 > other.files.len() {
+            return format!(
+                "; {present} of the {} files of {} are there with that release's sizes: the \
+                 directory holds another release than this build of l2d is for",
+                other.files.len(),
+                other.release_text()
+            );
+        }
+    }
+    String::new()
 }
 
 /// DLLs in `dir` that the manifest does not name, sorted. Other files and folders do not
