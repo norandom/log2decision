@@ -108,6 +108,7 @@ overturned something, the document says so at the top.
 
 | Date | Document | What it settles |
 | --- | --- | --- |
+| 2026-11-12 | [Science gate: does a trained byte-level encoder earn its place on the NPU?](docs/2026-11-12-science-gate-encoder.md) | A linear head on the 8-bit vectors reaches cross-endpoint ROC AUC 0.959 on five grouped folds and clears the 0.90 bar; the neighbour ratio (0.893) and the design's training objective do not. The review found the lead over the simple scorer does not hold: about level at best, behind on endpoints of a form it has not seen |
 | 2026-11-11 | [Embedding speed and separability on CSIC 2010](docs/2026-11-11-embedding-speed-benchmark.md) | General embeddings are too slow on the NPU and worse than character features; a small encoder of our own runs fast there |
 | 2026-11-11 | [Embedding model choice](docs/2026-11-11-embedding-model-choice.md) | Which embedding models were considered and why the default was dropped |
 | 2026-11-11 | [Feasibility: triaging text logs with NPU embeddings and small decision heads](docs/2026-11-11-npu-log-decision-feasibility.md) | The starting plan and what became of each part |

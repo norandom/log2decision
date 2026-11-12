@@ -3,33 +3,115 @@
 Written 2026-11-11, end of day. Branch `main`, last pushed commit `d5d0be7`
 (plus the commit that adds this file). Remote: https://github.com/norandom/log2decision
 
-## Update of 2026-11-12 (read this first; the rest is the state of 2026-11-11)
+## State at the end of 2026-11-12 (read this first; the rest is the state of 2026-11-11)
 
-- Done since: 1.13 conformal calibration (`fc1f253`), 1.8 SQLite store
-  (`5f4a9b5`), 1.18 own conformal code in place of the `conformal-prediction`
-  crate (see `git log`). Everything below that speaks of adopting, pinning or
-  reviewing that crate is history: the tool no longer depends on it.
-- Tests: 277 passing, 12 ignored.
-- New in the spec: requirement 13 (zip archives read in batches under the
-  memory limit, results in parts on disk) with tasks 1.16, 1.17 and 1.19, to
-  run after 1.12. The record of the checks is
-  `.kiro/specs/npu-log-decision/amendment-2026-11-12-zip-batch.md`.
-- Remaining order: 1.9 search, 1.10 triage, 1.11 command wiring, 1.12 baseline
-  gate on CSIC, then 1.16, 1.17, 1.19, then milestone 2.
-- Calibration result that shapes 1.10 and 1.12: on CSIC the 5 % error rate is
-  reached on endpoints the calibration logs cover and missed for good logs on
-  endpoints they do not cover (32 % to 79 % wrongly ruled out, none called
-  good; bad logs missed 0 %). The owner decided that triage places logs by
-  label set as specified and states the limitation; no per-endpoint
-  normalisation in milestone 1.
-- Store limits from 1.8: a log text may be at most 8 MiB and may not contain a
-  NUL byte; an add holds 16 MiB plus 192 times the longest text.
-- Open follow-ups from the 1.8 review, for task 1.9: a default-run test of the
-  failed-reopen path; comparing the store's identity again on reopen; a test
-  assertion in `store_csic.rs` that relies on every test taking a shared lock.
-- AIT Log Data Set V2: `russellmitchell.zip` is downloaded and verified; the
-  other seven are fetched by `data/ait-lds-v2/aria2-resume.ps1` (capped at
-  4 MiB/s; run it again to resume).
+Everything below this section that speaks of adopting, pinning or reviewing
+the `conformal-prediction` crate, or of task 1.13 being interrupted, is
+history.
+
+### Done today, each reviewed, committed and pushed
+
+| Task | What it is |
+| --- | --- |
+| 1.13 | Conformal calibration over any scorer |
+| 1.18 | Own conformal code; the `conformal-prediction` crate is gone |
+| 1.8 | SQLite store with a text index and the vectors |
+| 1.9 | Search by phrase, label, source and nearest vectors |
+| 1.10 | Triage: ranking, review budget, placement by label set |
+| 2.2 | Hardware gate: the 8-bit spike model runs on the NPU from Rust |
+| 2.3 | Runtime file check, NPU device query, `L2D_RUNTIME_DIR` |
+| 2.13 | Provisioning from AMD's NuGet ZIP (release 1.8.0) |
+| 2.14 | Provisioning release 1.9.0 from AMD's NuGet package |
+
+Task 2.1 (science gate) is measured, reviewed and merged as a record; its box
+is not ticked, because the gate decision is the owner's (see below).
+
+Tests on `main`: 377 passing, 19 ignored. `cargo fmt` and `clippy` are clean.
+
+### New in the spec today
+
+- Requirement 13: zip archives read in batches under the memory limit, results
+  in parts on disk. Tasks 1.16, 1.17, 1.19, after 1.12.
+- Requirement 14: a fitted linear head on the vectors and an outlier ranking,
+  from the comparison with Venn (`docs/2026-11-12-venn-vdm-gap-list.md`).
+  Tasks 2.10 and 2.11, after 2.8.
+- Task 2.12: on the NPU a row's output depends on its position in the batch.
+  To be settled before the encoder session (2.6).
+
+### Order of the remaining work
+
+- Main lane: 1.11 command wiring (with options for the memory shares and the
+  per-log held-out check), 1.12 baseline gate on CSIC, 1.16, 1.17, 1.19.
+- Second lane, in a worktree: 2.5 text to bytes, 2.4 encoder package, 2.12,
+  then 2.6, 2.7, 2.8, 2.10, 2.11, 2.9.
+- Then milestones 3 and 4.
+
+The owner's order: the NPU encoder first, then the decision part after Venn
+(neighbour scorer, linear head, outlier ranking, shift test). The baseline
+ratio and the vector scorers stay separate scorers; the decision to
+investigate, which brings them together, is later work.
+
+### Decisions waiting for the owner
+
+1. **The science gate (2.1).** A linear head on the encoder's 8-bit vectors
+   clears the 0.90 bar on grouped folds (0.959). The neighbour ratio at k = 11
+   does not (0.893). The review took back the lead over the baseline: about
+   level at best, behind on endpoints of a form it has not seen. Read the
+   review section of `docs/2026-11-12-science-gate-encoder.md`. Conditions the
+   review names before an encoder package is frozen: repeat against 1.12 with
+   the baseline's penalty settled; a fold that holds both twin endpoints out;
+   the hardware check on the trained model.
+2. **What the gate carries with it:** the training objective (the design's
+   does not survive 8-bit quantisation), input of the payload only, padding
+   with byte 0, PyTorch for the spike where the design names Burn, the
+   baseline's default penalty.
+3. **AMD release 1.8.0 or 1.9.0.** The tool is built for 1.9.0. The choice
+   waits for task 2.12 on a trained model.
+
+### Results worth remembering from today
+
+- Calibration on CSIC: the 5 % error rate is reached on endpoints the
+  calibration logs cover and missed for good logs on endpoints they do not
+  cover (32 % to 79 % wrongly ruled out, none called good; bad logs missed
+  0 %). Triage places logs by label set as specified and states the limit.
+- Store: a log text may be at most 1 MiB and may not hold a NUL byte. An add
+  holds 16 MiB plus 192 times the longest text. A phrase search holds up to
+  about 59 MiB and is refused when that does not fit.
+- NPU: 36 of 38 nodes on the NPU, 22,000 to 36,000 logs per second in batches
+  of 32, against about 4,000 on the CPU provider. The cosine of 0.9958 against
+  the CPU says little, because the spike model's output is nearly constant.
+- Batch position: the same row repeated 32 times gives 32 different rows on
+  the NPU under 1.9.0 and two under 1.8.0; the CPU gives identical rows. First
+  candidate: the pooling step (task 2.12).
+- Release 1.8.0 needs six runtime files, 1.9.0 five.
+
+### Things that will bite (new today)
+
+- **Memory.** A build can fail with "only metadata stub found", "required to
+  be available in rlib format", "The paging file is too small" or linker error
+  LNK1102, and a test run can end with exit code -1 and no failing test. The
+  cause is commit memory running out when several compilers run beside other
+  heavy work. Build with `-j 4` and rerun once.
+- **Worktrees.** A second copy of the workspace must build into its own
+  `--target-dir` under `D:\BuildArtifacts\log2decision\`.
+- **Runtime directory.** `runtime\ryzenai\` holds the five files of release
+  1.9.0, provisioned from
+  `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg` with
+  `uv run --no-project --python 3.12 python tools/runtime/provision.py --nupkg <path>`.
+  Do not provision while a process has the DLLs loaded. Provisioning from
+  AMD's package index is outstanding: the index answered 403 all day.
+- **Triage and evidence.** Triage keeps only the primary scorer's evidence and
+  takes text, yes/no and numeric columns only.
+- **Review rounds.** Every task today that touched memory accounting was
+  rejected at least once on a case the implementer had not measured. Give
+  reviewers the code and the claims, not the conclusion.
+
+### Data
+
+- AIT Log Data Set V2: all eight testbeds, 121.7 GB, in `data/ait-lds-v2/`,
+  verified against their MD5 sums. Not unpacked; nothing reads them yet.
+- Science gate runs and models: `D:\BuildArtifacts\log2decision\science-2.1\runs\`;
+  the published wiring model is in `models/science-2.1/`.
 
 ## Where things stand
 
