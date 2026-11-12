@@ -170,13 +170,26 @@ cargo test --release -p l2d-baseline --test scorer_csic -- --ignored --nocapture
 
 ## Open points for the owner
 
+Decided by the owner on 2026-11-12:
+
+- Task 1.13 restarted clean (the three manifest changes were discarded) and is
+  now done and reviewed; the section "Interrupted work" above is history. Its
+  result on CSIC: the error rate holds on seen endpoints and is missed for good
+  logs on unseen ones. See the 1.13 lines in the task file's Implementation
+  Notes before starting 1.10.
 - The memory shares (half of free memory as the limit, a quarter as the
-  reserve) are fixed in code. Options for them can be added in task 1.11 if
-  wanted.
+  reserve) get command-line options in task 1.11.
+- The CSIC 2010 licence is not pursued. The project code is under the MIT
+  licence (`LICENSE`).
+- AIT Log Data Set V2 is being downloaded into `data/ait-lds-v2/`, starting
+  with `russellmitchell.zip`. The full set is 121.7 GB zipped and is under
+  CC BY-NC-SA 4.0; see `data/README.md`.
+
+Still open:
+
 - The second copy of `ndarray` and the `rand` and `lean-agentic` crates that
   `conformal-prediction` brings have not been reviewed.
-- The licence of the CSIC 2010 Kaggle upload has not been checked.
-- AIT Log Data Set V2 is the planned second dataset and is not downloaded.
+- Whether to download the other seven AIT testbeds (about 115 GB).
 
 ## Other records
 
