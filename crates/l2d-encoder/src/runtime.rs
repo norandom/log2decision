@@ -34,7 +34,10 @@
 //! - every file of the manifest is present, is a file and has the expected size;
 //! - no other DLL is in the directory;
 //! - a file whose modification time differs from the record, or that the record does not
-//!   name, is hashed;
+//!   name, is hashed; when it is right the record is brought up to date (the file's new
+//!   time, and a note `reverified` saying that this check did it and when), so that the
+//!   start after it is fast again. Who wrote the record and where the files came from
+//!   stay as they were;
 //! - without a record every file is hashed, and when all are right the record is written,
 //!   so that the next start is fast. If it cannot be written (a directory that is not
 //!   writable), every start hashes, and [`RuntimeFiles::record`] says so.
@@ -206,8 +209,44 @@ pub struct RuntimeFiles {
     pub library: String,
     /// The record of the directory ([`RECEIPT_FILE`]): found, written now, or not writable.
     pub record: RecordState,
+    /// Whether this check brought a record it found up to date.
+    pub refresh: RecordRefresh,
     /// The files whose SHA-256 was computed and found right, in manifest order.
     pub hashed: Vec<String>,
+}
+
+/// What this check did to a record it found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordRefresh {
+    /// Nothing: every file has the modification time of the record, or there was no
+    /// record to refresh.
+    NotNeeded,
+    /// These files had another modification time than the record (or were not in it);
+    /// they were hashed, found right, and the record now holds their times. The next
+    /// start hashes nothing.
+    Refreshed { files: Vec<String> },
+    /// As `Refreshed`, but the record could not be rewritten: the files are right, and
+    /// they are hashed again at every start until the directory is writable.
+    Failed { files: Vec<String>, reason: String },
+}
+
+impl RecordRefresh {
+    /// The refresh in words, for the tool's output; empty when nothing was done.
+    pub fn describe(&self) -> String {
+        match self {
+            RecordRefresh::NotNeeded => String::new(),
+            RecordRefresh::Refreshed { files } => format!(
+                "{} changed since the record, hashed and found right; the record was \
+                 brought up to date",
+                files.join(", ")
+            ),
+            RecordRefresh::Failed { files, reason } => format!(
+                "{} changed since the record, hashed and found right; the record could not \
+                 be brought up to date ({reason}), so they are hashed at every start",
+                files.join(", ")
+            ),
+        }
+    }
 }
 
 /// The record of a checked directory.
@@ -251,7 +290,12 @@ struct Receipt {
     #[serde(default)]
     written_by: Option<String>,
     files: Vec<ReceiptFile>,
+    /// The whole record as it was read, so that a refresh keeps what it does not change:
+    /// who wrote it and where the files came from.
+    #[serde(skip)]
+    whole: serde_json::Value,
 }
+
 #[derive(Debug, Deserialize)]
 struct ReceiptFile {
     name: String,
@@ -298,6 +342,8 @@ impl RuntimeFiles {
         // What a record written by this check holds: the modification times the hashes
         // were computed under, read before the files are.
         let mut verified: Vec<serde_json::Value> = Vec::new();
+        // Files that are right but not as the record has them: the record is refreshed.
+        let mut stale: Vec<serde_json::Value> = Vec::new();
         for file in &manifest.files {
             let path = dir.join(&file.name);
             let metadata = match std::fs::metadata(&path) {
@@ -336,12 +382,16 @@ impl RuntimeFiles {
                 let found = sha256_of(&path)?;
                 if found == file.sha256 {
                     hashed.push(file.name.clone());
-                    verified.push(serde_json::json!({
+                    let entry = serde_json::json!({
                         "name": file.name,
                         "bytes": file.bytes,
                         "sha256": file.sha256,
                         "modified_unix_ns": modified,
-                    }));
+                    });
+                    if receipt.is_some() && !recorded_as_it_is {
+                        stale.push(entry.clone());
+                    }
+                    verified.push(entry);
                 } else {
                     wrong.push(format!(
                         "{} has SHA-256 {found}, the release has {}{}",
@@ -412,12 +462,28 @@ impl RuntimeFiles {
                 Err(reason) => RecordState::NotWritten { reason },
             },
         };
+        // Every file is right here. A record that no longer has their modification times
+        // is brought up to date, so that only this start was slow.
+        let refresh = match &receipt {
+            Some(receipt) if !stale.is_empty() => {
+                let files = stale
+                    .iter()
+                    .filter_map(|entry| entry["name"].as_str().map(str::to_string))
+                    .collect();
+                match refresh_receipt(dir, receipt, &stale) {
+                    Ok(()) => RecordRefresh::Refreshed { files },
+                    Err(reason) => RecordRefresh::Failed { files, reason },
+                }
+            }
+            _ => RecordRefresh::NotNeeded,
+        };
         Ok(RuntimeFiles {
             dir: dir.to_path_buf(),
             release: manifest.release.clone(),
             onnxruntime: manifest.onnxruntime.clone(),
             library: manifest.files[0].name.clone(),
             record,
+            refresh,
             hashed,
         })
     }
@@ -445,12 +511,15 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt
             });
         }
     };
-    let receipt: Receipt = serde_json::from_str(&text).map_err(|error| L2dError::Refused {
+    let unreadable = |error: serde_json::Error| L2dError::Refused {
         reason: format!(
             "the record {} cannot be read: {error} ({PROVISION_HINT})",
             path.display()
         ),
-    })?;
+    };
+    let whole: serde_json::Value = serde_json::from_str(&text).map_err(unreadable)?;
+    let mut receipt: Receipt = serde_json::from_value(whole.clone()).map_err(unreadable)?;
+    receipt.whole = whole;
     if receipt.format != RECEIPT_FORMAT {
         return Err(L2dError::Refused {
             reason: format!(
@@ -502,13 +571,60 @@ fn write_receipt(
         // Not the provisioning step: this check hashed the files it found. Where they
         // came from is not known here, so no source is recorded.
         "written_by": WRITTEN_BY_CHECK,
-        "verified_unix_s": std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|since_epoch| since_epoch.as_secs())
-            .unwrap_or(0),
+        "verified_unix_s": unix_seconds_now(),
+
         "files": verified,
     });
-    let text = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+    write_record(dir, &record)
+}
+
+/// Brings a record up to date after files that it did not have with their present
+/// modification time were hashed and found right. Everything else of the record stays:
+/// `written_by` still names who verified the directory first, and a provisioning record
+/// keeps its source. The refresh itself is noted under `reverified`.
+fn refresh_receipt(
+    dir: &Path,
+    receipt: &Receipt,
+    stale: &[serde_json::Value],
+) -> Result<(), String> {
+    if !stale.iter().all(|file| file["modified_unix_ns"].is_u64()) {
+        return Err("a modification time could not be read".into());
+    }
+    let mut record = receipt.whole.clone();
+    let files = record
+        .get_mut("files")
+        .and_then(|files| files.as_array_mut())
+        .ok_or("the record has no list of files")?;
+    for entry in stale {
+        let name = entry["name"].as_str().unwrap_or_default();
+        let recorded = files.iter_mut().find(|recorded| {
+            recorded["name"]
+                .as_str()
+                .is_some_and(|recorded| recorded.eq_ignore_ascii_case(name))
+        });
+        match recorded {
+            Some(recorded) => *recorded = entry.clone(),
+            None => files.push(entry.clone()),
+        }
+    }
+    record["reverified"] = serde_json::json!({
+        "by": WRITTEN_BY_CHECK,
+        "unix_s": unix_seconds_now(),
+        "files": stale.iter().map(|entry| entry["name"].clone()).collect::<Vec<_>>(),
+    });
+    write_record(dir, &record)
+}
+
+fn unix_seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since_epoch| since_epoch.as_secs())
+        .unwrap_or(0)
+}
+
+/// Writes a record into `dir`, whole or not at all.
+fn write_record(dir: &Path, record: &serde_json::Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     let path = dir.join(RECEIPT_FILE);
     // Through a file of this process, renamed into place: two processes that check the
     // same directory at once each write a whole record.

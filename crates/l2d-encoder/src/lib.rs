@@ -8,4 +8,4 @@ pub mod npu;
 pub mod runtime;
 
 pub use npu::{ComputeAccelerator, NpuMatch, NpuStatus};
-pub use runtime::{CheckDepth, RecordState, RuntimeFiles, RuntimeManifest};
+pub use runtime::{CheckDepth, RecordRefresh, RecordState, RuntimeFiles, RuntimeManifest};

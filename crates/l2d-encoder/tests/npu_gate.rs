@@ -317,7 +317,9 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         files.dir.display(),
         files.hashed.len(),
         started.elapsed().as_secs_f64(),
-        files.record.describe()
+        [files.record.describe(), files.refresh.describe()]
+            .join(" ")
+            .trim_end()
     );
     let runtime_dir = runtime_dir
         .canonicalize()

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use l2d_core::{L2dError, ProjectPaths};
 use l2d_encoder::runtime::{
-    CheckDepth, ManifestFile, ManifestSource, RECEIPT_FILE, RecordState, RuntimeFiles,
-    RuntimeManifest,
+    CheckDepth, ManifestFile, ManifestSource, RECEIPT_FILE, RecordRefresh, RecordState,
+    RuntimeFiles, RuntimeManifest,
 };
 use sha2::{Digest, Sha256};
 
@@ -139,6 +139,7 @@ fn without_a_record_every_file_is_hashed_and_the_record_is_written() {
     assert_eq!(first.onnxruntime, "1.30.0");
     assert_eq!(first.hashed, ALL, "nothing is trusted without a record");
     assert_eq!(first.record, RecordState::Written);
+    assert_eq!(first.refresh, RecordRefresh::NotNeeded);
 
     // What the check wrote: marked as its own, with no source, and with what it verified.
     let record = read_record(&dir);
@@ -265,33 +266,135 @@ fn a_record_is_invalidated_by_a_changed_modification_time_whoever_wrote_it() {
         assert_eq!(checked.record, expected_state);
         assert!(checked.hashed.is_empty(), "{:?}", checked.hashed);
 
-        // Touched, content unchanged: that file is hashed and passes.
+        // Touched, content unchanged: one start hashes that file, finds it right and
+        // brings the record up to date.
         let target = dir.join("provider.dll");
         let later =
             std::fs::metadata(&target).unwrap().modified().unwrap() + Duration::from_secs(90);
         set_modified(&target, later);
+        let before = read_record(&dir);
         let checked = fast(&dir).unwrap();
         assert_eq!(checked.hashed, vec!["provider.dll"]);
         assert_eq!(checked.record, expected_state);
+        assert_eq!(
+            checked.refresh,
+            RecordRefresh::Refreshed {
+                files: vec!["provider.dll".into()]
+            }
+        );
+        assert!(checked.refresh.describe().contains("provider.dll"));
 
-        // Replaced by a file of the same size: found through the hash.
+        // The record: the new time for that file, a note of the refresh, and everything
+        // else as it was. Who wrote it and where the files came from stay true.
+        let after = read_record(&dir);
+        assert_eq!(after["files"][1]["name"], "provider.dll");
+        assert_eq!(after["files"][1]["modified_unix_ns"], modified_ns(&target));
+        assert_eq!(after["files"][1]["sha256"], sha256_hex(FILES[1].1));
+        assert_eq!(after["files"][0], before["files"][0]);
+        assert_eq!(after["files"][2], before["files"][2]);
+        assert_eq!(after["reverified"]["by"], "check");
+        assert_eq!(
+            after["reverified"]["files"],
+            serde_json::json!(["provider.dll"])
+        );
+        assert!(after["reverified"]["unix_s"].as_u64().unwrap() > 1_700_000_000);
+        for key in ["format", "release", "onnxruntime", "written_by"] {
+            assert_eq!(after[key], before[key], "{key}");
+        }
+        if written_by_check {
+            assert_eq!(after["written_by"], "check");
+            assert_eq!(after["verified_unix_s"], before["verified_unix_s"]);
+            assert!(after.get("source").is_none());
+        } else {
+            assert_eq!(after["written_by"], "provisioning");
+            assert_eq!(after["source"], before["source"]);
+            assert_eq!(after["provisioned_utc"], before["provisioned_utc"]);
+        }
+
+        // The start after it is fast again.
+        let checked = fast(&dir).unwrap();
+        assert!(checked.hashed.is_empty(), "{:?}", checked.hashed);
+        assert_eq!(checked.refresh, RecordRefresh::NotNeeded);
+        assert_eq!(checked.record, expected_state);
+
+        // Replaced by a file of the same size: found through the hash, refused, and the
+        // record is not rewritten.
         std::fs::write(&target, ALTERED).unwrap();
         set_modified(&target, later + Duration::from_secs(90));
-        let reason = refusal(fast(&dir));
-        assert!(reason.contains(&target.display().to_string()), "{reason}");
-        assert!(reason.contains(&sha256_hex(ALTERED)), "{reason}");
+        let before = std::fs::read(dir.join(RECEIPT_FILE)).unwrap();
+        for _ in 0..2 {
+            let reason = refusal(fast(&dir));
+            assert!(reason.contains(&target.display().to_string()), "{reason}");
+            assert!(reason.contains(&sha256_hex(ALTERED)), "{reason}");
+            assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).unwrap(), before);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
+/// One touched file that is right and one that was replaced: refused, and the record
+/// keeps the old time of the right one too (nothing is rewritten for a directory that
+/// failed).
 #[test]
-fn a_file_the_record_does_not_name_is_hashed() {
+fn a_refused_directory_does_not_get_its_record_refreshed() {
+    let dir = complete("refresh-refused");
+    write_provisioning_record(&dir, "2.0.0", "1.30.0");
+    let before = std::fs::read(dir.join(RECEIPT_FILE)).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(300);
+    set_modified(&dir.join("onnxruntime.dll"), later);
+    std::fs::write(dir.join("provider.dll"), ALTERED).unwrap();
+    set_modified(&dir.join("provider.dll"), later);
+    refusal(fast(&dir));
+    assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).unwrap(), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_file_the_record_does_not_name_is_hashed_and_added_to_the_record() {
     let dir = complete("record-incomplete");
     write_provisioning_record(&dir, "2.0.0", "1.30.0");
     let mut record = read_record(&dir);
     record["files"].as_array_mut().unwrap().remove(1);
     std::fs::write(dir.join(RECEIPT_FILE), record.to_string()).unwrap();
-    assert_eq!(fast(&dir).unwrap().hashed, vec!["provider.dll"]);
+    let checked = fast(&dir).unwrap();
+    assert_eq!(checked.hashed, vec!["provider.dll"]);
+    assert_eq!(
+        checked.refresh,
+        RecordRefresh::Refreshed {
+            files: vec!["provider.dll".into()]
+        }
+    );
+    assert_eq!(read_record(&dir)["files"].as_array().unwrap().len(), 3);
+    assert!(fast(&dir).unwrap().hashed.is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A record that cannot be rewritten: the check passes, says so, and hashes the touched
+/// file at every start. (A folder at the name of the temporary file stands in for a
+/// directory without write permission.)
+#[test]
+fn when_the_record_cannot_be_refreshed_the_check_passes_and_says_so() {
+    let dir = complete("refresh-not-writable");
+    write_provisioning_record(&dir, "2.0.0", "1.30.0");
+    let before = std::fs::read(dir.join(RECEIPT_FILE)).unwrap();
+    let target = dir.join("provider.dll");
+    set_modified(
+        &target,
+        std::time::SystemTime::now() + Duration::from_secs(300),
+    );
+    std::fs::create_dir(dir.join(format!(".{RECEIPT_FILE}.{}.partial", std::process::id())))
+        .unwrap();
+    for _ in 0..2 {
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.hashed, vec!["provider.dll"]);
+        let RecordRefresh::Failed { files, reason } = &checked.refresh else {
+            panic!("{:?}", checked.refresh);
+        };
+        assert_eq!(files, &vec!["provider.dll".to_string()]);
+        assert!(reason.contains(RECEIPT_FILE), "{reason}");
+        assert!(checked.refresh.describe().contains("every start"));
+        assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).unwrap(), before);
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
