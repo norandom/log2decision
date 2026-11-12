@@ -290,6 +290,33 @@ fn infer(session: &mut Session, input_name: &str, shape: &[i64], data: &[f32]) -
     values.to_vec()
 }
 
+/// With `L2D_GATE_DUMP_OUTPUT` set to a path prefix, the output of the first inference is
+/// written to `<prefix>.<device>.f32` (the values as little-endian 32-bit floats, in
+/// order) and its SHA-256 printed, so that runs against different runtime directories
+/// can be compared bit for bit. The input is the same in every run. Nothing is written
+/// without the variable.
+fn dump_output(device: &str, values: &[f32]) {
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    println!(
+        "npu_gate: {device} output of the first inference: {} values, sha256 {digest}",
+        values.len()
+    );
+    if let Some(prefix) = std::env::var_os("L2D_GATE_DUMP_OUTPUT") {
+        let mut path = prefix;
+        path.push(format!(".{device}.f32"));
+        std::fs::write(&path, &bytes)
+            .unwrap_or_else(|error| panic!("writing {}: {error}", Path::new(&path).display()));
+        println!("npu_gate: written to {}", Path::new(&path).display());
+    }
+}
+
 #[test]
 #[ignore = "hardware gate: needs the AMD runtime files and the NPU; run on request"]
 fn the_spike_model_runs_on_the_npu_through_ort() {
@@ -310,10 +337,11 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         Err(error) => panic!("the runtime file check failed: {error}"),
     };
     println!(
-        "npu_gate: runtime files of AMD Ryzen AI {} (ONNX Runtime {}) in {}: {} hashed in \
-         {:.2} s; record: {}",
+        "npu_gate: runtime files of AMD Ryzen AI {} (ONNX Runtime {}), source `{}`, in {}: {} \
+         hashed in {:.2} s; record: {}",
         files.release,
         files.onnxruntime,
+        files.source,
         files.dir.display(),
         files.hashed.len(),
         started.elapsed().as_secs_f64(),
@@ -524,6 +552,7 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
          {repeat_cosine:.6}",
         first == again
     );
+    dump_output("npu", &first);
 
     for _ in 0..WARM_UP_BATCHES {
         infer(&mut session, &input_name, &shape, &data);
@@ -614,6 +643,7 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         .commit_from_file(&model)
         .unwrap_or_else(|error| panic!("opening the model on the CPU provider failed: {error}"));
     let on_cpu = infer(&mut cpu, &input_name, &shape, &data);
+    dump_output("cpu", &on_cpu);
     let lowest = (0..BATCH)
         .map(|row| {
             cosine(

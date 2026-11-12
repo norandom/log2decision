@@ -78,6 +78,7 @@ class NugetScratch(unittest.TestCase):
         name: str = NUPKG,
         outer_extra: dict[str, bytes] | None = None,
         manifest_hash: str | None = None,
+        manifest_bytes: int | None = None,
     ) -> None:
         """The ZIP with the package inside, and a manifest that describes it."""
         with zipfile.ZipFile(self.archive, "w", zipfile.ZIP_STORED) as outer:
@@ -93,6 +94,7 @@ class NugetScratch(unittest.TestCase):
                 "kind": "nuget",
                 "archive": "runtime_nuget_2.0.0.zip",
                 "nupkg": NUPKG,
+                "nupkg_bytes": str(len(nupkg) if manifest_bytes is None else manifest_bytes),
                 "nupkg_sha256": manifest_hash or sha256(nupkg),
                 "package": PACKAGE,
                 "version": "2.0.0",
@@ -340,16 +342,28 @@ class NugetTests(NugetScratch):
             "directory": "onnxruntime/capi",
         }
         self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
-        self.assert_refused("'wheel'", "--nuget-zip was given")
+        self.assert_refused("'wheel'", "a NuGet package was given")
         self.assertFalse(self.target.exists())
 
     def test_the_command_line_takes_the_release_and_refuses_the_wrong_zip(self) -> None:
-        # The default manifest is the built release's (1.9.0, a wheel).
+        # Without --release the built release is meant (1.9.0), and with a package given
+        # its manifest of the kind `nuget`; this ZIP is not AMD's 1.9.0 either.
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = provision.main(["--nuget-zip", str(self.archive), "--target", str(self.target)])
         self.assertEqual(code, 1)
-        self.assertIn("1.9.0", stderr.getvalue())
+        self.assertIn("RyzenAI_Deployment.1.9.0.nupkg", stderr.getvalue())
+        # A wheel manifest named outright is refused with a package.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = provision.main(
+                [
+                    "--manifest", str(provision.manifest_of("1.9.0", "wheel")),
+                    "--nupkg", str(self.archive),
+                    "--target", str(self.target),
+                ]
+            )
+        self.assertEqual(code, 1)
         self.assertIn("'wheel'", stderr.getvalue())
         # --release picks the manifest of that release; this ZIP is not AMD's 1.8.0.
         stderr = io.StringIO()
@@ -362,5 +376,225 @@ class NugetTests(NugetScratch):
         self.assertFalse(self.target.exists())
 
 
+class BarePackageTests(NugetScratch):
+    """The package file itself, without a ZIP around it (`--nupkg`)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.package = self.root / "downloads" / "RuntimePackage.2.0.0 (1).nupkg"
+        self.package.write_bytes(self.nupkg)
+
+    def bare(self, **overrides: object) -> list[str]:
+        return self.run_provision(nuget_zip=None, nupkg=self.package, **overrides)
+
+    def test_the_files_are_placed_and_the_record_names_the_package(self) -> None:
+        before = self.package.read_bytes()
+        report = self.bare()
+        for name, data in FILES.items():
+            self.assertEqual((self.target / name).read_bytes(), data)
+        self.assertEqual(sum(line.startswith("copied") for line in report), 2)
+        self.assertEqual(self.package.read_bytes(), before)
+
+        receipt = json.loads((self.target / provision.RECEIPT_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(receipt["written_by"], "provisioning")
+        source = receipt["source"]
+        self.assertEqual(source["kind"], "nuget")
+        self.assertEqual(source["package"], PACKAGE)
+        self.assertEqual(source["version"], "2.0.0")
+        self.assertEqual(
+            source["nupkg"],
+            {
+                "name": NUPKG,
+                "bytes": len(before),
+                "sha256": sha256(before),
+                "file": "RuntimePackage.2.0.0 (1).nupkg",
+                "path": str(self.package.resolve()),
+            },
+        )
+        self.assertNotIn("archive", source)
+        self.assertEqual(
+            [(entry["name"], entry["sha256"]) for entry in receipt["files"]],
+            [(name, sha256(data)) for name, data in FILES.items()],
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.target.iterdir()),
+            sorted([*FILES, provision.RECEIPT_FILE]),
+        )
+        # A second run copies nothing; the same record comes from the ZIP route too.
+        self.assertEqual(sum(line.startswith("present") for line in self.bare()), 2)
+        self.assertEqual(sum(line.startswith("present") for line in self.run_provision()), 2)
+
+    def test_a_package_of_another_size_is_refused_before_it_is_read(self) -> None:
+        self.package.write_bytes(self.nupkg + b"more")
+        opened: list[object] = []
+        real_open = Path.open
+
+        def watching(path: Path, *arguments: object, **keywords: object):
+            if path == self.package:
+                opened.append(path)
+            return real_open(path, *arguments, **keywords)  # type: ignore[arg-type]
+
+        with mock.patch.object(Path, "open", watching):
+            message = self.assert_refused(
+                f"{len(self.nupkg) + 4} bytes", f"the manifest has {len(self.nupkg)}",
+                "It was not read", nuget_zip=None, nupkg=self.package,
+            )
+        self.assertIn(str(self.package), message)
+        self.assertEqual(opened, [], "the package was opened although its size is wrong")
+        self.assertFalse(self.target.exists())
+
+    def test_a_package_in_a_zip_of_another_size_is_refused_before_it_is_read(self) -> None:
+        self.write_zip(self.nupkg, manifest_bytes=len(self.nupkg) - 1)
+        with mock.patch.object(provision.tempfile, "TemporaryFile") as spooled:
+            self.assert_refused(f"the manifest has {len(self.nupkg) - 1}", "It was not read")
+        spooled.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+    def test_a_package_with_another_hash_or_identity_is_refused(self) -> None:
+        other = build_nupkg(version="1.9.0")
+        self.package.write_bytes(other)
+        self.write_zip(other)  # the manifest now describes this package: hash and size
+        self.assert_refused(
+            f"{PACKAGE} 1.9.0", f"{PACKAGE} 2.0.0", "not mixed", nuget_zip=None, nupkg=self.package
+        )
+        # Same size, other bytes: the hash decides.
+        flipped = bytearray(self.nupkg)
+        flipped[-1] ^= 0xFF
+        self.package.write_bytes(bytes(flipped))
+        self.write_zip(self.nupkg)
+        self.assert_refused(sha256(bytes(flipped)), sha256(self.nupkg), nuget_zip=None, nupkg=self.package)
+        self.assertFalse(self.target.exists())
+
+    def test_both_a_package_and_a_zip_are_refused(self) -> None:
+        self.assert_refused("name one source", nupkg=self.package)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            provision.main(["--nupkg", str(self.package), "--nuget-zip", str(self.archive)])
+
+    def test_a_manifest_without_the_packages_size_is_refused(self) -> None:
+        data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        del data["source"]["nupkg_bytes"]
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_refused("lacks the key 'nupkg_bytes'", nuget_zip=None, nupkg=self.package)
+        data["source"]["nupkg_bytes"] = "0"
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_refused("nupkg_bytes", nuget_zip=None, nupkg=self.package)
+
+
+class NamesAndTargetsTests(NugetScratch):
+    def test_names_that_are_not_plainly_a_file_are_refused(self) -> None:
+        """With `second.dll:stream` the script once wrote into a stream of another file;
+        `CON.dll` was placed as a file. Both are refused now, before anything is read."""
+        for name in (
+            "second.dll:stream",
+            "onnxruntime.dll::$DATA",
+            "C:onnxruntime.dll",
+            "trailing.dll.",
+            "trailing.dll ",
+            "CON",
+            "CON.dll",
+            "nul.dll",
+            "COM1.dll",
+            "lpt9.txt.dll",
+            "what?.dll",
+            "star*.dll",
+            "tab\t.dll",
+            "sub/onnxruntime.dll",
+            "..",
+            "",
+        ):
+            self.assertFalse(provision.is_plain_file_name(name), name)
+            data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            data["files"][0]["name"] = name
+            self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+            self.assert_refused("not a plain file name")
+            self.assertFalse(self.target.exists(), name)
+        for name in ("onnxruntime.dll", "onnxruntime-genai.dll", "a b.dll", "CONSOLE.dll", "x.y.z"):
+            self.assertTrue(provision.is_plain_file_name(name), name)
+        # Nothing was written anywhere, not even beside the target.
+        self.assertEqual(
+            self.every_file_of_the_scratch(),
+            ["work/downloads/runtime_nuget_2.0.0 (1).zip", "work/manifest.json"],
+        )
+
+    def test_a_package_name_in_the_manifest_must_be_plain_too(self) -> None:
+        data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        data["source"]["nupkg"] = "../RuntimePackage.2.0.0.nupkg"
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_refused("not a plain file name")
+
+    def test_the_directory_of_the_package_or_zip_is_refused_as_target(self) -> None:
+        self.assert_refused("is the directory that holds", target=self.archive.parent)
+        package = self.archive.parent / NUPKG
+        package.write_bytes(self.nupkg)
+        self.assert_refused(
+            "is the directory that holds", NUPKG,
+            nuget_zip=None, nupkg=package, target=self.archive.parent,
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.archive.parent.iterdir()),
+            [NUPKG, "runtime_nuget_2.0.0 (1).zip"],
+        )
+
+    def test_a_target_in_the_tracked_tree_is_refused_except_the_runtime_directory(self) -> None:
+        repository = self.root / "repository"
+        for inside in (
+            repository,
+            repository / "crates" / "l2d-encoder",
+            repository / "runtime",
+            repository / "runtime" / "ryzenai" / "deeper",
+            repository / "runtime" / "cache",
+        ):
+            self.assert_refused("lies inside the repository", target=inside, repo_root=repository)
+            self.assertFalse(inside.exists(), inside)
+        allowed = repository / "runtime" / "ryzenai"
+        report = self.run_provision(target=allowed, repo_root=repository)
+        self.assertEqual(sum(line.startswith("copied") for line in report), 2)
+        # The real repository: its own tree is refused, from the command line too.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = provision.main(
+                [
+                    "--manifest", str(self.manifest_path),
+                    "--nuget-zip", str(self.archive),
+                    "--target", str(provision.REPO_ROOT / "tools" / "runtime" / "never"),
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("lies inside the repository", stderr.getvalue())
+        self.assertFalse((provision.REPO_ROOT / "tools" / "runtime" / "never").exists())
+
+    def test_an_archive_that_fails_while_placing_ends_with_one_line(self) -> None:
+        calls: list[str] = []
+        real = provision.extract_member
+
+        def failing(source: object, member: str, partial: Path) -> None:
+            calls.append(member)
+            if len(calls) == 2:
+                partial.write_bytes(b"half")
+                raise zipfile.BadZipFile("Bad CRC-32 for file 'provider.dll'")
+            real(source, member, partial)  # type: ignore[arg-type]
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(provision, "extract_member", failing),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = provision.main(
+                [
+                    "--manifest", str(self.manifest_path),
+                    "--nuget-zip", str(self.archive),
+                    "--target", str(self.target),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertTrue(stderr.getvalue().startswith("provision: failed: "), stderr.getvalue())
+        self.assertIn("Bad CRC-32", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertEqual(stderr.getvalue().count("\n"), 1)
+        first = next(iter(FILES))
+        self.assertEqual([path.name for path in self.target.iterdir()], [first])
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -14,12 +14,20 @@ not part of the repository and is not downloaded by the build.
 The tool is built for **AMD Ryzen AI 1.9.0** (ONNX Runtime 1.30.0).
 
 That is one choice, the default feature of `crates/l2d-encoder/Cargo.toml`
-(`ryzenai-1-9`, or `ryzenai-1-8`). It selects the manifest the tool has compiled in
-(`runtime/ryzenai-<release>.manifest.json`: for each file its size, SHA-256 and file
-version) and the API level `ort` asks the runtime for. The line above and the tables
-below are held to the choice and to the manifests by tests. A directory that holds the
-files of the other release is refused, and the message names both releases, whether the
-directory has a record or not.
+(`ryzenai-1-9`, or `ryzenai-1-8`). It selects the manifests the tool has compiled in and
+the API level `ort` asks the runtime for. The line above and the tables below are held
+to the choice and to the manifests by tests. A directory that holds the files of the
+other release is refused, and the message names both releases, whether the directory
+has a record or not.
+
+A manifest is for one release from one source:
+`runtime/ryzenai-<release>.<source>.manifest.json`, the source being `wheel` (AMD's
+Python wheel) or `nuget` (AMD's NuGet package). It names the package and gives for each
+file its size, SHA-256 and file version. AMD ships the same builds of release 1.9.0 in
+both packages, signed separately: the files have the same names, sizes and versions and
+other hashes. The tool accepts a directory that matches either manifest of its built
+release with all its files, and says which source it matched; a directory with some
+files of each is refused as a mix, naming which file is from which source.
 
 The two features exclude each other, so a build with `--all-features` (cargo, clippy or
 a tool that passes it) does not compile; neither does one of `l2d-encoder` with
@@ -30,9 +38,9 @@ two releases, and the error says so. To build for 1.8.0:
 The files are not in the repository: `runtime/ryzenai/` is ignored by git, and each
 user obtains them from AMD's package and places them here (section "Provisioning").
 
-### AMD Ryzen AI 1.9.0 (the built release)
+### AMD Ryzen AI 1.9.0, wheel (the built release)
 
-As shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author Advanced Micro
+`runtime/ryzenai-1.9.0.wheel.manifest.json`. As shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author Advanced Micro
 Devices, Inc.; file versions as the DLLs report them). All five must be present, and no
 other DLL. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
 files in the directory.
@@ -47,9 +55,32 @@ files in the directory.
 
 Total: 713,594,768 bytes (680.5 MiB).
 
-### AMD Ryzen AI 1.8.0 (not the built release: it fails the hardware gate)
+### AMD Ryzen AI 1.9.0, nuget (the built release)
 
-As shipped in `RyzenAI_Deployment.1.8.0.nupkg` inside AMD's `ryzen_ai_nuget_1.8.0.zip`
+`runtime/ryzenai-1.9.0.nuget.manifest.json`. As shipped in AMD's NuGet package
+`RyzenAI_Deployment.1.9.0.nupkg` (289,269,284 bytes, SHA-256
+`b96db85a612f8ac5579a6684ef8f254b27c6e181df3ab6d86bc98f2c97ffc3e9`; directory
+`runtimes/win-x64/native/`). The same five files and no other DLL.
+
+| File | Bytes | File version | SHA-256 |
+| --- | ---: | --- | --- |
+| `onnxruntime.dll` | 25,442,896 | 1.30.0 | `a495db24b3bcf337c83b5145a6cfc49c81354fe58eced433a573cf7c25d40d5c` |
+| `onnxruntime_providers_shared.dll` | 117,840 | 1.30.0 | `86322cd2d6665a37a0b1eecb2c99ebcebd9b0b25944cea4d8b471387db5068ed` |
+| `onnxruntime_providers_vitisai.dll` | 466,000 | 1.30.0 | `d33a827b2c9eeb82d87c483198a381dc3979963e09ab5bfa5f94f98a49eeee73` |
+| `onnxruntime_vitisai_ep.dll` | 517,920,336 | 1.9.0 | `a92cef8e451b1e0a404f9dacdd8d15d6af7ea7bf8be82dea2715243c22ef0d35` |
+| `dyn_dispatch_core.dll` | 169,647,696 | 1.9.0 | `32ca7381bdeceae210ce2d7b106f2aa2db46c852e669a669a05c5cb75a0ef7c9` |
+
+Total: 713,594,768 bytes (680.5 MiB).
+
+Each of the five is the wheel's file with another signature: with the Authenticode
+signature and the checksum field of the header left out, the wheel's and the package's
+file are byte for byte the same (compared on 2026-11-12; the signature block has the
+same place and size in both). The tool does not rely on that; it compares whole files
+with the manifest it matched.
+
+### AMD Ryzen AI 1.8.0, nuget (not the built release: it fails the hardware gate)
+
+`runtime/ryzenai-1.8.0.nuget.manifest.json`. As shipped in `RyzenAI_Deployment.1.8.0.nupkg` inside AMD's `ryzen_ai_nuget_1.8.0.zip`
 (directory `runtimes/win-x64/native/`). Six files: in this release the compiler is a
 file of its own, `aiecompiler_client.dll`, and with only the five names of 1.9.0 the
 process dies with an access violation while the provider is registered.
@@ -97,13 +128,17 @@ file is passed to the provider.
 
 ## Where the files come from
 
-AMD's wheel `onnxruntime-vitisai` 1.30.0 of the index for Ryzen AI 1.9.0 (section
-"Provisioning"). Python is only the packaging the files arrive in; nothing of Python is
-loaded at run time. On the reference host the files of `runtime/ryzenai/` were copied by
-hand on 2026-11-12, unchanged, from the environment that pip had installed that wheel
-into for the spike of 2026-11-11:
+Release 1.9.0 comes from AMD in two packages that hold the same builds, signed
+separately: the Python wheel `onnxruntime-vitisai` 1.30.0 on AMD's index for Ryzen AI
+1.9.0, and the NuGet package `RyzenAI_Deployment.1.9.0.nupkg`. Either is a source the
+tool accepts (section "Provisioning"). Python and NuGet are only the packaging the files
+arrive in; nothing of either is loaded at run time.
 
-    D:\Source\memguard_alpha\tools\oga-venv\Lib\site-packages\onnxruntime\capi\
+On the reference host the files of `runtime/ryzenai/` were copied by hand on 2026-11-12,
+unchanged, from the environment that pip had installed the wheel into for the spike of
+2026-11-11 (`D:\Source\memguard_alpha\tools\oga-venv\Lib\site-packages\onnxruntime\capi\`);
+they are the wheel's files and match the wheel manifest. Provisioning from the NuGet
+package replaces them by that package's files, with a record that names the package.
 
 ## Another location: `L2D_RUNTIME_DIR`
 
@@ -112,7 +147,7 @@ to read them from another directory instead; an empty value counts as not set. T
 files are 714 MB and the same for every checkout on a host, so one copy can serve
 several working copies. It is the only location an environment variable moves:
 `models/`, `data/` and the provider's cache `runtime/cache/` stay in the project. The
-directory is checked against the same manifest wherever it is.
+directory is checked against the same manifests wherever it is.
 
 Precedence: a directory given by an option of a command, then `L2D_RUNTIME_DIR`, then
 `runtime/ryzenai/`. A relative value is relative to the current directory of the
@@ -121,27 +156,48 @@ process, not to the project.
 ## Provisioning (development step, needs `uv`)
 
 `tools/runtime/provision.py` places the files of a release in the runtime directory and
-writes the record `provisioned.json` there. The manifest of the release says which
-package the files come from (`source.kind`), and that decides the route. Both routes
-hash every file against the manifest before anything is copied, refuse a target that
-holds a DLL the manifest does not name, place each file through a temporary file that
-is hashed before it takes its name, and refuse the other kind of manifest. A refusal
-names what was found and what was expected and changes nothing (exit code 1); a copy
-that fails ends with one line and exit code 2. The tests of both routes:
+writes the record `provisioned.json` there. The release is the one the tool is built
+for, unless `--release` names another; the source is the NuGet package when `--nupkg`
+or `--nuget-zip` is given, and the wheel otherwise; the two together name the manifest.
+Both routes hash every file against the manifest before anything is copied, refuse a
+target that holds a DLL the manifest does not name, place each file through a temporary
+file that is hashed before it takes its name, and refuse the other kind of manifest.
+Refused as a target: a drive root, the directory the package or ZIP lies in, and any
+directory inside the repository other than `runtime/ryzenai/`. A refusal names what
+was found and what was expected and changes nothing (exit code 1); a copy that fails
+ends with one line and exit code 2. The tests of both routes:
 
     uv run --no-project --python 3.12 python -m unittest discover -s tools/runtime
+
+### From AMD's NuGet package (release 1.9.0, the built release; needs no index)
+
+    uv run --no-project --python 3.12 python tools/runtime/provision.py --nupkg "<path>\RyzenAI_Deployment.1.9.0.nupkg" [--target <directory>]
+
+The package is the file AMD publishes
+(`https://download.amd.com/opendownload/RyzenAI/1.9.0/RyzenAI_Deployment.1.9.0.nupkg`,
+289,269,284 bytes); the user downloads it, the script does not. It is read where it
+lies and is not copied or changed. The script compares the file's size with the
+manifest's before it reads it, hashes it as it reads it and compares the SHA-256,
+requires the id and version stated inside to be `RyzenAI_Deployment` 1.9.0, and reads
+each of the five files by the name the manifest gives it. No name or path found in the
+package is used to read or to write. The record names the package (file, path, size,
+SHA-256) as the source. No environment is made; `uv` only supplies a Python 3.12.
+
+Run on 2026-11-12 on the reference host into a scratch directory: five files,
+713,594,768 bytes, in 11 s. The tool's full check passes on it and reports the source
+`nuget`. The hardware gate passes on it with the default build, with the same result
+as on the wheel's files: 36 of 38 nodes on the NPU, cosine 0.9958 against the CPU
+provider, and the NPU output and the CPU output of the same input are bit for bit the
+same from both directories (two runs each).
 
 ### From AMD's NuGet ZIP (release 1.8.0; needs no index)
 
     uv run --no-project --python 3.12 python tools/runtime/provision.py --release 1.8.0 --nuget-zip "<path>\ryzen_ai_nuget_1.8.0.zip" [--target <directory>]
 
-The ZIP is the one AMD publishes for the release; it is read where it lies and is not
-copied or changed. The script opens `RyzenAI_Deployment.1.8.0.nupkg` inside it by that
-name, requires the package's SHA-256, id and version to be the manifest's, and reads
-each of the six files by the name the manifest gives it. No name or path found in the
-archive is used to read or to write. The record names the ZIP (name, path, size,
-SHA-256) and the package inside it (name, size, SHA-256) as the source. No environment
-is made and nothing is downloaded; `uv` only supplies a Python 3.12.
+For release 1.8.0 AMD publishes the package inside a ZIP. The ZIP is read where it
+lies; the script opens `RyzenAI_Deployment.1.8.0.nupkg` inside it by that name and then
+does what it does for a package file (`--nupkg` with that package extracted works as
+well). The record names the ZIP (name, path, size, SHA-256) and the package inside it.
 
 Run on 2026-11-12 on the reference host from the ZIP of 272,356,050 bytes (SHA-256
 `055f1d428948329a8f4d156a69e2f70ae17cd8a6bb1935399bef6c6e423d96b4`) into a scratch
@@ -152,7 +208,7 @@ This provisions release 1.8.0, which is not the release the tool is built for by
 default (section "AMD Ryzen AI 1.8.0" above). A tool built for 1.9.0 refuses the
 directory and names both releases.
 
-### From AMD's wheel (release 1.9.0; needs AMD's index)
+### From AMD's wheel (release 1.9.0, the built release; needs AMD's index)
 
     uv run --project tools/runtime python tools/runtime/provision.py
     uv run --project tools/runtime python tools/runtime/provision.py --target <directory>
@@ -185,13 +241,6 @@ come from" and `--accept-unrecorded-origin` (pip records no URL for a package fr
 index) into a scratch directory; the five files it placed are byte for byte those of
 `runtime/ryzenai/`.
 
-For release 1.9.0 there is no route without the index today. AMD's NuGet package
-`RyzenAI_Deployment.1.9.0.nupkg` holds five files of the same names and sizes, but they
-are other builds of them (their CRC-32 values differ from the wheel's files), so they do
-not pass the check against the 1.9.0 manifest, whose source is the wheel. Provisioning
-1.9.0 from that package needs a manifest of the kind `nuget` for it and a run of the
-hardware gate on its files; the ZIP route above then serves it unchanged.
-
 ## What must be on the host besides these files
 
 - An AMD NPU with its driver. The provider talks to the NPU through `xrt_coreutil.dll`
@@ -209,6 +258,10 @@ The tool checks the directory before it loads anything from it
 when the record `provisioned.json` in the directory says it was hashed with the
 modification time it has now.
 
+- Which manifest: the built release has one per source. The directory must match one of
+  them with all its files; the one whose hashes the record holds is tried first, and
+  each file is hashed at most once. The tool says which source it matched. A directory
+  with files of both sources is refused as a mix.
 - At every start: the directory exists; every file of the manifest is there, is a file
   and has its size; no other DLL is in the directory; the record, if there is one, has
   a known format and names the built release; a file whose modification time differs
@@ -227,9 +280,16 @@ modification time it has now.
 The record of the provisioning step (`"written_by": "provisioning"`, with the source)
 and the record of the check are used and invalidated alike.
 
+A record stays bound to the manifest it was made against: if the files are right for
+the other source of the release (they were replaced by that source's), the record's
+hashes are not that manifest's, every file is hashed, and a new record of the check
+replaces the old one, whose source would no longer be true.
+
 A record that cannot be read (not JSON, not the shape of a record) is treated as no
 record: every file is hashed, and when all are right a new record replaces it, which
-the tool says. Nothing has to be repaired by hand; the hashes decide, not the record. A
+the tool says. A record that is there but cannot be opened at the moment (another
+process has it open, access is denied) is not replaced: every file is hashed for this
+start and the record is left as it is. Nothing has to be repaired by hand; the hashes decide, not the record. A
 record of another format is different: it can be read, a later version of the tool may
 have written it, and it is refused with the advice to remove it or to provision again.
 Temporary record files that an interrupted write left behind are removed by the next

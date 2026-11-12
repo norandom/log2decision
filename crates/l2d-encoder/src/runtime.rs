@@ -6,7 +6,7 @@
 //!
 //! # What is expected
 //!
-//! [`RuntimeManifest::expected`] is a tracked file, `runtime/ryzenai-<release>.manifest.json`,
+//! A manifest is a tracked file, `runtime/ryzenai-<release>.<source>.manifest.json`,
 //! compiled into the tool: the release, where its files come from, and for each file its
 //! name, size, SHA-256 and file version. Which release that is, is one choice: the feature
 //! `ryzenai-1-9` or `ryzenai-1-8` of this crate, which also sets the API level `ort` asks
@@ -14,6 +14,12 @@
 //! 1.27 of release 1.8.0). The manifest is compiled in because the tool is built for one
 //! release, and because the runtime directory may lie outside the project
 //! ([`l2d_core::paths::RUNTIME_DIR_VARIABLE`]), where no tracked file is at hand.
+//!
+//! A release can have a manifest per source: AMD ships the builds of release 1.9.0 in its
+//! wheel and in its NuGet package, signed separately, so the two hold files of the same
+//! names and sizes and other hashes. A directory must match one manifest of the built
+//! release with all its files ([`RuntimeFiles::source`] says which); a directory with
+//! files of both is refused as a mix.
 //!
 //! # The record in the directory
 //!
@@ -136,39 +142,78 @@ compile_error!(
      runtime the tool is built for"
 );
 
-/// The tracked manifests, all compiled in: the one the tool is built for is checked
-/// against, the others only serve to say which release a wrong directory holds.
-const MANIFEST_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.manifest.json");
-const MANIFEST_1_8_0: &str = include_str!("../../../runtime/ryzenai-1.8.0.manifest.json");
+/// The tracked manifests, all compiled in. A manifest is for one release from one source:
+/// AMD ships the same builds in its wheel and in its NuGet package, signed separately, so
+/// the files of the two have the same sizes and other hashes. The manifests of the
+/// release the tool is built for are the ones a directory may match; the others only
+/// serve to say which release a wrong directory holds.
+const WHEEL_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.wheel.manifest.json");
+const NUGET_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.nuget.manifest.json");
+const NUGET_1_8_0: &str = include_str!("../../../runtime/ryzenai-1.8.0.nuget.manifest.json");
 
 #[cfg(feature = "ryzenai-1-9")]
-const EXPECTED_MANIFEST: &str = MANIFEST_1_9_0;
+const BUILT_MANIFESTS: &[&str] = &[WHEEL_1_9_0, NUGET_1_9_0];
 #[cfg(all(feature = "ryzenai-1-8", not(feature = "ryzenai-1-9")))]
-const EXPECTED_MANIFEST: &str = MANIFEST_1_8_0;
+const BUILT_MANIFESTS: &[&str] = &[NUGET_1_8_0];
 #[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
-const EXPECTED_MANIFEST: &str = "";
+const BUILT_MANIFESTS: &[&str] = &[];
 
-fn compiled_in(text: &str) -> RuntimeManifest {
-    RuntimeManifest::parse(text)
-        .unwrap_or_else(|error| panic!("a compiled-in runtime manifest is unusable: {error}"))
+fn compiled_in(texts: &[&str]) -> Vec<RuntimeManifest> {
+    texts
+        .iter()
+        .map(|text| {
+            RuntimeManifest::parse(text).unwrap_or_else(|error| {
+                panic!("a compiled-in runtime manifest is unusable: {error}")
+            })
+        })
+        .collect()
 }
 
-static EXPECTED: LazyLock<RuntimeManifest> = LazyLock::new(|| compiled_in(EXPECTED_MANIFEST));
+static BUILT: LazyLock<Vec<RuntimeManifest>> = LazyLock::new(|| compiled_in(BUILT_MANIFESTS));
 static KNOWN: LazyLock<Vec<RuntimeManifest>> =
-    LazyLock::new(|| vec![compiled_in(MANIFEST_1_9_0), compiled_in(MANIFEST_1_8_0)]);
+    LazyLock::new(|| compiled_in(&[WHEEL_1_9_0, NUGET_1_9_0, NUGET_1_8_0]));
+
+/// Whether `name` is a plain file name that can only mean a file of that name in the
+/// runtime directory: no directory part, none of the characters Windows gives a meaning
+/// in a path (a colon would address a stream of another file), no trailing dot or space
+/// (Windows drops them), and not a device name such as `CON` or `NUL`, with or without an
+/// extension.
+pub fn is_plain_file_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or_default().trim_end();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.ends_with(['.', ' '])
+        && !name
+            .chars()
+            .any(|c| c.is_control() || r#"<>:"/\|?*"#.contains(c))
+        && !RESERVED
+            .iter()
+            .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
 
 impl RuntimeManifest {
-    /// Every release the repository has a manifest for, the built one among them.
+    /// Every manifest the repository has, those of the built release among them.
     pub fn known() -> &'static [RuntimeManifest] {
         &KNOWN
     }
 
-    /// The manifest this build of the tool expects: `runtime/ryzenai-<release>.manifest.json` as it
-    /// was when the tool was compiled.
-    pub fn expected() -> &'static RuntimeManifest {
-        &EXPECTED
+    /// The manifests of the release this build of the tool is for, one per source. A
+    /// runtime directory must match one of them, with all its files.
+    pub fn built() -> &'static [RuntimeManifest] {
+        &BUILT
     }
 
+    /// The first manifest of the built release (for 1.9.0 the wheel's): its release, its
+    /// ONNX Runtime version and its file names and sizes are those of every source of
+    /// the release; its hashes are that source's only.
+    pub fn expected() -> &'static RuntimeManifest {
+        &BUILT[0]
+    }
     /// Reads a manifest and refuses one this build cannot rely on.
     pub fn parse(text: &str) -> Result<Self, L2dError> {
         let invalid = |detail: String| L2dError::InvalidInput {
@@ -186,12 +231,7 @@ impl RuntimeManifest {
             return Err(invalid("it names no file".into()));
         }
         for (index, file) in manifest.files.iter().enumerate() {
-            let plain_name = !file.name.is_empty()
-                && Path::new(&file.name)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    == Some(file.name.as_str());
-            if !plain_name {
+            if !is_plain_file_name(&file.name) {
                 return Err(invalid(format!("{:?} is not a plain file name", file.name)));
             }
             let is_digest = file.sha256.len() == 64
@@ -251,6 +291,8 @@ pub struct RuntimeFiles {
     pub onnxruntime: String,
     /// File name of the library `ort` is initialised from: the manifest's first file.
     pub library: String,
+    /// The source whose manifest the directory matched: `wheel` or `nuget`.
+    pub source: String,
     /// The record of the directory ([`RECEIPT_FILE`]): found, written now, or not writable.
     pub record: RecordState,
     /// Whether this check brought a record it found up to date.
@@ -269,6 +311,10 @@ pub enum RecordRefresh {
     /// they were hashed, found right, and the record now holds their times. The next
     /// start hashes nothing.
     Refreshed { files: Vec<String> },
+    /// The record held other content for these files than this manifest (it was made for
+    /// another source of the release); they were hashed and found right, and a record of
+    /// this check replaced it, since its source no longer described the files.
+    Rewritten { files: Vec<String> },
     /// As `Refreshed`, but the record could not be rewritten: the files are right, and
     /// they are hashed again at every start until the directory is writable.
     Failed { files: Vec<String>, reason: String },
@@ -282,6 +328,12 @@ impl RecordRefresh {
             RecordRefresh::Refreshed { files } => format!(
                 "{} changed since the record, hashed and found right; the record was \
                  brought up to date",
+                files.join(", ")
+            ),
+            RecordRefresh::Rewritten { files } => format!(
+                "the record was made for other content of {} (another source of the \
+                 release); they were hashed and found right, and a new record of the check \
+                 replaced it",
                 files.join(", ")
             ),
             RecordRefresh::Failed { files, reason } => format!(
@@ -308,6 +360,10 @@ pub enum RecordState {
     /// There was none (or none that could be read) and it could not be written: every
     /// file was hashed, and will be again at every start until the directory is writable.
     NotWritten { reason: String },
+    /// There is one, but it could not be opened for this check (in use by another
+    /// process, access denied, a folder in its place): every file was hashed, and the
+    /// record was left as it is.
+    Unavailable { reason: String },
 }
 
 impl RecordState {
@@ -322,6 +378,10 @@ impl RecordState {
             RecordState::Replaced { reason } => format!(
                 "the one found could not be read ({reason}); every file was hashed and a \
                  new record written in its place"
+            ),
+            RecordState::Unavailable { reason } => format!(
+                "it could not be opened ({reason}); every file was hashed and the record \
+                 left as it is"
             ),
             RecordState::NotWritten { reason } => format!(
                 "there is none and it could not be written ({reason}); every file is hashed \
@@ -362,8 +422,35 @@ struct ReceiptFile {
 enum ReceiptRead {
     None,
     Found(Box<Receipt>),
-    /// It is there but cannot be used as a record: the reason. Treated as no record.
+    /// It is there but is not a record (not JSON, not the shape of one): the reason.
+    /// Treated as no record, and replaced.
     Unreadable(String),
+    /// It is there but could not be opened just now (in use, access denied, a folder):
+    /// the reason. Nothing is trusted, and it is left as it is.
+    Unavailable(String),
+}
+
+/// Hashes computed during one check, by file name, so that a directory that is tried
+/// against two manifests is read once.
+type HashCache = std::cell::RefCell<std::collections::HashMap<String, (u64, Option<u64>, String)>>;
+
+fn cached_sha256(
+    cache: &HashCache,
+    name: &str,
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<String, L2dError> {
+    let key = (metadata.len(), modified_unix_ns(metadata));
+    if let Some((bytes, modified, sha256)) = cache.borrow().get(name)
+        && (*bytes, *modified) == key
+    {
+        return Ok(sha256.clone());
+    }
+    let sha256 = sha256_of(path)?;
+    cache
+        .borrow_mut()
+        .insert(name.to_string(), (key.0, key.1, sha256.clone()));
+    Ok(sha256)
 }
 
 impl RuntimeFiles {
@@ -374,15 +461,68 @@ impl RuntimeFiles {
     /// of the wrong size or content, a stray DLL and a directory recorded for another
     /// release are [`L2dError::Refused`], and the reason names every finding. In a
     /// directory without a record every file is hashed and the record is written.
+    ///
+    /// The built release can have a manifest per source (AMD's wheel, AMD's NuGet
+    /// package). The directory must match one of them with all its files;
+    /// [`RuntimeFiles::source`] says which.
     pub fn check(dir: &Path, depth: CheckDepth) -> Result<Self, L2dError> {
-        Self::check_against(RuntimeManifest::expected(), dir, depth)
+        Self::check_among(RuntimeManifest::built(), dir, depth)
     }
 
-    /// [`RuntimeFiles::check`] against a given manifest.
+    /// [`RuntimeFiles::check`] against given manifests of one release: the directory
+    /// passes when it matches one of them, all files from that one. The manifest whose
+    /// hashes the directory's record holds is tried first, so that a start with a record
+    /// hashes nothing; each file is hashed at most once whatever the number of
+    /// manifests. When none matches, the error is that of the first one tried, and it
+    /// says so if the directory mixes files of two sources.
+    pub fn check_among(
+        manifests: &[RuntimeManifest],
+        dir: &Path,
+        depth: CheckDepth,
+    ) -> Result<Self, L2dError> {
+        let cache = HashCache::default();
+        let recorded = recorded_hashes(dir);
+        let mut order: Vec<&RuntimeManifest> = manifests.iter().collect();
+        order.sort_by_key(|manifest| {
+            !manifest
+                .files
+                .iter()
+                .all(|file| recorded.get(&file.name.to_ascii_lowercase()) == Some(&file.sha256))
+        });
+        let mut first_error = None;
+        for manifest in order {
+            match Self::check_one(manifest, dir, depth, &cache) {
+                Ok(files) => return Ok(files),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(L2dError::Refused { reason }) => Err(L2dError::Refused {
+                reason: format!("{reason}{}", mixed_sources_note(manifests, &cache)),
+            }),
+            Some(error) => Err(error),
+            None => Err(L2dError::InvalidInput {
+                detail: "runtime manifest: there is none to check against".into(),
+            }),
+        }
+    }
+
+    /// [`RuntimeFiles::check`] against one given manifest.
     pub fn check_against(
         manifest: &RuntimeManifest,
         dir: &Path,
         depth: CheckDepth,
+    ) -> Result<Self, L2dError> {
+        Self::check_one(manifest, dir, depth, &HashCache::default())
+    }
+
+    fn check_one(
+        manifest: &RuntimeManifest,
+        dir: &Path,
+        depth: CheckDepth,
+        cache: &HashCache,
     ) -> Result<Self, L2dError> {
         if !dir.is_dir() {
             return Err(L2dError::Missing {
@@ -403,10 +543,16 @@ impl RuntimeFiles {
         // start skip hashing; the hashes decide, and refusing a directory whose files
         // are right would gain nothing. (A record of another release or of another
         // format can be read, says something, and is refused below.)
-        let (receipt, unreadable) = match read_receipt(manifest, dir)? {
-            ReceiptRead::None => (None, None),
-            ReceiptRead::Found(receipt) => (Some(*receipt), None),
-            ReceiptRead::Unreadable(reason) => (None, Some(reason)),
+        //
+        // A record that is there but could not be opened just now (another process has
+        // it open, access was denied for a moment) is something else: it may be a good
+        // record. Nothing is trusted for this start, and it is neither replaced nor
+        // rewritten.
+        let (receipt, unreadable, unavailable) = match read_receipt(manifest, dir)? {
+            ReceiptRead::None => (None, None, None),
+            ReceiptRead::Found(receipt) => (Some(*receipt), None, None),
+            ReceiptRead::Unreadable(reason) => (None, Some(reason), None),
+            ReceiptRead::Unavailable(reason) => (None, None, Some(reason)),
         };
 
         let mut missing: Vec<&ManifestFile> = Vec::new();
@@ -417,6 +563,9 @@ impl RuntimeFiles {
         let mut verified: Vec<serde_json::Value> = Vec::new();
         // Files that are right but not as the record has them: the record is refreshed.
         let mut stale: Vec<serde_json::Value> = Vec::new();
+        // Whether the record holds another content for one of them (a hash that is not
+        // this manifest's): then it describes another source and is not kept.
+        let mut record_of_other_content = false;
         for file in &manifest.files {
             let path = dir.join(&file.name);
             let metadata = match std::fs::metadata(&path) {
@@ -459,9 +608,18 @@ impl RuntimeFiles {
                     })
             });
             if depth == CheckDepth::Full || !recorded_as_it_is {
-                let found = sha256_of(&path)?;
+                let found = cached_sha256(cache, &file.name, &path, &metadata)?;
                 if found == file.sha256 {
                     hashed.push(file.name.clone());
+                    record_of_other_content |= receipt.as_ref().is_some_and(|receipt| {
+                        receipt.files.iter().any(|recorded| {
+                            recorded.name.eq_ignore_ascii_case(&file.name)
+                                && recorded
+                                    .sha256
+                                    .as_deref()
+                                    .is_some_and(|sha256| sha256 != file.sha256)
+                        })
+                    });
                     let entry = serde_json::json!({
                         "name": file.name,
                         "bytes": file.bytes,
@@ -540,6 +698,9 @@ impl RuntimeFiles {
             Some(_) => RecordState::Provisioning,
             // No record, or none that could be read: every file was hashed above and is
             // right.
+            None if unavailable.is_some() => RecordState::Unavailable {
+                reason: unavailable.unwrap_or_default(),
+            },
             None => match (write_receipt(manifest, dir, &verified), unreadable) {
                 (Ok(()), None) => RecordState::Written,
                 (Ok(()), Some(reason)) => RecordState::Replaced { reason },
@@ -557,9 +718,20 @@ impl RuntimeFiles {
                     .iter()
                     .filter_map(|entry| entry["name"].as_str().map(str::to_string))
                     .collect();
-                match refresh_receipt(dir, receipt, &stale) {
-                    Ok(()) => RecordRefresh::Refreshed { files },
-                    Err(reason) => RecordRefresh::Failed { files, reason },
+                if record_of_other_content {
+                    // The record was made for other content (the other source of the
+                    // release): its source no longer describes these files, so it is not
+                    // patched but replaced by a record of this check. Every file was
+                    // hashed, since none had this manifest's hash in the record.
+                    match write_receipt(manifest, dir, &verified) {
+                        Ok(()) => RecordRefresh::Rewritten { files },
+                        Err(reason) => RecordRefresh::Failed { files, reason },
+                    }
+                } else {
+                    match refresh_receipt(dir, receipt, &stale) {
+                        Ok(()) => RecordRefresh::Refreshed { files },
+                        Err(reason) => RecordRefresh::Failed { files, reason },
+                    }
                 }
             }
             _ => RecordRefresh::NotNeeded,
@@ -569,6 +741,7 @@ impl RuntimeFiles {
             release: manifest.release.clone(),
             onnxruntime: manifest.onnxruntime.clone(),
             library: manifest.files[0].name.clone(),
+            source: manifest.source.kind.clone(),
             record,
             refresh,
             hashed,
@@ -599,7 +772,17 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<ReceiptRead, L
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ReceiptRead::None);
         }
-        Err(error) => return Ok(unreadable(&error)),
+        // Not valid UTF-8 is content that is not a record; any other failure is about
+        // opening the file, not about what it holds.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Ok(unreadable(&error));
+        }
+        Err(error) => {
+            return Ok(ReceiptRead::Unavailable(format!(
+                "{} cannot be opened: {error}",
+                path.display()
+            )));
+        }
     };
     let whole: serde_json::Value = match serde_json::from_str(&text) {
         Ok(whole) => whole,
@@ -642,6 +825,71 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<ReceiptRead, L
     Ok(ReceiptRead::Found(Box::new(receipt)))
 }
 
+/// The SHA-256 the record of `dir` holds per file (names in lower case), to choose the
+/// manifest to try first. Empty when there is no record or it cannot be used; whether it
+/// can is judged by `read_receipt`, not here.
+fn recorded_hashes(dir: &Path) -> std::collections::HashMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(RECEIPT_FILE)) else {
+        return Default::default();
+    };
+    let Ok(whole) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Default::default();
+    };
+    whole["files"]
+        .as_array()
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| {
+                    Some((
+                        file["name"].as_str()?.to_ascii_lowercase(),
+                        file["sha256"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// For a directory that matched none of several manifests of a release: whether it holds
+/// files of more than one of them, by the hashes computed during the check.
+fn mixed_sources_note(manifests: &[RuntimeManifest], cache: &HashCache) -> String {
+    let cache = cache.borrow();
+    let parts: Vec<String> = manifests
+        .iter()
+        .filter_map(|manifest| {
+            let names: Vec<&str> = manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    cache
+                        .get(&file.name)
+                        .is_some_and(|(_, _, sha256)| *sha256 == file.sha256)
+                })
+                .map(|file| file.name.as_str())
+                .collect();
+            (!names.is_empty()).then(|| {
+                format!(
+                    "{} from the source `{}` ({} {})",
+                    names.join(", "),
+                    manifest.source.kind,
+                    manifest.source.package,
+                    manifest.source.version
+                )
+            })
+        })
+        .collect();
+    if parts.len() < 2 {
+        return String::new();
+    }
+    format!(
+        "; the directory mixes files of {} sources of the release: {}. All files must come \
+         from one source",
+        parts.len(),
+        parts.join("; ")
+    )
+}
+
 /// `written_by` of a record this check wrote.
 const WRITTEN_BY_CHECK: &str = "check";
 
@@ -667,7 +915,8 @@ fn write_receipt(
         // came from is not known here, so no source is recorded.
         "written_by": WRITTEN_BY_CHECK,
         "verified_unix_s": unix_seconds_now(),
-
+        // Which manifest of the release the files matched.
+        "matched_source": manifest.source.kind,
         "files": verified,
     });
     write_record(dir, &record)
