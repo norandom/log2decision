@@ -21,6 +21,7 @@ features on HTTP CSIC 2010.
 
 - **In scope**:
   - Reading text logs and labelled log datasets from local files.
+  - Reading log records from zip archives in batches, without extracting them.
   - A baseline bad/good ratio from character-level features, fitted deterministically.
   - Agnostic threat scoring barrier: isolating routing context (URLs, endpoints, hosts) from payload anomaly signals so threat scores derive from general syntactic anomalies and attack patterns rather than hardcoded training-set site topography.
   - Pre-validating neural encoder architecture quality offline via `uv` on held-out grouped splits before NPU deployment.
@@ -198,3 +199,23 @@ features on HTTP CSIC 2010.
 7. While a dataset is processed in batches, the Log Triage Tool shall read the free physical memory again before each batch, shall reduce the batch size when the free memory has fallen below the configured reserve, and shall raise it again, up to the configured maximum batch size, when the free memory has recovered.
 8. When the batch size changes during an operation, the Log Triage Tool shall record the change with the free memory that caused it, and shall report the smallest and largest batch size used when the operation ends.
 9. The Log Triage Tool shall keep its own memory use within the memory limit for the whole operation, so that other programs on the host are not starved of memory.
+
+### Requirement 13: Zip archives as input, in batches
+**Objective:** As a log analyst, I want to point the tool at a zip archive of logs that is larger than my laptop's memory, so that I can work on large datasets without extracting them and without the tool exhausting memory.
+
+Added on 2026-11-12 (owner approval of `amendment-2026-11-12-zip-batch.md`). Reading the label files of the AIT Log Data Set is not part of this requirement.
+
+#### Acceptance Criteria
+1. When the analyst supplies a zip archive, the Log Triage Tool shall read log records from the entries of the archive without extracting the archive to disk.
+2. Where the analyst gives entry patterns, the Log Triage Tool shall read only the entries whose path matches a pattern.
+3. When an archive has been read, the Log Triage Tool shall report the number of entries read and, for every entry it did not read, the entry's path and the reason.
+4. If an entry is not text, is encrypted, is a nested archive other than a gzip-compressed text file, or uses a compression method the tool does not support, then the Log Triage Tool shall skip the entry, continue with the next entry, and report it.
+5. When an entry is a gzip-compressed text file, the Log Triage Tool shall read the log records inside it.
+6. If an entry is damaged or fails its checksum, then the Log Triage Tool shall stop reading that entry, keep the records read from other entries, report the entry, and exit with a non-zero status.
+7. The Log Triage Tool shall give each record read from an archive a position that names the entry path and the line within the entry.
+8. While an archive is read, the Log Triage Tool shall process it in batches under Requirement 12, so that its memory use stays within the memory limit whatever the size of the archive or of a single entry.
+9. If a single log record is longer than the configured maximum record length, then the Log Triage Tool shall skip the record and report its position and length.
+10. The Log Triage Tool shall produce the same records, occurrence counts and input summary for an archive as for the same files read unpacked, whatever the batch size.
+11. When an operation writes per-log results for an input that is processed in batches, the Log Triage Tool shall write the results to files in parts as the batches complete, and shall state where the parts are.
+12. If the deduplication state of an input would exceed the memory limit, then the Log Triage Tool shall either continue with deduplication on disk or refuse and state the memory needed and the memory available; it shall not exceed the limit.
+13. The Log Triage Tool shall record for an archive input the archive path, the archive's content hash, and for each entry read its path and record count.

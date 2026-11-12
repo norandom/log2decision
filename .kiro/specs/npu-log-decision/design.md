@@ -50,7 +50,8 @@ Two measured results shape the design. A general text-embedding model on the NPU
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
 - Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (features `bundled`, `fts5`), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
 - `polars` for data frames, pinned to `=0.52.0` with default features off: facade features `lazy` and `ndarray` only, and the CSV and JSON readers enabled on `polars-io` directly. The facade's own `csv` and `json` features, and releases from 0.53 on, link network client crates and are not used. Other crates import Polars only through `l2d_core::polars`. Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
-- `conformal-prediction` for the conformal calibration layer.
+- For zip input and result parts (requirement 13): `zip` 2.x with default features off and the feature `deflate` only, `flate2` (arrives with `zip`) for gzip entries, and the `polars-io` features `parquet` and `zstd`. Checked on 2026-11-12 in a scratch copy: the resolved lock file names no network crate. The check is repeated when the task adds them.
+- No crate for the conformal calibration layer: the method is a few lines and is written in `l2d-decide` (owner decision of 2026-11-12, which replaces the adoption of `conformal-prediction`; task 1.18 removes the crate).
 - `argmin` and `ndarray`, the optimizer and array types underneath `linfa-logistic`, used directly where `linfa-logistic` cannot take sparse input.
 - `burn` 0.22.1 (confined to optional training module `l2d-train`).
 - No crate that opens network connections may be added.
@@ -123,7 +124,7 @@ graph LR
 | Encoder execution | `ort` 2.0.0-rc.15, features `load-dynamic`, `vitis`, `std`, `ndarray`, one `api-NN` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | `api-NN` fixed from DLL version |
 | NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
 | Data layer | `polars` (default features off; CSV, JSON, lazy, `ndarray` conversion) | Parsing of log data; frames between crates; grouping and joins in calibration, evaluation and reports | No cloud or HTTP features; lives in `l2d-core` |
-| Calibration | `conformal-prediction` | Conformal label sets at a stated error rate | Wrapped in `l2d-decide` |
+| Calibration | own code in `l2d-decide` | Conformal label sets at a stated error rate | `conformal-prediction` is removed by task 1.18 |
 | Storage | `rusqlite` 0.32 (`bundled`, `fts5`) + `faer` 0.24 | Logs, labels, FTS5 full-text, exact SIMD vector search | Single-file database (`stores/<name>.db`), zero async |
 | Baseline Scorer | Character n-grams + L2 Logistic Regression via `faer` / `linfa` | Deterministic baseline ratio | Independent of NPU and ONNX runtime |
 | Analysis | `linfa` 0.8, `faer` 0.24, `bhtsne` 0.5 | Vector-set assessment, MMD shift test, TwoNN | Pure-Rust numeric calculations |
@@ -336,6 +337,12 @@ flowchart TD
 | 12.7 | Shrink and grow between batches | MemoryBudget | `MemoryBudget::next_batch_rows` | |
 | 12.8 | Record batch size changes | MemoryBudget | `BatchPlan.changes`, `min_rows_used`, `max_rows_used` | |
 | 12.9 | Stay within the limit for the whole run | MemoryBudget | reserve check before every batch | |
+| 13.1, 13.5 | Read archive entries without extracting; gzip entries | ZipInput | `ZipInput::open`, `ZipInput::batches` | |
+| 13.2, 13.3, 13.4, 13.6 | Entry patterns, entry report, skipped and damaged entries | ZipInput | `ZipInputSettings.entries`, `EntryReport`, `EntrySkip` | |
+| 13.7, 13.13 | Positions by entry and line; archive summary | ZipInput | `ArchiveSummary` | |
+| 13.8, 13.9, 13.10 | Batches under the memory limit; record length limit; same results as unpacked | ZipInput, MemoryBudget | `Batcher`, `ZipInputSettings.max_record_bytes` | |
+| 13.11 | Results written in parts | PartWriter | Parquet parts and manifest under the work directory | |
+| 13.12 | Deduplication state within the limit | ZipInput, PartWriter | refusal (task 1.16), on-disk deduplication (task 1.17) | |
 | 9.8 | Single-label groups reported separately | Evaluator, Metrics | `EvaluationReport.single_label_groups` | |
 | 10.1 | No Python | whole workspace | native DLLs only | |
 | 10.2 | No network | whole workspace | dependency rule | |
@@ -420,6 +427,51 @@ pub trait InputAdapter {
 ```
 - Preconditions: the path exists and is readable; otherwise `L2dError::Missing`.
 - Postconditions: every returned text is unique; `records` equals the sum of occurrences plus skipped.
+
+#### ZipInput and result parts
+
+| Field | Detail |
+|-------|--------|
+| Intent | Read log records from a zip archive in batches under the memory limit, and write per-log results in parts on disk |
+| Requirements | 13.1 to 13.13, 12.4, 12.6, 12.9 |
+
+Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (its facade feature links network crates), and neither Arrow nor Polars has a compressed in-memory buffer. So the tool keeps its own batches (MemoryBudget) and uses the disk as the spill. Memory holds one batch, the decompressor state and the deduplication state.
+
+**Reading**
+- `ZipInput` opens the archive, reads the central directory, and walks the entries in central-directory order. That order is the record order, so results do not depend on timing. Entries are read one at a time; reading entries in parallel is a later task (1.19).
+- Each selected entry is read as a stream: decompressor, then the line splitting and byte-order-mark handling of the input adapters. Nothing is written to disk for reading. Zip64 archives are supported.
+- Entry selection: glob patterns over the entry path (`--entry`, repeatable). Without a pattern every entry is tried.
+- Text check on the first 8 KiB of an entry: a NUL byte or invalid UTF-8 marks the entry as not text.
+- A gzip entry (by magic bytes, not by name) is read through a second decompressor. Every other nested archive (`.zip`, `.bz2`, `.xz`, `.tar`) is skipped and reported (owner decision).
+- Maximum record length: default 1 MiB, option `--max-record-bytes`. It must not exceed the longest text the store accepts.
+- The archive's content hash is SHA-256 over the archive file, computed in one streaming pass. Entry checksums are verified when an entry is read to its end.
+
+**Batches and memory**
+- Batches come from the `Batcher`. The cost of a batch is estimated from the uncompressed bytes of its records. Held for the whole run: the decompressor window and buffers, and the deduplication state.
+- Deduplication state: a set of 128-bit text hashes with occurrence counts, held against the budget and grown batch by batch. Task 1.16 refuses when it no longer fits. Task 1.17 then writes records to parts partitioned by hash prefix and deduplicates each partition on its own, with results identical to the in-memory path.
+
+**Result parts**
+- An operation that produces per-log results for a batched input writes one Parquet part (zstd) per batch into a run directory, with a manifest that lists the parts, their row counts and their hashes.
+- Location: `--work-dir`, default `<project>/work/<run>/` (ignored by git; owner decision).
+- If the free disk space is less than the estimated size of the parts, the operation refuses before it starts and states both figures.
+
+```rust
+pub struct ZipInputSettings { pub entries: Vec<String>, pub max_record_bytes: u64 }
+
+pub enum EntrySkip { NotText, Encrypted, UnsupportedMethod(u16), NestedArchive, NoPatternMatch, Damaged(String) }
+
+pub struct EntryReport { pub path: String, pub records: u64, pub skipped: Option<EntrySkip> }
+
+pub struct ArchiveSummary { pub input: InputSummary, pub entries: Vec<EntryReport> }
+
+impl ZipInput {
+    pub fn open(path: &Path, settings: &ZipInputSettings) -> Result<Self, L2dError>;
+    // Yields frames of at most the planned batch rows; the position names entry and line.
+    pub fn batches<'a>(&'a mut self, budget: &'a mut MemoryBudget) -> impl Iterator<Item = Result<LogsFrame, L2dError>> + 'a;
+    pub fn finish(self) -> ArchiveSummary;
+}
+```
+- This is a sketch; the implementing task settles the exact signatures and records deviations.
 
 #### ProjectPaths, RunRecord, errors
 
@@ -809,7 +861,7 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 - The guarantee assumes new logs are exchangeable with the calibration logs of the same stratum. The tool states this in its output; `l2d shift` is the check the analyst can run.
 
 **Build or adopt**
-- Adopt the `conformal-prediction` crate (project decision). `conformal.rs` wraps it behind the contract below and adds only what the crate does not provide for this contract (for example the per-label and per-group strata, the refusal rule, or saving and loading).
+- Build (owner decision of 2026-11-12). Task 1.13 adopted the `conformal-prediction` crate and found that it contributes only the storage of a list's scores and the p-value count by linear scan, while linking `lean-agentic`, `rand` 0.8 and a second `ndarray` into the tool. Task 1.18 replaces it with own code in `conformal.rs` behind the unchanged contract below: the p-value count on the sorted lists the calibration already saves, by binary search. Label sets, revisions and saved calibrations must come out identical to those of 1.13.
 - The task that introduces it confirms on the reference host that the crate links no network client and returns identical results on repeat, and records which parts of the method the crate covers.
 - Calibration inputs are prepared as Polars frames (ratio, label, group) and grouped there.
 
