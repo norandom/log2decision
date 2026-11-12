@@ -5,14 +5,17 @@
 //!
 //! ```text
 //! $env:L2D_RUNTIME_DIR = "D:\Source\log2decision\runtime\ryzenai"   # default: <workspace>/runtime/ryzenai
-//! $env:L2D_GATE_STRICT = "1"                                        # a skip or a Python on PATH fails
 //! cargo test -p l2d-encoder --test npu_gate -- --ignored --nocapture
 //! ```
 //!
-//! Without the runtime directory or without an AMD NPU the test prints why it is skipped
-//! and passes, unless `L2D_GATE_STRICT` is set. With both present, every failure is a
-//! failure: the provider is registered with `error_on_failure`, and zero nodes on the NPU
-//! fail the test.
+//! The test is asked for explicitly, so it fails when it cannot prove what it is for:
+//! without the runtime directory or one of its files, without an AMD NPU device, and with
+//! a Python interpreter on `PATH` (the proof is "no Python at run time"). Only with
+//! `L2D_GATE_ALLOW_SKIP=1` does it instead print `SKIPPED` with the reason and pass
+//! (missing runtime files or device), or report the interpreter and go on (Python). With
+//! the runtime and the device present, every failure is a failure: the provider is
+//! registered with `error_on_failure`, zero nodes on the NPU fail the test, and so does an
+//! output that is the CPU provider's.
 //!
 //! This file holds everything the proof needs and nothing of the encoder itself:
 //! `RuntimeFiles::check` is task 2.3, the session is task 2.6.
@@ -62,16 +65,21 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-fn strict() -> bool {
-    std::env::var_os("L2D_GATE_STRICT").is_some_and(|value| value != "0" && !value.is_empty())
+/// The opt-in that turns "the gate cannot run here" from a failure into a skip.
+const ALLOW_SKIP_VARIABLE: &str = "L2D_GATE_ALLOW_SKIP";
+
+fn skip_allowed() -> bool {
+    std::env::var_os(ALLOW_SKIP_VARIABLE).is_some_and(|value| value != "0" && !value.is_empty())
 }
 
+/// The gate cannot run on this host: a failure, unless a skip was asked for.
 fn skip(reason: &str) {
-    println!("npu_gate: SKIPPED: {reason}");
     assert!(
-        !strict(),
-        "L2D_GATE_STRICT is set and the gate could not run: {reason}"
+        skip_allowed(),
+        "the gate could not run: {reason} (set {ALLOW_SKIP_VARIABLE}=1 to skip instead of \
+         failing)"
     );
+    println!("npu_gate: SKIPPED ({ALLOW_SKIP_VARIABLE} is set): {reason}");
 }
 
 /// Python interpreters reachable through `PATH`. A zero-length file is a Windows app
@@ -104,9 +112,19 @@ struct NpuDevice {
     driver_version: String,
 }
 
-/// The AMD NPU as the Windows configuration manager reports it: a present device of the
-/// class `ComputeAccelerator` with AMD's PCI vendor id.
-fn npu_device() -> Result<Option<NpuDevice>, String> {
+impl NpuDevice {
+    /// A PCI device of AMD. The device id is not compared: the NPU of the reference host
+    /// is `DEV_17F0`, other processor generations have other ids.
+    fn is_amd(&self) -> bool {
+        self.instance_id
+            .to_ascii_uppercase()
+            .starts_with(AMD_PCI_PREFIX)
+    }
+}
+
+/// Every present device of the class `ComputeAccelerator`, as the Windows configuration
+/// manager reports it, in the manager's order.
+fn compute_accelerators() -> Result<Vec<NpuDevice>, String> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
         CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_PRESENT, CM_Get_Device_ID_List_SizeW,
         CM_Get_Device_ID_ListW, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CR_SUCCESS,
@@ -133,11 +151,9 @@ fn npu_device() -> Result<Option<NpuDevice>, String> {
     if status != CR_SUCCESS {
         return Err(format!("CM_Get_Device_ID_ListW failed with {status}"));
     }
+    let mut devices = Vec::new();
     for id in list.split(|unit| *unit == 0).filter(|id| !id.is_empty()) {
         let instance_id = String::from_utf16_lossy(id);
-        if !instance_id.to_ascii_uppercase().starts_with(AMD_PCI_PREFIX) {
-            continue;
-        }
         let id_z: Vec<u16> = id.iter().copied().chain(Some(0)).collect();
         let mut node = 0u32;
         // SAFETY: `id_z` is a NUL-terminated device instance id.
@@ -152,13 +168,13 @@ fn npu_device() -> Result<Option<NpuDevice>, String> {
             .map_err(|error| format!("description of {instance_id}: {error}"))?;
         let driver_version = device_string(node, &DEVPKEY_Device_DriverVersion)
             .map_err(|error| format!("driver version of {instance_id}: {error}"))?;
-        return Ok(Some(NpuDevice {
+        devices.push(NpuDevice {
             instance_id,
             description,
             driver_version,
-        }));
+        });
     }
-    Ok(None)
+    Ok(devices)
 }
 
 /// A string property of a device node.
@@ -200,8 +216,7 @@ fn device_string(
     Ok(String::from_utf16_lossy(&units[..end]))
 }
 
-/// Node counts of the provider's placement report. `cpu_nodes` is every node that is not
-/// on the NPU.
+/// Node counts of the provider's placement report.
 #[derive(Debug, PartialEq)]
 struct Placement {
     npu_nodes: u64,
@@ -212,7 +227,8 @@ struct Placement {
 /// Counts the nodes of the provider's report by device. `nodeStat` has one entry per node
 /// of the model with its `device` (`NPU` or `CPU`); `deviceStat` has the totals per device
 /// (`all`, `NPU`, and `VITIS_EP_CPU` for the nodes the provider leaves to the CPU). The
-/// nodes are counted from `nodeStat` and must agree with the totals.
+/// nodes are counted from `nodeStat` and must agree with each total; a device of another
+/// name is an error, not a CPU node, and the two devices must add up to the total.
 fn placement_from_report(report: &str) -> Result<Placement, String> {
     let json: serde_json::Value =
         serde_json::from_str(report).map_err(|error| format!("report is not JSON: {error}"))?;
@@ -223,10 +239,16 @@ fn placement_from_report(report: &str) -> Result<Placement, String> {
     };
     let nodes = list("nodeStat")?;
     let mut npu_nodes = 0u64;
+    let mut cpu_nodes = 0u64;
     for (index, node) in nodes.iter().enumerate() {
         match node.get("device").and_then(|device| device.as_str()) {
             Some("NPU") => npu_nodes += 1,
-            Some(_) => {}
+            Some("CPU") => cpu_nodes += 1,
+            Some(other) => {
+                return Err(format!(
+                    "node {index} of `nodeStat` is on the unknown device `{other}`"
+                ));
+            }
             None => return Err(format!("node {index} of `nodeStat` has no device")),
         }
     }
@@ -238,19 +260,56 @@ fn placement_from_report(report: &str) -> Result<Placement, String> {
             .find(|entry| entry.get("name").and_then(|name| name.as_str()) == Some(device))
             .and_then(|entry| entry.get("nodeNum").and_then(|nodes| nodes.as_u64()))
     };
-    if total("all") != Some(all_nodes) || total("NPU").unwrap_or(0) != npu_nodes {
+    // A device without nodes may be left out of `deviceStat`.
+    let (npu_total, cpu_total) = (
+        total("NPU").unwrap_or(0),
+        total("VITIS_EP_CPU").unwrap_or(0),
+    );
+    if total("all") != Some(all_nodes)
+        || npu_total != npu_nodes
+        || cpu_total != cpu_nodes
+        || npu_total + cpu_total != all_nodes
+    {
         return Err(format!(
-            "`nodeStat` ({npu_nodes} of {all_nodes} nodes on the NPU) disagrees with \
-             `deviceStat` (all {:?}, NPU {:?})",
+            "`nodeStat` ({npu_nodes} nodes on the NPU, {cpu_nodes} on the CPU, {all_nodes} in \
+             all) disagrees with `deviceStat` (all {:?}, NPU {:?}, VITIS_EP_CPU {:?})",
             total("all"),
-            total("NPU")
+            total("NPU"),
+            total("VITIS_EP_CPU")
         ));
     }
     Ok(Placement {
         npu_nodes,
-        cpu_nodes: all_nodes - npu_nodes,
+        cpu_nodes,
         all_nodes,
     })
+}
+
+/// The provider name ONNX Runtime uses for the Vitis AI provider.
+const VITIS_PROVIDER: &str = "VitisAIExecutionProvider";
+
+/// Counts the executed nodes of an ONNX Runtime profile by provider. The profile is a
+/// JSON list of events; an event of the category `Node` whose name ends in `_kernel_time`
+/// is one execution of one node, and its `args.provider` names the provider.
+fn executed_by_provider(profile: &str) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(profile).map_err(|error| format!("profile is not JSON: {error}"))?;
+    let events = json.as_array().ok_or("profile is not a list of events")?;
+    let mut counts = std::collections::BTreeMap::new();
+    for event in events {
+        let text = |key: &str| event.get(key).and_then(|value| value.as_str());
+        if text("cat") != Some("Node") || !text("name").is_some_and(|n| n.ends_with("_kernel_time"))
+        {
+            continue;
+        }
+        let provider = event
+            .get("args")
+            .and_then(|args| args.get("provider"))
+            .and_then(|provider| provider.as_str())
+            .ok_or(format!("node event {:?} names no provider", text("name")))?;
+        *counts.entry(provider.to_string()).or_insert(0) += 1;
+    }
+    Ok(counts)
 }
 
 #[test]
@@ -286,6 +345,37 @@ fn the_placement_is_read_from_a_provider_report() {
     let disagreeing = r#"{"deviceStat":[{"name":"all","nodeNum":2},{"name":"NPU","nodeNum":2}],
         "nodeStat":[{"device":"NPU"},{"device":"CPU"}]}"#;
     assert!(placement_from_report(disagreeing).is_err());
+    // The CPU total is checked as well: here `all` and `NPU` agree with the nodes, but
+    // the two devices do not add up to the total.
+    let cpu_total_wrong = r#"{"deviceStat":[{"name":"all","nodeNum":2},{"name":"NPU","nodeNum":1},
+        {"name":"VITIS_EP_CPU","nodeNum":0}],
+        "nodeStat":[{"device":"NPU"},{"device":"CPU"}]}"#;
+    let error = placement_from_report(cpu_total_wrong).unwrap_err();
+    assert!(error.contains("VITIS_EP_CPU Some(0)"), "{error}");
+    let cpu_total_absent = r#"{"deviceStat":[{"name":"all","nodeNum":2},{"name":"NPU","nodeNum":1}],
+        "nodeStat":[{"device":"NPU"},{"device":"CPU"}]}"#;
+    assert!(placement_from_report(cpu_total_absent).is_err());
+    // A device the parser does not know is named, not counted as CPU.
+    let unknown_device = r#"{"deviceStat":[{"name":"all","nodeNum":2},{"name":"NPU","nodeNum":1},
+        {"name":"VITIS_EP_CPU","nodeNum":1}],
+        "nodeStat":[{"device":"NPU"},{"device":"GPU"}]}"#;
+    let error = placement_from_report(unknown_device).unwrap_err();
+    assert!(error.contains("unknown device `GPU`"), "{error}");
+
+    // The profile: only executed nodes count, each under its provider.
+    let profile = r#"[
+        {"cat":"Session","name":"model_loading_uri","args":{}},
+        {"cat":"Node","name":"a_fence_before","args":{"provider":"VitisAIExecutionProvider"}},
+        {"cat":"Node","name":"a_kernel_time","args":{"provider":"VitisAIExecutionProvider"}},
+        {"cat":"Node","name":"b_kernel_time","args":{"provider":"VitisAIExecutionProvider"}},
+        {"cat":"Node","name":"c_kernel_time","args":{"provider":"CPUExecutionProvider"}},
+        {"cat":"Session","name":"model_run","args":{}}]"#;
+    let executed = executed_by_provider(profile).unwrap();
+    assert_eq!(executed.get(VITIS_PROVIDER), Some(&2));
+    assert_eq!(executed.get("CPUExecutionProvider"), Some(&1));
+    assert_eq!(executed.len(), 2);
+    assert!(executed_by_provider(r#"[{"cat":"Node","name":"a_kernel_time","args":{}}]"#).is_err());
+    assert!(executed_by_provider("{}").is_err());
     assert!(placement_from_report(r#"{"deviceStat":[]}"#).is_err());
     assert!(placement_from_report(r#"{"nodeStat":[{"opType":"Conv"}],"deviceStat":[]}"#).is_err());
     assert!(placement_from_report("{}").is_err());
@@ -328,7 +418,7 @@ fn infer(session: &mut Session, input_name: &str, shape: &[i64], data: &[f32]) -
 #[test]
 #[ignore = "hardware gate: needs the AMD runtime files and the NPU; run on request"]
 fn the_spike_model_runs_on_the_npu_through_ort() {
-    // --- Preconditions: skip, with the reason, where the hardware proof cannot run. ---
+    // --- Preconditions: where the hardware proof cannot run, fail (or skip on request). ---
     let runtime_dir = std::env::var_os("L2D_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("runtime").join("ryzenai"));
@@ -361,19 +451,37 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
             missing.join(", ")
         ));
     }
-    let device = match npu_device() {
-        Ok(Some(device)) => device,
-        Ok(None) => {
-            return skip(
-                "no present AMD device of the class ComputeAccelerator: this host has no NPU \
-                 or its driver is not installed",
-            );
-        }
-        Err(error) => panic!("the Windows device query failed: {error}"),
+    let accelerators = compute_accelerators()
+        .unwrap_or_else(|error| panic!("the Windows device query failed: {error}"));
+    println!(
+        "npu_gate: present devices of the class ComputeAccelerator: {}",
+        accelerators.len()
+    );
+    for (index, found) in accelerators.iter().enumerate() {
+        println!(
+            "npu_gate:   {}. {} ({}), driver {}{}",
+            index + 1,
+            found.description,
+            found.instance_id,
+            found.driver_version,
+            if found.is_amd() {
+                ""
+            } else {
+                " - not an AMD device, passed over"
+            }
+        );
+    }
+    let Some(device) = accelerators.iter().find(|found| found.is_amd()) else {
+        return skip(
+            "no present AMD device of the class ComputeAccelerator: this host has no NPU or \
+             its driver is not installed",
+        );
     };
     println!(
-        "npu_gate: NPU device: {} ({})",
-        device.description, device.instance_id
+        "npu_gate: NPU device taken (the first AMD one of {}): {} ({})",
+        accelerators.iter().filter(|found| found.is_amd()).count(),
+        device.description,
+        device.instance_id
     );
     println!("npu_gate: NPU driver version: {}", device.driver_version);
     assert!(
@@ -389,8 +497,9 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         aliases
     );
     assert!(
-        !(strict() && !pythons.is_empty()),
-        "L2D_GATE_STRICT is set and PATH has a Python interpreter: {pythons:?}"
+        pythons.is_empty() || skip_allowed(),
+        "PATH has a Python interpreter, so this run does not show that none is needed: \
+         {pythons:?} (run with a PATH without it, or set {ALLOW_SKIP_VARIABLE}=1 to go on)"
     );
 
     // --- The fixture is the spike's model, byte for byte. ---
@@ -437,9 +546,14 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         "npu_gate: provider cache {} (emptied: the model is compiled now)",
         model_cache.display()
     );
-    // SAFETY: the variable is set before the runtime is loaded and before this test
-    // starts any thread of its own; the only other test of this binary does not read
-    // the environment.
+    // SAFETY: changing the environment is unsound only while another thread reads or
+    // writes it. The variable is set before the runtime is loaded and before this test
+    // starts any thread of its own. Under `--include-ignored` the test harness may run the
+    // other test of this binary, the parser test, on another thread at the same moment;
+    // that is harmless because that test and everything it calls (`serde_json` on string
+    // literals, assertions) never touch the environment, and the harness itself reads its
+    // variables before it starts the tests. A test added to this file that reads or sets
+    // an environment variable would break this.
     unsafe { std::env::set_var(REPORT_VARIABLE, REPORT_FILE) };
 
     // --- Load ONNX Runtime from the runtime directory and open the model on the NPU. ---
@@ -457,15 +571,21 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
     );
     println!("npu_gate: runtime build: {}", ort::info());
 
-    let open_on_npu = || {
+    let open_on_npu = |profile: Option<&Path>| {
         let provider = Vitis::default()
             .with_cache_dir(cache_dir.display())
             .with_cache_key(&cache_key)
             .with_cache_in_memory(false)
             .build()
             .error_on_failure();
-        Session::builder(&environment)
-            .unwrap_or_else(|error| panic!("creating the session builder failed: {error}"))
+        let mut builder = Session::builder(&environment)
+            .unwrap_or_else(|error| panic!("creating the session builder failed: {error}"));
+        if let Some(prefix) = profile {
+            builder = builder
+                .with_profiling(prefix)
+                .unwrap_or_else(|error| panic!("enabling profiling failed: {error}"));
+        }
+        builder
             .with_execution_providers([provider])
             .unwrap_or_else(|error| {
                 panic!("registering the Vitis AI execution provider failed: {error}")
@@ -475,7 +595,7 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
                 panic!("opening the model on the Vitis AI provider failed: {error}")
             })
     };
-    let mut session = open_on_npu();
+    let mut session = open_on_npu(None);
     println!(
         "npu_gate: session ready after {:.2} s (runtime load, provider registration, \
          compilation)",
@@ -601,7 +721,11 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
     let report_written = written(&report_path);
     drop(session);
     let reopened = Instant::now();
-    let mut session = open_on_npu();
+    // This session is profiled by ONNX Runtime: the profile names, for every node that
+    // was executed, the provider that executed it. That is run-time evidence, where the
+    // report above is the compiler's plan.
+    let profile_prefix = cache_dir.join(format!("{cache_key}-profile"));
+    let mut session = open_on_npu(Some(&profile_prefix));
     let reopen = reopened.elapsed();
     let from_cache = infer(&mut session, &input_name, &shape, &data);
     println!(
@@ -611,7 +735,17 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         from_cache == first,
         written(&report_path) != report_written
     );
+    let profile_path = session
+        .end_profiling()
+        .unwrap_or_else(|error| panic!("ending the profile failed: {error}"));
     drop(session);
+    let profile = std::fs::read_to_string(&profile_path)
+        .unwrap_or_else(|error| panic!("reading the profile {profile_path}: {error}"));
+    let executed = executed_by_provider(&profile)
+        .unwrap_or_else(|error| panic!("the profile {profile_path}: {error}"));
+    println!("npu_gate: executed nodes by provider, from ONNX Runtime's profile: {executed:?}");
+    std::fs::remove_file(&profile_path)
+        .unwrap_or_else(|error| panic!("removing {profile_path}: {error}"));
 
     // --- The same model on the CPU provider of the same runtime, for comparison. ---
     let mut cpu = Session::builder(&environment)
@@ -647,12 +781,27 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         placement.npu_nodes > 0,
         "GATE FAILED: the provider placed 0 nodes on the NPU ({placement:?})"
     );
+    // Requirement 4.6: the NPU and the CPU agree to a cosine of at least 0.99 per vector.
     assert!(
-        lowest > 0.95,
-        "the NPU output differs from the CPU output of the same model (lowest cosine {lowest})"
+        lowest >= 0.99,
+        "the NPU output is too far from the CPU output of the same model (lowest cosine \
+         {lowest}, required 0.99)"
+    );
+    // And they are not the same numbers: the NPU computes in its own 8-bit arithmetic, so
+    // a bit-identical output would mean the "NPU" session was served by the CPU provider.
+    assert!(
+        first != on_cpu,
+        "the NPU session's output is bit-identical to the CPU provider's: the model did \
+         not run on the NPU"
+    );
+    let on_vitis = executed.get(VITIS_PROVIDER).copied().unwrap_or(0);
+    assert!(
+        on_vitis > 0,
+        "ONNX Runtime's profile attributes no executed node to {VITIS_PROVIDER}: {executed:?}"
     );
     println!(
-        "npu_gate: PASSED: {} nodes on the NPU, {} on the CPU, driver {}",
+        "npu_gate: PASSED: {} nodes on the NPU, {} on the CPU, {on_vitis} executed nodes \
+         attributed to {VITIS_PROVIDER}, driver {}",
         placement.npu_nodes, placement.cpu_nodes, device.driver_version
     );
 }

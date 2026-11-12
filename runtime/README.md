@@ -11,10 +11,24 @@ not part of the repository and is not downloaded by the build.
 
 ## Required files in `runtime/ryzenai/`
 
-AMD Ryzen AI 1.9, as shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (AMD,
-MIT licence; file versions as the DLLs report them). All five must be present. Proven
-by the hardware gate of task 2.2 on 2026-11-12 with exactly these five files in the
-directory.
+AMD Ryzen AI 1.9, as shipped in the Python wheel `onnxruntime-vitisai` 1.30.0 (author
+Advanced Micro Devices, Inc.; file versions as the DLLs report them). All five must be
+present. Proven by the hardware gate of task 2.2 on 2026-11-12 with exactly these five
+files in the directory.
+
+Licence, as the wheel states it (the terms were not reviewed for this project):
+
+- The wheel's metadata declares `License-Expression: MIT`.
+- Its licence file (`.dist-info/licenses/LICENSE.txt`) says something else: "By using
+  this wheel file, you agree to the EULAs given below: AMD EULA and Third Party
+  Notices - https://ryzenai.docs.amd.com/en/latest/licenses.html". So the AMD DLLs
+  are used under AMD's end-user licence, not simply under MIT.
+- For ONNX Runtime itself the wheel ships `onnxruntime/LICENSE` (MIT) and
+  `onnxruntime/ThirdPartyNotices.txt` (344 KB).
+
+This repository does not redistribute the DLLs: `runtime/ryzenai/` is ignored by git,
+and each user obtains the files from AMD's package, under AMD's terms, and places them
+here.
 
 | File | Bytes | File version | SHA-256 |
 | --- | ---: | --- | --- |
@@ -69,8 +83,11 @@ files (the gate test reads it; default `runtime/ryzenai/` of the workspace).
 ## Checking
 
     $env:L2D_RUNTIME_DIR = "<path>\runtime\ryzenai"   # only if not the default
-    $env:L2D_GATE_STRICT = "1"
     cargo test -p l2d-encoder --test npu_gate -- --ignored --nocapture
+
+The test fails when the runtime files or the NPU device are missing, and when a Python
+interpreter is on `PATH`. With `L2D_GATE_ALLOW_SKIP=1` it prints `SKIPPED` and passes
+in the first two cases and only reports the interpreter in the third.
 
 The test compiles the spike's 8-bit model for the NPU, runs batches of 32, and prints
 the NPU driver version and the number of model nodes placed on the NPU and on the CPU.
