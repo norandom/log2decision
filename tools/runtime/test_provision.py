@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import io
 import json
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import provision
 
@@ -214,6 +217,59 @@ class ProvisionTests(Scratch):
         data["format"] = 2
         self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
         self.assert_refused("format 2")
+
+    def test_a_manifest_that_lacks_a_key_is_refused_by_name(self) -> None:
+        for key in ("release", "source", "files"):
+            data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            del data[key]
+            self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+            self.assert_refused("lacks the key", repr(key))
+            self.write_manifest()
+        data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        del data["source"]["wheel"]
+        del data["files"][0]["sha256"]
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_refused("lacks the key")
+        data["files"] = [{"name": "a.dll", "bytes": "many", "sha256": "0", "version": "1"}]
+        data["source"]["wheel"] = WHEEL
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assert_refused("not of the expected shape")
+        # From the command line: one line and exit code 1, no traceback.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = provision.main(["--manifest", str(self.manifest_path)])
+        self.assertEqual(code, 1)
+        self.assertTrue(stderr.getvalue().startswith("provision: refused: "))
+        self.assertEqual(stderr.getvalue().count("\n"), 1)
+
+    def test_a_failed_copy_ends_with_one_line_and_exit_code_2(self) -> None:
+        def failing_copy(source: object, destination: object) -> None:
+            Path(str(destination)).write_bytes(b"half")
+            raise OSError(28, "No space left on device")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(provision.shutil, "copyfile", failing_copy),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = provision.main(
+                [
+                    "--manifest", str(self.manifest_path),
+                    "--site-packages", str(self.site_packages),
+                    "--target", str(self.target),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertTrue(stderr.getvalue().startswith("provision: failed: "), stderr.getvalue())
+        self.assertIn("No space left", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        # Neither a half file nor a record is left.
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_the_record_says_it_was_written_by_provisioning(self) -> None:
+        self.run_provision()
+        receipt = json.loads((self.target / provision.RECEIPT_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(receipt["written_by"], "provisioning")
 
     def test_the_command_line_reports_a_refusal_with_exit_code_1(self) -> None:
         code = provision.main(

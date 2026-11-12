@@ -167,6 +167,77 @@ fn an_amd_device_with_an_unknown_id_is_taken_and_marked_as_such() {
     assert!(text.contains("Another AMD accelerator"), "{text}");
 }
 
+/// A run record built from the accessors must be able to tell the two matches apart, and
+/// the summary line of the log must not call an unknown AMD device's driver the NPU's.
+#[test]
+fn how_the_device_was_matched_is_in_the_accessors_and_in_the_summary_line() {
+    let known = NpuStatus::from_devices(vec![device(STRIX, "NPU", "32.0.20102.4480")]);
+    assert_eq!(known.matched(), Some(NpuMatch::KnownDevice));
+    assert_eq!(
+        known.taken().map(|taken| taken.instance_id.as_str()),
+        Some(STRIX)
+    );
+    assert_eq!(
+        known.log_lines().last().map(String::as_str),
+        Some("NPU driver version: 32.0.20102.4480")
+    );
+
+    let vendor_only = NpuStatus::from_devices(vec![device(
+        "PCI\\VEN_1022&DEV_ABCD&SUBSYS_0\\1",
+        "Some AMD accelerator",
+        "1.0.0.0",
+    )]);
+    assert_eq!(vendor_only.matched(), Some(NpuMatch::AmdVendorOnly));
+    let lines = vendor_only.log_lines();
+    let summary = lines.last().unwrap();
+    assert!(summary.ends_with(": 1.0.0.0"), "{summary}");
+    assert!(summary.contains("not a known NPU device id"), "{summary}");
+    assert!(!summary.starts_with("NPU driver version"), "{summary}");
+
+    let absent = NpuStatus::from_devices(Vec::new());
+    assert_eq!(absent.matched(), None);
+    assert_eq!(absent.taken(), None);
+}
+
+/// One device's missing property does not end the query: the device is listed with
+/// "unknown" and can still be taken.
+#[test]
+fn a_device_without_a_readable_property_is_listed_as_unknown() {
+    let no_driver = ComputeAccelerator::from_properties(STRIX.into(), Some("NPU".into()), None);
+    assert_eq!(no_driver.description, "NPU");
+    assert_eq!(no_driver.driver_version, "unknown");
+    let nothing = ComputeAccelerator::from_properties("ROOT\\X\\0".into(), None, Some("  ".into()));
+    assert_eq!(nothing.description, "unknown");
+    assert_eq!(nothing.driver_version, "unknown");
+    let whole = ComputeAccelerator::from_properties(
+        STRIX.into(),
+        Some("NPU".into()),
+        Some("32.0.20102.4480".into()),
+    );
+    assert_eq!(whole, device(STRIX, "NPU", "32.0.20102.4480"));
+
+    let status = NpuStatus::from_devices(vec![nothing, no_driver]);
+    assert!(status.is_present());
+    assert_eq!(status.matched(), Some(NpuMatch::KnownDevice));
+    // Present, but no driver version to put into a run record.
+    assert_eq!(status.driver_version(), None);
+    let text = status.log_lines().join("\n");
+    assert!(
+        text.contains("unknown (ROOT\\X\\0), driver unknown"),
+        "{text}"
+    );
+    assert!(text.contains("NPU driver version: unknown"), "{text}");
+}
+
+/// A description longer than the buffer comes back cut at the buffer, not as a failure.
+#[test]
+fn a_property_longer_than_the_buffer_is_cut_at_the_buffer() {
+    let long: Vec<u16> = "d".repeat(600).encode_utf16().collect();
+    let buffer = &long[..511];
+    // The call reports the size of the whole value; only the buffer is read.
+    assert_eq!(string_from_property(buffer, 1202), "d".repeat(511));
+}
+
 /// The system call itself: on any host it answers, with a device or with absence.
 #[test]
 fn the_query_answers_on_this_host() {

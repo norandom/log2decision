@@ -311,13 +311,13 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
     };
     println!(
         "npu_gate: runtime files of AMD Ryzen AI {} (ONNX Runtime {}) in {}: {} hashed in \
-         {:.2} s, provisioning record: {}",
+         {:.2} s; record: {}",
         files.release,
         files.onnxruntime,
         files.dir.display(),
         files.hashed.len(),
         started.elapsed().as_secs_f64(),
-        files.provisioned
+        files.record.describe()
     );
     let runtime_dir = runtime_dir
         .canonicalize()
@@ -338,8 +338,8 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
         return skip("no AMD NPU device on this host (see the device lines above)");
     };
     assert!(
-        !device.driver_version.is_empty(),
-        "the driver version is empty"
+        npu.driver_version().is_some(),
+        "the driver version of the NPU is not known"
     );
 
     let (pythons, aliases) = python_on_path();

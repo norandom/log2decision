@@ -51,14 +51,15 @@ of them, removed): `DirectML.dll`, `onnxruntime_providers_ryzenai.dll`,
 Python module `onnxruntime_pybind11_state.pyd`. No `vaip_config.json` and no `.xclbin`
 file is passed to the provider.
 
-## Where the files come from on the reference host
+## Where the files come from
 
-Copied unchanged (hashes compared) from
+AMD's wheel `onnxruntime-vitisai` 1.30.0 of the index for Ryzen AI 1.9.0 (section
+"Provisioning"). Python is only the packaging the files arrive in; nothing of Python is
+loaded at run time. On the reference host the files of `runtime/ryzenai/` were copied by
+hand on 2026-11-12, unchanged, from the environment that pip had installed that wheel
+into for the spike of 2026-11-11:
 
     D:\Source\memguard_alpha\tools\oga-venv\Lib\site-packages\onnxruntime\capi\
-
-which is the Python environment the spike of 2026-11-11 ran in. Python is only the
-packaging the files arrived in; nothing of Python is loaded at run time.
 
 ## Another location: `L2D_RUNTIME_DIR`
 
@@ -68,6 +69,10 @@ files are 714 MB and the same for every checkout on a host, so one copy can serv
 several working copies. It is the only location an environment variable moves:
 `models/`, `data/` and the provider's cache `runtime/cache/` stay in the project. The
 directory is checked against the same manifest wherever it is.
+
+Precedence: a directory given by an option of a command, then `L2D_RUNTIME_DIR`, then
+`runtime/ryzenai/`. A relative value is relative to the current directory of the
+process, not to the project.
 
 ## Provisioning (development step, needs `uv`)
 
@@ -93,13 +98,15 @@ refusal names what was found and what was expected and changes nothing. Its test
 
 State of 2026-11-12: `pypi.amd.com` answered every request from the reference host with
 403 "Access Denied" (the URL above and the 1.8.0 URL of the sibling project alike), so
-the wheel was not fetched through this environment and there is no `tools/runtime/uv.lock`
-yet. That the index serves the wheel under that URL is known from pip's cache on the host:
-it holds the download of 2026-11-08 under the key of exactly that URL (307,779,608 bytes,
-SHA-256 `0f4b98625c4217832d4001acd4beb4306e65123c679afc5e5bb3282fc9064c8b`), and the five
-files inside it have the sizes and hashes of the table. uv does not read pip's cache, so
-`uv lock` has to wait for the index and should then record that hash. The step itself was run with `--site-packages` pointing at that
-environment and `--accept-unrecorded-origin` (pip records no URL for a package from an
+the wheel was not fetched through this environment, there is no `tools/runtime/uv.lock`
+yet, and the command above has not run by its default route. That the index serves the
+wheel under that URL is known from pip's cache on the host: it holds the download of
+2026-11-08 under the key of exactly that URL (307,779,608 bytes, SHA-256
+`0f4b98625c4217832d4001acd4beb4306e65123c679afc5e5bb3282fc9064c8b`), and the five files
+inside it have the sizes and hashes of the table. uv does not read pip's cache, so
+`uv lock` has to wait for the index and should then record that hash. The step itself
+was run with `--site-packages` pointing at the environment named under "Where the files
+come from" and `--accept-unrecorded-origin` (pip records no URL for a package from an
 index) into a scratch directory; the five files it placed are byte for byte those of
 `runtime/ryzenai/`.
 
@@ -120,29 +127,41 @@ wheel's files), so they do not pass the check against this manifest.
 ## Checking
 
 The tool checks the directory before it loads anything from it
-(`l2d_encoder::RuntimeFiles::check`):
+(`l2d_encoder::RuntimeFiles::check`). The rule: a file is used without being hashed only
+when the record `provisioned.json` in the directory says it was hashed with the
+modification time it has now.
 
-- always (0.2 to 1 ms): the directory exists; every file of the manifest is there and
-  has its size; no other DLL is in the directory; a `provisioned.json`, if there is one,
-  names release 1.9.0; and a file whose modification time differs from the one in
-  `provisioned.json` is hashed;
-- on request (the full check, 0.7 s): the SHA-256 of every file.
+- At every start: the directory exists; every file of the manifest is there, is a file
+  and has its size; no other DLL is in the directory; the record, if there is one, has
+  a known format and names release 1.9.0; a file whose modification time differs from
+  the record, or that the record does not name, is hashed. With a record and unchanged
+  files this takes 0.3 to 2.2 ms.
+- In a directory without a record (filled by hand): every file is hashed (0.84 s), and
+  when all are right the check writes the record itself, marked `"written_by": "check"`
+  and without a source, so that later starts are fast. If the directory cannot be
+  written to, every start hashes, and the tool says so.
+- On request (the full check, 0.84 to 0.89 s): the SHA-256 of every file, record or not.
+
+The record of the provisioning step (`"written_by": "provisioning"`, with the source)
+and the record of the check are used and invalidated alike.
 
 A missing file is reported with its expected path (exit code 3). A file of the wrong
-size or content, a DLL that is not in the table, and a directory provisioned for another
-release are refused (exit code 4); the message names each file, what was found and what
-was expected, and the file version a wrong DLL reports. In a directory without
-`provisioned.json` a file replaced by another of the same size is found by the full
-check only.
+size or content, a folder in the place of a file, a DLL that is not in the table, and a
+directory whose record names another release or format are refused (exit code 4); the
+message names each file, what was found and what was expected, and the file version a
+wrong DLL reports. Not found at a start: a file replaced by another of the same size
+whose modification time was set back to the recorded one, and a record written by hand;
+the full check finds both.
 
     cargo test -p l2d-encoder --test runtime_files -- --ignored --nocapture
 
-runs both checks against the directory and prints their times. The hardware gate:
+runs the checks against the directory and prints their times (in a directory without a
+record it writes the record). The hardware gate:
 
     $env:L2D_RUNTIME_DIR = "<path>\runtime\ryzenai"   # only if not the default
     cargo test -p l2d-encoder --test npu_gate -- --ignored --nocapture
 
-The test runs the full file check first. It fails when the runtime files or the NPU device are missing, and when a Python
+The test runs the full file check first (and writes the record into a directory that has none). It fails when the runtime files or the NPU device are missing, and when a Python
 interpreter is on `PATH`. With `L2D_GATE_ALLOW_SKIP=1` it prints `SKIPPED` and passes
 in the first two cases and only reports the interpreter in the third.
 

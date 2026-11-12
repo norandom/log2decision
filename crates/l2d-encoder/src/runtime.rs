@@ -13,30 +13,41 @@
 //! Runtime), and because the runtime directory may lie outside the project
 //! ([`l2d_core::paths::RUNTIME_DIR_VARIABLE`]), where no tracked file is at hand.
 //!
-//! The provisioning step (`tools/runtime/provision.py`) writes a record of what it
-//! copied, [`RECEIPT_FILE`], into the runtime directory: the release and for each file
-//! its size, SHA-256 and modification time. A directory filled by hand has none.
+//! # The record in the directory
+//!
+//! [`RECEIPT_FILE`] in the runtime directory records what was verified there: the release
+//! and for each file its size, SHA-256 and modification time. It is written by the
+//! provisioning step (`tools/runtime/provision.py`), which also records where the files
+//! came from, or by this check after it hashed every file of a directory that had no
+//! record (marked `"written_by": "check"`, with no source). The check treats the two
+//! alike: it reads the release and the modification times and trusts none of the hashes.
 //!
 //! # What is checked when
 //!
-//! Always ([`CheckDepth::Fast`]; measured 0.16 to 1.0 ms on the reference host):
+//! The rule: a file is trusted without hashing only when a record says it was hashed
+//! with this modification time.
+//!
+//! Always ([`CheckDepth::Fast`]; measured 0.3 to 2.2 ms on the reference host when a record
+//! is there, 0.84 s for the one start that hashes and writes it):
 //! - the directory exists;
-//! - a provisioning record, if there is one, names the expected release;
-//! - every file of the manifest is present and has the expected size;
+//! - the record, if there is one, has a known format and names the expected release;
+//! - every file of the manifest is present, is a file and has the expected size;
 //! - no other DLL is in the directory;
-//! - a file whose modification time differs from the provisioning record is hashed.
+//! - a file whose modification time differs from the record, or that the record does not
+//!   name, is hashed;
+//! - without a record every file is hashed, and when all are right the record is written,
+//!   so that the next start is fast. If it cannot be written (a directory that is not
+//!   writable), every start hashes, and [`RuntimeFiles::record`] says so.
 //!
-//! On request ([`CheckDepth::Full`]; measured 0.7 s for the 714 MB of release 1.9.0, about
-//! 1 GB/s with the files in the file cache, and 24 s when `sha2` is compiled without
-//! optimization, which is why the workspace optimizes it in debug builds too): the
-//! SHA-256 of every file. Too slow for every start of a command-line tool, so it is not
-//! the default.
+//! On request ([`CheckDepth::Full`]): the SHA-256 of every file, record or not. Hashing
+//! the 714 MB of release 1.9.0 takes 0.7 to 0.9 s (about 1 GB/s with the files in the file
+//! cache; 24 s when `sha2` is compiled without optimization, which is why the workspace
+//! optimizes it in debug builds too).
 //!
-//! So a file that was replaced by another of the same size is found at once in a
-//! provisioned directory (its modification time changed), and by the full check in a
-//! directory without a provisioning record. Not found by the fast check: a replacement of
-//! the same size whose modification time was set back to the recorded one.
-
+//! So a directory filled by hand, for example from a package that has files of the same
+//! names and sizes but other content, is refused at its first use. Not found by the fast
+//! check: a replacement of the same size whose modification time was set back to the
+//! recorded one, and a record written by hand; the full check finds both.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -46,11 +57,15 @@ use l2d_core::L2dError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The record the provisioning step leaves in the runtime directory.
+/// The record of what was verified in the runtime directory, written by the provisioning
+/// step or by the check.
 pub const RECEIPT_FILE: &str = "provisioned.json";
 
 /// The manifest format this build reads.
 pub const MANIFEST_FORMAT: u32 = 1;
+
+/// The format of the record this build reads and writes.
+pub const RECEIPT_FORMAT: u32 = 1;
 
 /// How to fill the runtime directory, for messages.
 const PROVISION_HINT: &str = "see runtime/README.md (uv run --project tools/runtime python \
@@ -169,8 +184,9 @@ impl RuntimeManifest {
 /// How much of the runtime directory is verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckDepth {
-    /// Presence, sizes, no stray DLL, the release of the provisioning record; a hash only
-    /// for files that changed since they were provisioned. For every start of the tool.
+    /// Presence, sizes, no stray DLL, the release of the record; a hash only for files
+    /// that changed since the record was written, and for all files when there is no
+    /// record (which is then written). For every start of the tool.
     Fast,
     /// As `Fast`, and the SHA-256 of every file. For `l2d runtime check` and after the
     /// files were placed.
@@ -186,20 +202,56 @@ pub struct RuntimeFiles {
     pub release: String,
     /// The ONNX Runtime version of the files.
     pub onnxruntime: String,
-    /// Whether the directory holds a provisioning record ([`RECEIPT_FILE`]).
-    pub provisioned: bool,
+    /// File name of the library `ort` is initialised from: the manifest's first file.
+    pub library: String,
+    /// The record of the directory ([`RECEIPT_FILE`]): found, written now, or not writable.
+    pub record: RecordState,
     /// The files whose SHA-256 was computed and found right, in manifest order.
     pub hashed: Vec<String>,
 }
 
-/// What the provisioning step recorded; only what the check uses is read.
-#[derive(Debug, Deserialize)]
-struct Receipt {
-    release: String,
-    onnxruntime: String,
-    files: Vec<ReceiptFile>,
+/// The record of a checked directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordState {
+    /// Found; written by the provisioning step.
+    Provisioning,
+    /// Found; written by an earlier check that hashed every file.
+    Check,
+    /// There was none: every file was hashed and the record written by this check.
+    Written,
+    /// There was none and it could not be written: every file was hashed, and will be
+    /// again at every start until the directory is writable.
+    NotWritten { reason: String },
 }
 
+impl RecordState {
+    /// The state in words, for the tool's output.
+    pub fn describe(&self) -> String {
+        match self {
+            RecordState::Provisioning => "written by the provisioning step".into(),
+            RecordState::Check => "written by an earlier check".into(),
+            RecordState::Written => {
+                "there was none; every file was hashed and the record written".into()
+            }
+            RecordState::NotWritten { reason } => format!(
+                "there is none and it could not be written ({reason}); every file is hashed \
+                 at every start"
+            ),
+        }
+    }
+}
+
+/// The record in the directory; only what the check uses is read.
+#[derive(Debug, Deserialize)]
+struct Receipt {
+    format: u32,
+    release: String,
+    onnxruntime: String,
+    /// `provisioning` or `check`; a record without it is the provisioning step's.
+    #[serde(default)]
+    written_by: Option<String>,
+    files: Vec<ReceiptFile>,
+}
 #[derive(Debug, Deserialize)]
 struct ReceiptFile {
     name: String,
@@ -211,8 +263,9 @@ impl RuntimeFiles {
     /// runtime is loaded.
     ///
     /// A missing directory or file is [`L2dError::Missing`] with its expected path; files
-    /// of the wrong size or content, a stray DLL and a directory provisioned for another
-    /// release are [`L2dError::Refused`], and the reason names every finding.
+    /// of the wrong size or content, a stray DLL and a directory recorded for another
+    /// release are [`L2dError::Refused`], and the reason names every finding. In a
+    /// directory without a record every file is hashed and the record is written.
     pub fn check(dir: &Path, depth: CheckDepth) -> Result<Self, L2dError> {
         Self::check_against(RuntimeManifest::expected(), dir, depth)
     }
@@ -232,16 +285,28 @@ impl RuntimeFiles {
                 expected_at: dir.to_path_buf(),
             });
         }
+        if manifest.files.is_empty() {
+            return Err(L2dError::InvalidInput {
+                detail: "runtime manifest: it names no file".into(),
+            });
+        }
         let receipt = read_receipt(manifest, dir)?;
 
         let mut missing: Vec<&ManifestFile> = Vec::new();
         let mut wrong: Vec<String> = Vec::new();
         let mut hashed = Vec::new();
+        // What a record written by this check holds: the modification times the hashes
+        // were computed under, read before the files are.
+        let mut verified: Vec<serde_json::Value> = Vec::new();
         for file in &manifest.files {
             let path = dir.join(&file.name);
             let metadata = match std::fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => metadata,
-                _ => {
+                Ok(_) => {
+                    wrong.push(format!("{} is not a file", path.display()));
+                    continue;
+                }
+                Err(_) => {
                     missing.push(file);
                     continue;
                 }
@@ -256,18 +321,27 @@ impl RuntimeFiles {
                 ));
                 continue;
             }
-            let changed_since_provisioning = receipt.as_ref().is_some_and(|receipt| {
+            let modified = modified_unix_ns(&metadata);
+            // Trusted without a hash only when a record names the file with this
+            // modification time. Without a record nothing is.
+            let recorded_as_it_is = receipt.as_ref().is_some_and(|receipt| {
                 let recorded = receipt
                     .files
                     .iter()
                     .find(|recorded| recorded.name.eq_ignore_ascii_case(&file.name))
                     .map(|recorded| recorded.modified_unix_ns);
-                recorded.is_none() || recorded != modified_unix_ns(&metadata)
+                recorded.is_some() && recorded == modified
             });
-            if depth == CheckDepth::Full || changed_since_provisioning {
+            if depth == CheckDepth::Full || !recorded_as_it_is {
                 let found = sha256_of(&path)?;
                 if found == file.sha256 {
                     hashed.push(file.name.clone());
+                    verified.push(serde_json::json!({
+                        "name": file.name,
+                        "bytes": file.bytes,
+                        "sha256": file.sha256,
+                        "modified_unix_ns": modified,
+                    }));
                 } else {
                     wrong.push(format!(
                         "{} has SHA-256 {found}, the release has {}{}",
@@ -327,23 +401,39 @@ impl RuntimeFiles {
                 expected_at: dir.join(&first.name),
             });
         }
+        let record = match &receipt {
+            Some(receipt) if receipt.written_by.as_deref() == Some(WRITTEN_BY_CHECK) => {
+                RecordState::Check
+            }
+            Some(_) => RecordState::Provisioning,
+            // No record: every file was hashed above and is right.
+            None => match write_receipt(manifest, dir, &verified) {
+                Ok(()) => RecordState::Written,
+                Err(reason) => RecordState::NotWritten { reason },
+            },
+        };
         Ok(RuntimeFiles {
             dir: dir.to_path_buf(),
             release: manifest.release.clone(),
             onnxruntime: manifest.onnxruntime.clone(),
-            provisioned: receipt.is_some(),
+            library: manifest.files[0].name.clone(),
+            record,
             hashed,
         })
     }
 
-    /// The library `ort` is initialised from: the first file of the manifest.
+    /// The library `ort` is initialised from: the first file of the manifest the directory
+    /// was checked against (`onnxruntime.dll` in the manifest of the tool). The path is
+    /// below [`RuntimeFiles::dir`] as that was given; make it absolute, without the `\\?\`
+    /// prefix, before it is passed to `ort::init_from`.
     pub fn onnxruntime_dll(&self) -> PathBuf {
-        self.dir.join("onnxruntime.dll")
+        self.dir.join(&self.library)
     }
 }
 
-/// The provisioning record of `dir`, if there is one. A record of another release is a
-/// refusal that names both; so is a record that cannot be read.
+/// The record of `dir`, if there is one, whoever wrote it. A record of another release
+/// is a refusal that names both; so is a record of another format or one that cannot be
+/// read.
 fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt>, L2dError> {
     let path = dir.join(RECEIPT_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -351,24 +441,33 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(L2dError::Refused {
-                reason: format!(
-                    "the provisioning record {} cannot be read: {error}",
-                    path.display()
-                ),
+                reason: format!("the record {} cannot be read: {error}", path.display()),
             });
         }
     };
     let receipt: Receipt = serde_json::from_str(&text).map_err(|error| L2dError::Refused {
         reason: format!(
-            "the provisioning record {} cannot be read: {error} ({PROVISION_HINT})",
+            "the record {} cannot be read: {error} ({PROVISION_HINT})",
             path.display()
         ),
     })?;
+    if receipt.format != RECEIPT_FORMAT {
+        return Err(L2dError::Refused {
+            reason: format!(
+                "the record {} has format {}, this build of l2d reads format {RECEIPT_FORMAT}; \
+                 remove it to have the files verified again, or provision again \
+                 ({PROVISION_HINT})",
+                path.display(),
+                receipt.format
+            ),
+        });
+    }
     if receipt.release != manifest.release || receipt.onnxruntime != manifest.onnxruntime {
         return Err(L2dError::Refused {
             reason: format!(
-                "the runtime directory {} was provisioned for AMD Ryzen AI {} (ONNX Runtime \
-                 {}), this build of l2d expects {}; the two are not mixed ({PROVISION_HINT})",
+                "the runtime directory {} was verified as AMD Ryzen AI {} (ONNX Runtime {}) \
+                 according to its record, this build of l2d expects {}; the two are not \
+                 mixed ({PROVISION_HINT})",
                 dir.display(),
                 receipt.release,
                 receipt.onnxruntime,
@@ -377,6 +476,50 @@ fn read_receipt(manifest: &RuntimeManifest, dir: &Path) -> Result<Option<Receipt
         });
     }
     Ok(Some(receipt))
+}
+
+/// `written_by` of a record this check wrote.
+const WRITTEN_BY_CHECK: &str = "check";
+
+/// Writes the record of a directory whose files were all hashed and found right. The
+/// error is the reason it could not be written; the check then stands without it.
+fn write_receipt(
+    manifest: &RuntimeManifest,
+    dir: &Path,
+    verified: &[serde_json::Value],
+) -> Result<(), String> {
+    let complete = verified.len() == manifest.files.len()
+        && verified
+            .iter()
+            .all(|file| file["modified_unix_ns"].is_u64());
+    if !complete {
+        return Err("a modification time could not be read".into());
+    }
+    let record = serde_json::json!({
+        "format": RECEIPT_FORMAT,
+        "release": manifest.release,
+        "onnxruntime": manifest.onnxruntime,
+        // Not the provisioning step: this check hashed the files it found. Where they
+        // came from is not known here, so no source is recorded.
+        "written_by": WRITTEN_BY_CHECK,
+        "verified_unix_s": std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since_epoch| since_epoch.as_secs())
+            .unwrap_or(0),
+        "files": verified,
+    });
+    let text = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+    let path = dir.join(RECEIPT_FILE);
+    // Through a file of this process, renamed into place: two processes that check the
+    // same directory at once each write a whole record.
+    let partial = dir.join(format!(".{RECEIPT_FILE}.{}.partial", std::process::id()));
+    let written = std::fs::write(&partial, text + "\n")
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(|error| format!("writing {}: {error}", path.display()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 /// DLLs in `dir` that the manifest does not name, sorted. Other files and folders do not
@@ -453,18 +596,31 @@ fn version_note(path: &Path, expected: &ManifestFile) -> String {
 pub fn file_version(path: &Path) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+        FILE_VER_GET_NEUTRAL, GetFileVersionInfoExW, GetFileVersionInfoSizeExW, VS_FIXEDFILEINFO,
+        VerQueryValueW,
     };
 
     let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: `name` is a NUL-terminated UTF-16 path; the handle output may be null.
-    let size = unsafe { GetFileVersionInfoSizeW(name.as_ptr(), std::ptr::null_mut()) };
+    // The file's own resource is asked for (`FILE_VER_GET_NEUTRAL`), not that of a
+    // language file beside it.
+    let mut handle = 0u32;
+    // SAFETY: `name` is a NUL-terminated UTF-16 path and `handle` a valid output.
+    let size =
+        unsafe { GetFileVersionInfoSizeExW(FILE_VER_GET_NEUTRAL, name.as_ptr(), &mut handle) };
     if size == 0 {
         return None;
     }
     let mut block = vec![0u8; size as usize];
     // SAFETY: `block` is at least `size` bytes long.
-    let read = unsafe { GetFileVersionInfoW(name.as_ptr(), 0, size, block.as_mut_ptr().cast()) };
+    let read = unsafe {
+        GetFileVersionInfoExW(
+            FILE_VER_GET_NEUTRAL,
+            name.as_ptr(),
+            0,
+            size,
+            block.as_mut_ptr().cast(),
+        )
+    };
     if read == 0 {
         return None;
     }
@@ -481,6 +637,11 @@ pub fn file_version(path: &Path) -> Option<String> {
     // SAFETY: the call returned a pointer into `block`, which is alive, to at least
     // `length` bytes, enough for one such structure; the read does not rely on alignment.
     let fixed = unsafe { info.cast::<VS_FIXEDFILEINFO>().read_unaligned() };
+    // The fixed part of a version resource starts with this signature; anything else is
+    // not one.
+    if fixed.dwSignature != 0xFEEF_04BD {
+        return None;
+    }
     let parts = [
         fixed.dwFileVersionMS >> 16,
         fixed.dwFileVersionMS & 0xffff,

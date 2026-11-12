@@ -23,7 +23,8 @@ index and by its SHA-256 in `uv.lock`. The script imports nothing from it. It
    size, SHA-256 and modification time. The tool's fast check uses the times to hash
    only files that changed since.
 
-A refusal names what was found and what was expected, and changes nothing. The script
+A refusal names what was found and what was expected, and changes nothing (exit code
+1). A copy or write that fails ends with one line and exit code 2. The script
 uses the standard library only and never downloads: fetching the wheel is uv's part.
 """
 
@@ -92,26 +93,34 @@ def load_manifest(path: Path) -> Manifest:
             f"the manifest {path} has format {data.get('format')!r}, this script reads "
             f"format {MANIFEST_FORMAT}"
         )
-    source = data["source"]
-    files = tuple(
-        ManifestFile(entry["name"], int(entry["bytes"]), entry["sha256"], entry["version"])
-        for entry in data["files"]
-    )
+    try:
+        source = data["source"]
+        files = tuple(
+            ManifestFile(
+                str(entry["name"]), int(entry["bytes"]), str(entry["sha256"]), str(entry["version"])
+            )
+            for entry in data["files"]
+        )
+        manifest = Manifest(
+            release=str(data["release"]),
+            onnxruntime=str(data["onnxruntime"]),
+            index=str(source["index"]),
+            package=str(source["package"]),
+            version=str(source["version"]),
+            wheel=str(source["wheel"]),
+            directory=str(source["directory"]),
+            files=files,
+        )
+    except KeyError as error:
+        raise ProvisioningError(f"the manifest {path} lacks the key {error.args[0]!r}") from error
+    except (TypeError, ValueError) as error:
+        raise ProvisioningError(f"the manifest {path} is not of the expected shape: {error}") from error
     if not files:
         raise ProvisioningError(f"the manifest {path} names no file")
     for entry in files:
         if Path(entry.name).name != entry.name:
             raise ProvisioningError(f"the manifest {path} names {entry.name!r}, not a plain file name")
-    return Manifest(
-        release=data["release"],
-        onnxruntime=data["onnxruntime"],
-        index=source["index"],
-        package=source["package"],
-        version=source["version"],
-        wheel=source["wheel"],
-        directory=source["directory"],
-        files=files,
-    )
+    return manifest
 
 
 def file_sha256(path: Path) -> str:
@@ -300,6 +309,9 @@ def write_receipt(
         "format": RECEIPT_FORMAT,
         "release": manifest.release,
         "onnxruntime": manifest.onnxruntime,
+        # The tool's check writes a record of its own kind ("check") into a directory
+        # that has none; this one also says where the files came from.
+        "written_by": "provisioning",
         "provisioned_utc": datetime.datetime.now(datetime.timezone.utc)
         .replace(microsecond=0)
         .isoformat()
@@ -407,6 +419,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ProvisioningError as error:
         print(f"provision: refused: {error}", file=sys.stderr)
         return 1
+    except OSError as error:
+        # A copy or a write that failed (disk full, a file in use, no permission). Files
+        # already copied are whole, since each takes its name only after it was hashed;
+        # the record is written last, so the target has none for an unfinished run.
+        print(f"provision: failed: {error}", file=sys.stderr)
+        return 2
     for line in report:
         print(f"provision: {line}")
     return 0

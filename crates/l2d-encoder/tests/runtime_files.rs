@@ -6,7 +6,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use l2d_core::{L2dError, ProjectPaths};
 use l2d_encoder::runtime::{
-    CheckDepth, ManifestFile, ManifestSource, RECEIPT_FILE, RuntimeFiles, RuntimeManifest,
+    CheckDepth, ManifestFile, ManifestSource, RECEIPT_FILE, RecordState, RuntimeFiles,
+    RuntimeManifest,
 };
 use sha2::{Digest, Sha256};
 
@@ -33,6 +34,9 @@ const FILES: &[(&str, &[u8], &str)] = &[
     ("provider.dll", b"the provider, a longer file", "2.0.0"),
     ("dispatch.dll", b"dispatch core", "2.0.0"),
 ];
+const ALL: [&str; 3] = ["onnxruntime.dll", "provider.dll", "dispatch.dll"];
+/// `provider.dll` with other content of the same length.
+const ALTERED: &[u8] = b"the provider, a LONGER file";
 
 fn manifest() -> RuntimeManifest {
     RuntimeManifest {
@@ -58,7 +62,7 @@ fn manifest() -> RuntimeManifest {
     }
 }
 
-/// A directory that holds exactly the files of the test release.
+/// A directory that holds exactly the files of the test release, and no record.
 fn complete(name: &str) -> PathBuf {
     let dir = scratch(name);
     for (file, content, _) in FILES {
@@ -72,9 +76,14 @@ fn modified_ns(path: &Path) -> u64 {
     modified.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
 }
 
+fn set_modified(path: &Path, to: std::time::SystemTime) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(to).unwrap();
+}
+
 /// The record the provisioning step leaves in the directory, for the files as they are
 /// on disk now.
-fn write_receipt(dir: &Path, release: &str, onnxruntime: &str) {
+fn write_provisioning_record(dir: &Path, release: &str, onnxruntime: &str) {
     let files: Vec<serde_json::Value> = FILES
         .iter()
         .map(|(name, content, _)| {
@@ -86,19 +95,29 @@ fn write_receipt(dir: &Path, release: &str, onnxruntime: &str) {
             })
         })
         .collect();
-    let receipt = serde_json::json!({
+    let record = serde_json::json!({
         "format": 1,
         "release": release,
         "onnxruntime": onnxruntime,
+        "written_by": "provisioning",
         "provisioned_utc": "2026-11-12T12:00:00Z",
-        "source": { "package": "runtime-package", "version": "1.30.0" },
+        "source": { "package": "runtime-package", "version": "1.30.0",
+                    "installed_from": "https://example.invalid/wheel.whl" },
         "files": files,
     });
     std::fs::write(
         dir.join(RECEIPT_FILE),
-        serde_json::to_string_pretty(&receipt).unwrap(),
+        serde_json::to_string_pretty(&record).unwrap(),
     )
     .unwrap();
+}
+
+fn read_record(dir: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(RECEIPT_FILE)).unwrap()).unwrap()
+}
+
+fn fast(dir: &Path) -> Result<RuntimeFiles, L2dError> {
+    RuntimeFiles::check_against(&manifest(), dir, CheckDepth::Fast)
 }
 
 fn refusal(result: Result<RuntimeFiles, L2dError>) -> String {
@@ -108,26 +127,222 @@ fn refusal(result: Result<RuntimeFiles, L2dError>) -> String {
     }
 }
 
+// --- No record: everything is hashed, and the record is written -------------------------
+
 #[test]
-fn a_complete_directory_passes_the_fast_and_the_full_check() {
-    let dir = complete("complete");
-    let manifest = manifest();
+fn without_a_record_every_file_is_hashed_and_the_record_is_written() {
+    let dir = complete("no-record");
 
-    let fast = RuntimeFiles::check_against(&manifest, &dir, CheckDepth::Fast).unwrap();
-    assert_eq!(fast.dir, dir);
-    assert_eq!(fast.release, "2.0.0");
-    assert_eq!(fast.onnxruntime, "1.30.0");
-    assert_eq!(fast.onnxruntime_dll(), dir.join("onnxruntime.dll"));
-    assert!(!fast.provisioned, "no provisioning record in the directory");
-    assert!(fast.hashed.is_empty(), "the fast check hashes nothing here");
+    let first = fast(&dir).unwrap();
+    assert_eq!(first.dir, dir);
+    assert_eq!(first.release, "2.0.0");
+    assert_eq!(first.onnxruntime, "1.30.0");
+    assert_eq!(first.hashed, ALL, "nothing is trusted without a record");
+    assert_eq!(first.record, RecordState::Written);
 
-    let full = RuntimeFiles::check_against(&manifest, &dir, CheckDepth::Full).unwrap();
+    // What the check wrote: marked as its own, with no source, and with what it verified.
+    let record = read_record(&dir);
+    assert_eq!(record["format"], 1);
+    assert_eq!(record["release"], "2.0.0");
+    assert_eq!(record["onnxruntime"], "1.30.0");
+    assert_eq!(record["written_by"], "check");
+    assert!(record.get("source").is_none(), "{record}");
+    assert!(record.get("installed_from").is_none(), "{record}");
+    assert!(record["verified_unix_s"].as_u64().unwrap() > 1_700_000_000);
+    let files = record["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3);
+    for (entry, (name, content, _)) in files.iter().zip(FILES) {
+        assert_eq!(entry["name"], *name);
+        assert_eq!(entry["bytes"], content.len());
+        assert_eq!(entry["sha256"], sha256_hex(content));
+        assert_eq!(entry["modified_unix_ns"], modified_ns(&dir.join(name)));
+    }
+    // Nothing but the files and the record is left in the directory.
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
     assert_eq!(
-        full.hashed,
-        vec!["onnxruntime.dll", "provider.dll", "dispatch.dll"]
+        names,
+        [
+            "dispatch.dll",
+            "onnxruntime.dll",
+            "provider.dll",
+            RECEIPT_FILE
+        ]
     );
+
+    // The second start is fast: nothing is hashed, the record is the check's.
+    let second = fast(&dir).unwrap();
+    assert!(second.hashed.is_empty(), "{:?}", second.hashed);
+    assert_eq!(second.record, RecordState::Check);
+
+    // The full check hashes everything, record or not.
+    let full = RuntimeFiles::check_against(&manifest(), &dir, CheckDepth::Full).unwrap();
+    assert_eq!(full.hashed, ALL);
+    assert_eq!(full.record, RecordState::Check);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The case of a directory filled by hand from another package: same names, same sizes,
+/// other content.
+#[test]
+fn a_same_size_replacement_without_a_record_is_refused_by_the_fast_check() {
+    let dir = complete("same-size-no-record");
+    assert_eq!(ALTERED.len(), FILES[1].1.len());
+    std::fs::write(dir.join("provider.dll"), ALTERED).unwrap();
+    let manifest = manifest();
+
+    for depth in [CheckDepth::Fast, CheckDepth::Full] {
+        let reason = refusal(RuntimeFiles::check_against(&manifest, &dir, depth));
+        assert!(
+            reason.contains(&dir.join("provider.dll").display().to_string()),
+            "{reason}"
+        );
+        assert!(reason.contains(&sha256_hex(ALTERED)), "found: {reason}");
+        assert!(
+            reason.contains(&manifest.files[1].sha256),
+            "expected: {reason}"
+        );
+        assert!(
+            !dir.join(RECEIPT_FILE).exists(),
+            "no record of a directory that failed"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A directory the record cannot be written into. The write goes through a file of this
+/// process that is renamed into place; a folder of that name stands in for a directory
+/// without write permission.
+#[test]
+fn when_the_record_cannot_be_written_every_start_hashes_and_says_so() {
+    let dir = complete("not-writable");
+    let blocker = dir.join(format!(".{RECEIPT_FILE}.{}.partial", std::process::id()));
+    std::fs::create_dir(&blocker).unwrap();
+
+    for _ in 0..2 {
+        let checked = fast(&dir).expect("the files are right; the record is a convenience");
+        assert_eq!(checked.hashed, ALL);
+        let RecordState::NotWritten { reason } = &checked.record else {
+            panic!("{:?}", checked.record);
+        };
+        assert!(
+            reason.contains(&dir.join(RECEIPT_FILE).display().to_string()),
+            "{reason}"
+        );
+        assert!(
+            checked.record.describe().contains("every start"),
+            "{}",
+            checked.record.describe()
+        );
+        assert!(!dir.join(RECEIPT_FILE).exists());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- A record written by the check is used and invalidated like the provisioning one ----
+
+#[test]
+fn a_record_is_invalidated_by_a_changed_modification_time_whoever_wrote_it() {
+    for written_by_check in [false, true] {
+        let dir = complete(if written_by_check {
+            "record-check"
+        } else {
+            "record-provisioning"
+        });
+        let expected_state = if written_by_check {
+            assert_eq!(fast(&dir).unwrap().record, RecordState::Written);
+            RecordState::Check
+        } else {
+            write_provisioning_record(&dir, "2.0.0", "1.30.0");
+            RecordState::Provisioning
+        };
+
+        // Untouched since: nothing is hashed.
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.record, expected_state);
+        assert!(checked.hashed.is_empty(), "{:?}", checked.hashed);
+
+        // Touched, content unchanged: that file is hashed and passes.
+        let target = dir.join("provider.dll");
+        let later =
+            std::fs::metadata(&target).unwrap().modified().unwrap() + Duration::from_secs(90);
+        set_modified(&target, later);
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.hashed, vec!["provider.dll"]);
+        assert_eq!(checked.record, expected_state);
+
+        // Replaced by a file of the same size: found through the hash.
+        std::fs::write(&target, ALTERED).unwrap();
+        set_modified(&target, later + Duration::from_secs(90));
+        let reason = refusal(fast(&dir));
+        assert!(reason.contains(&target.display().to_string()), "{reason}");
+        assert!(reason.contains(&sha256_hex(ALTERED)), "{reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn a_file_the_record_does_not_name_is_hashed() {
+    let dir = complete("record-incomplete");
+    write_provisioning_record(&dir, "2.0.0", "1.30.0");
+    let mut record = read_record(&dir);
+    record["files"].as_array_mut().unwrap().remove(1);
+    std::fs::write(dir.join(RECEIPT_FILE), record.to_string()).unwrap();
+    assert_eq!(fast(&dir).unwrap().hashed, vec!["provider.dll"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_directory_recorded_for_another_release_is_refused_with_both_versions() {
+    // A record of the provisioning step for another release.
+    let dir = complete("other-release");
+    write_provisioning_record(&dir, "1.8.0", "1.27.0");
+    for depth in [CheckDepth::Fast, CheckDepth::Full] {
+        let reason = refusal(RuntimeFiles::check_against(&manifest(), &dir, depth));
+        assert!(reason.contains("1.8.0"), "found release: {reason}");
+        assert!(reason.contains("1.27.0"), "found runtime: {reason}");
+        assert!(reason.contains("2.0.0"), "expected release: {reason}");
+        assert!(reason.contains("1.30.0"), "expected runtime: {reason}");
+        assert!(reason.contains(&dir.display().to_string()), "{reason}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // A record the check wrote, read by a build that expects another release.
+    let dir = complete("other-release-check");
+    assert_eq!(fast(&dir).unwrap().record, RecordState::Written);
+    let mut newer = manifest();
+    newer.release = "2.1.0".into();
+    newer.onnxruntime = "1.31.0".into();
+    let reason = refusal(RuntimeFiles::check_against(&newer, &dir, CheckDepth::Fast));
+    for part in ["2.0.0", "1.30.0", "2.1.0", "1.31.0"] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_unreadable_record_and_a_record_of_another_format_are_refused() {
+    let dir = complete("bad-record");
+    let path = dir.join(RECEIPT_FILE);
+    std::fs::write(&path, "{ not json").unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(reason.contains(&path.display().to_string()), "{reason}");
+
+    write_provisioning_record(&dir, "2.0.0", "1.30.0");
+    let mut record = read_record(&dir);
+    record["format"] = 7.into();
+    std::fs::write(&path, record.to_string()).unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(reason.contains(&path.display().to_string()), "{reason}");
+    assert!(reason.contains("format 7"), "the format found: {reason}");
+    assert!(reason.contains("format 1"), "the format read: {reason}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- Missing and wrong files ------------------------------------------------------------
 
 #[test]
 fn a_missing_file_is_named_with_its_expected_path() {
@@ -143,6 +358,7 @@ fn a_missing_file_is_named_with_its_expected_path() {
         assert!(item.contains("dispatch.dll"), "{item}");
         assert!(item.contains("2.0.0"), "the release is named: {item}");
         assert_eq!(error.exit_code(), l2d_core::EXIT_MISSING);
+        assert!(!dir.join(RECEIPT_FILE).exists());
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -153,7 +369,7 @@ fn every_missing_file_is_named_with_its_expected_path() {
     std::fs::remove_file(dir.join("provider.dll")).unwrap();
     std::fs::remove_file(dir.join("dispatch.dll")).unwrap();
 
-    let error = RuntimeFiles::check_against(&manifest(), &dir, CheckDepth::Fast).unwrap_err();
+    let error = fast(&dir).unwrap_err();
     let L2dError::Missing { item, expected_at } = &error else {
         panic!("expected Missing, got {error:?}");
     };
@@ -175,7 +391,7 @@ fn every_missing_file_is_named_with_its_expected_path() {
 #[test]
 fn a_missing_directory_is_named() {
     let dir = scratch("no-directory").join("ryzenai");
-    let error = RuntimeFiles::check_against(&manifest(), &dir, CheckDepth::Fast).unwrap_err();
+    let error = fast(&dir).unwrap_err();
     let L2dError::Missing { item, expected_at } = &error else {
         panic!("expected Missing, got {error:?}");
     };
@@ -185,15 +401,27 @@ fn a_missing_directory_is_named() {
 }
 
 #[test]
+fn a_folder_named_like_a_required_file_is_refused_as_not_a_file() {
+    let dir = complete("folder");
+    std::fs::remove_file(dir.join("dispatch.dll")).unwrap();
+    std::fs::create_dir(dir.join("dispatch.dll")).unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(
+        reason.contains(&format!(
+            "{} is not a file",
+            dir.join("dispatch.dll").display()
+        )),
+        "{reason}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_file_of_the_wrong_size_is_refused_with_both_sizes() {
     let dir = complete("wrong-size");
     std::fs::write(dir.join("provider.dll"), b"another build").unwrap();
 
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest(),
-        &dir,
-        CheckDepth::Fast,
-    ));
+    let reason = refusal(fast(&dir));
     assert!(
         reason.contains(&dir.join("provider.dll").display().to_string()),
         "{reason}"
@@ -205,124 +433,15 @@ fn a_file_of_the_wrong_size_is_refused_with_both_sizes() {
 }
 
 #[test]
-fn a_wrong_hash_is_found_by_the_full_check_only() {
-    let dir = complete("wrong-hash");
-    // Same length, other content.
-    let altered = b"the provider, a LONGER file";
-    assert_eq!(altered.len(), FILES[1].1.len());
-    std::fs::write(dir.join("provider.dll"), altered).unwrap();
-    let manifest = manifest();
-
-    // Without a provisioning record the fast check compares presence and size only.
-    RuntimeFiles::check_against(&manifest, &dir, CheckDepth::Fast)
-        .expect("the fast check does not hash a directory without a provisioning record");
-
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest,
-        &dir,
-        CheckDepth::Full,
-    ));
-    assert!(
-        reason.contains(&dir.join("provider.dll").display().to_string()),
-        "{reason}"
-    );
-    assert!(reason.contains(&sha256_hex(altered)), "found: {reason}");
-    assert!(
-        reason.contains(&manifest.files[1].sha256),
-        "expected: {reason}"
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn a_directory_provisioned_for_another_release_is_refused_with_both_versions() {
-    let dir = complete("other-release");
-    write_receipt(&dir, "1.8.0", "1.27.0");
-
-    for depth in [CheckDepth::Fast, CheckDepth::Full] {
-        let reason = refusal(RuntimeFiles::check_against(&manifest(), &dir, depth));
-        assert!(reason.contains("1.8.0"), "found release: {reason}");
-        assert!(reason.contains("1.27.0"), "found runtime: {reason}");
-        assert!(reason.contains("2.0.0"), "expected release: {reason}");
-        assert!(reason.contains("1.30.0"), "expected runtime: {reason}");
-        assert!(reason.contains(&dir.display().to_string()), "{reason}");
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn an_unreadable_provisioning_record_is_refused() {
-    let dir = complete("bad-receipt");
-    std::fs::write(dir.join(RECEIPT_FILE), "{ not json").unwrap();
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest(),
-        &dir,
-        CheckDepth::Fast,
-    ));
-    assert!(
-        reason.contains(&dir.join(RECEIPT_FILE).display().to_string()),
-        "{reason}"
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn with_a_provisioning_record_the_fast_check_hashes_only_files_changed_since() {
-    let dir = complete("receipt");
-    write_receipt(&dir, "2.0.0", "1.30.0");
-    let manifest = manifest();
-
-    // Untouched since provisioning: nothing is hashed.
-    let checked = RuntimeFiles::check_against(&manifest, &dir, CheckDepth::Fast).unwrap();
-    assert!(checked.provisioned);
-    assert!(checked.hashed.is_empty(), "{:?}", checked.hashed);
-
-    // Touched, content unchanged: that file is hashed and passes.
-    let target = dir.join("provider.dll");
-    let later = std::fs::metadata(&target).unwrap().modified().unwrap() + Duration::from_secs(90);
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&target)
-        .unwrap();
-    file.set_modified(later).unwrap();
-    drop(file);
-    let checked = RuntimeFiles::check_against(&manifest, &dir, CheckDepth::Fast).unwrap();
-    assert_eq!(checked.hashed, vec!["provider.dll"]);
-
-    // Replaced by a file of the same size: the fast check finds it through the hash.
-    let altered = b"the provider, a LONGER file";
-    std::fs::write(&target, altered).unwrap();
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&target)
-        .unwrap();
-    file.set_modified(later + Duration::from_secs(90)).unwrap();
-    drop(file);
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest,
-        &dir,
-        CheckDepth::Fast,
-    ));
-    assert!(reason.contains(&target.display().to_string()), "{reason}");
-    assert!(reason.contains(&sha256_hex(altered)), "{reason}");
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
 fn an_unexpected_dll_is_refused_and_other_files_are_ignored() {
     let dir = complete("extra");
-    // Not DLLs: the provisioning record's neighbours, notes, anything else.
+    // Not DLLs: the record, notes, anything else.
     std::fs::write(dir.join("notes.txt"), "kept").unwrap();
     std::fs::create_dir(dir.join("subfolder")).unwrap();
-    RuntimeFiles::check_against(&manifest(), &dir, CheckDepth::Fast)
-        .expect("files that are not DLLs do not matter");
+    fast(&dir).expect("files that are not DLLs do not matter");
 
     std::fs::write(dir.join("Stray_Provider.DLL"), b"from another release").unwrap();
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest(),
-        &dir,
-        CheckDepth::Fast,
-    ));
+    let reason = refusal(fast(&dir));
     assert!(
         reason.contains(&dir.join("Stray_Provider.DLL").display().to_string()),
         "{reason}"
@@ -337,11 +456,7 @@ fn missing_and_wrong_files_together_are_one_refusal_that_names_all() {
     std::fs::remove_file(dir.join("dispatch.dll")).unwrap();
     std::fs::write(dir.join("provider.dll"), b"another build").unwrap();
 
-    let reason = refusal(RuntimeFiles::check_against(
-        &manifest(),
-        &dir,
-        CheckDepth::Fast,
-    ));
+    let reason = refusal(fast(&dir));
     assert!(
         reason.contains(&dir.join("dispatch.dll").display().to_string()),
         "{reason}"
@@ -350,6 +465,32 @@ fn missing_and_wrong_files_together_are_one_refusal_that_names_all() {
         reason.contains(&dir.join("provider.dll").display().to_string()),
         "{reason}"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- The manifest -----------------------------------------------------------------------
+
+#[test]
+fn the_library_is_the_first_file_of_the_manifest_checked_against() {
+    let dir = complete("library");
+    assert_eq!(fast(&dir).unwrap().library, "onnxruntime.dll");
+    assert_eq!(
+        fast(&dir).unwrap().onnxruntime_dll(),
+        dir.join("onnxruntime.dll")
+    );
+
+    let mut reordered = manifest();
+    reordered.files.swap(0, 1);
+    let checked = RuntimeFiles::check_against(&reordered, &dir, CheckDepth::Fast).unwrap();
+    assert_eq!(checked.library, "provider.dll");
+    assert_eq!(checked.onnxruntime_dll(), dir.join("provider.dll"));
+
+    let mut empty = manifest();
+    empty.files.clear();
+    assert!(matches!(
+        RuntimeFiles::check_against(&empty, &dir, CheckDepth::Fast),
+        Err(L2dError::InvalidInput { .. })
+    ));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -409,6 +550,7 @@ fn the_compiled_in_manifest_is_the_tracked_one_and_agrees_with_the_readme() {
         expected.source.index
     );
     assert_eq!(expected.files.len(), 5);
+    assert_eq!(expected.files[0].name, "onnxruntime.dll");
     assert_eq!(expected.total_bytes(), 713_594_768);
 
     // Rows of the README table: | `name` | bytes | version | `sha256` |
@@ -443,32 +585,108 @@ fn the_compiled_in_manifest_is_the_tracked_one_and_agrees_with_the_readme() {
     assert_eq!(rows, manifest_rows);
 }
 
-/// On request: the real runtime directory (`L2D_RUNTIME_DIR`, default `runtime/ryzenai/`
-/// of the workspace), with the time the fast and the full check take.
+// --- File versions (Windows) ------------------------------------------------------------
+
+/// The version of a real DLL is read, and a refusal names it: on a copy of a system
+/// library, which is only read.
+#[cfg(windows)]
+#[test]
+fn the_file_version_of_a_wrong_dll_is_named_in_the_refusal() {
+    use l2d_encoder::runtime::file_version;
+
+    let system = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join("System32")
+        .join("version.dll");
+    let dir = complete("file-version");
+    let copy = dir.join("provider.dll");
+    std::fs::copy(&system, &copy).unwrap();
+
+    let version = file_version(&copy).expect("a system DLL has a version resource");
+    let parts: Vec<&str> = version.split('.').collect();
+    assert!(
+        (3..=4).contains(&parts.len()) && parts.iter().all(|part| part.parse::<u32>().is_ok()),
+        "{version}"
+    );
+    // The copy is read, not the file in `System32`: for files there Windows reports
+    // another major and minor version to a program that does not declare the Windows
+    // version it was built for (seen: 6.2.26100.1150 for the original, 10.0.26100.1150
+    // for its copy).
+    assert!(parts[0] == "10" || parts[0] == "6", "{version}");
+    // Text is not a DLL, and a missing file has no version.
+    assert_eq!(file_version(&dir.join("onnxruntime.dll")), None);
+    assert_eq!(file_version(&dir.join("absent.dll")), None);
+
+    // A file of another release: its version against the manifest's.
+    let reason = refusal(fast(&dir));
+    assert!(
+        reason.contains(&format!(
+            "it reports file version {version}, the release has 2.0.0: a file of another release"
+        )),
+        "{reason}"
+    );
+    // The same version as the release's: a damaged file, not another release.
+    let mut same_version = manifest();
+    same_version.files[1].version = version.clone();
+    let reason = refusal(RuntimeFiles::check_against(
+        &same_version,
+        &dir,
+        CheckDepth::Fast,
+    ));
+    assert!(
+        reason.contains(&format!(
+            "it reports file version {version}, as the release does"
+        )),
+        "{reason}"
+    );
+    // A stray DLL is named with its version too.
+    std::fs::write(&copy, FILES[1].1).unwrap();
+    std::fs::copy(&system, dir.join("stray.dll")).unwrap();
+    let reason = refusal(fast(&dir));
+    assert!(
+        reason.contains(&format!("it reports file version {version}")),
+        "{reason}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- On request: the real directory -----------------------------------------------------
+
+/// The real runtime directory (`L2D_RUNTIME_DIR`, default `runtime/ryzenai/` of the
+/// workspace), with the time the checks take. In a directory without a record the first
+/// check hashes everything and writes the record: the directory is written to.
 ///
 /// ```text
 /// cargo test -p l2d-encoder --test runtime_files -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "needs the AMD runtime files (714 MB); run on request"]
+#[ignore = "needs the AMD runtime files (714 MB) and may write the record; run on request"]
 fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
     let dir = ProjectPaths::new(workspace_root())
         .runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref());
-    println!("runtime_files: directory {}", dir.display());
+    println!(
+        "runtime_files: directory {} (record present: {})",
+        dir.display(),
+        dir.join(RECEIPT_FILE).exists()
+    );
 
-    let mut fast_times = Vec::new();
-    for _ in 0..5 {
+    let mut with_record = Vec::new();
+    for _ in 0..6 {
         let started = Instant::now();
         let checked = RuntimeFiles::check(&dir, CheckDepth::Fast)
             .unwrap_or_else(|error| panic!("fast check: {error}"));
-        fast_times.push(started.elapsed());
+        let elapsed = started.elapsed();
         assert_eq!(checked.release, "1.9.0");
         println!(
-            "runtime_files: fast check {:?} (provisioning record: {}, hashed: {:?})",
-            fast_times.last().unwrap(),
-            checked.provisioned,
-            checked.hashed
+            "runtime_files: fast check {elapsed:?}, hashed {}, record: {}",
+            checked.hashed.len(),
+            checked.record.describe()
         );
+        if matches!(
+            checked.record,
+            RecordState::Check | RecordState::Provisioning
+        ) {
+            with_record.push(elapsed);
+        }
     }
     let started = Instant::now();
     let checked = RuntimeFiles::check(&dir, CheckDepth::Full)
@@ -484,8 +702,10 @@ fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
         checked.onnxruntime
     );
     println!(
-        "runtime_files: fast check, lowest of five: {:?}",
-        fast_times.iter().min().unwrap()
+        "runtime_files: fast check with a record, lowest and highest of {}: {:?} and {:?}",
+        with_record.len(),
+        with_record.iter().min(),
+        with_record.iter().max()
     );
     #[cfg(windows)]
     for file in &RuntimeManifest::expected().files {

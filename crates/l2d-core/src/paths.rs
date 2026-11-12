@@ -105,6 +105,14 @@ impl ProjectPaths {
     /// supplied dataset path does in [`ProjectPaths::dataset`]; it is used as given. The
     /// directory is not required to exist here: the file check of the encoder crate names
     /// what is missing.
+    ///
+    /// Precedence, for the callers: a directory given by an explicit option of a command
+    /// beats the environment variable, which beats the default. So a command passes
+    /// `option.or(runtime_dir_from_environment())`. A relative directory, from either,
+    /// is relative to the current directory of the process, not to the project root; the
+    /// result is returned as given. Before a path below it is handed to the runtime it
+    /// must be made absolute and plain (`canonicalize`, then without the `\\?\` prefix):
+    /// only that form was proven with the provider (task 2.2).
     pub fn runtime_files_dir(&self, supplied: Option<&Path>) -> PathBuf {
         match supplied {
             Some(path) => path.to_path_buf(),
