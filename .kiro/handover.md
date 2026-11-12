@@ -3,6 +3,34 @@
 Written 2026-11-11, end of day. Branch `main`, last pushed commit `d5d0be7`
 (plus the commit that adds this file). Remote: https://github.com/norandom/log2decision
 
+## Update of 2026-11-12 (read this first; the rest is the state of 2026-11-11)
+
+- Done since: 1.13 conformal calibration (`fc1f253`), 1.8 SQLite store
+  (`5f4a9b5`), 1.18 own conformal code in place of the `conformal-prediction`
+  crate (see `git log`). Everything below that speaks of adopting, pinning or
+  reviewing that crate is history: the tool no longer depends on it.
+- Tests: 277 passing, 12 ignored.
+- New in the spec: requirement 13 (zip archives read in batches under the
+  memory limit, results in parts on disk) with tasks 1.16, 1.17 and 1.19, to
+  run after 1.12. The record of the checks is
+  `.kiro/specs/npu-log-decision/amendment-2026-11-12-zip-batch.md`.
+- Remaining order: 1.9 search, 1.10 triage, 1.11 command wiring, 1.12 baseline
+  gate on CSIC, then 1.16, 1.17, 1.19, then milestone 2.
+- Calibration result that shapes 1.10 and 1.12: on CSIC the 5 % error rate is
+  reached on endpoints the calibration logs cover and missed for good logs on
+  endpoints they do not cover (32 % to 79 % wrongly ruled out, none called
+  good; bad logs missed 0 %). The owner decided that triage places logs by
+  label set as specified and states the limitation; no per-endpoint
+  normalisation in milestone 1.
+- Store limits from 1.8: a log text may be at most 8 MiB and may not contain a
+  NUL byte; an add holds 16 MiB plus 192 times the longest text.
+- Open follow-ups from the 1.8 review, for task 1.9: a default-run test of the
+  failed-reopen path; comparing the store's identity again on reopen; a test
+  assertion in `store_csic.rs` that relies on every test taking a shared lock.
+- AIT Log Data Set V2: `russellmitchell.zip` is downloaded and verified; the
+  other seven are fetched by `data/ait-lds-v2/aria2-resume.ps1` (capped at
+  4 MiB/s; run it again to resume).
+
 ## Where things stand
 
 The spec `npu-log-decision` is in implementation. Requirements, design and

@@ -346,7 +346,7 @@ fn overlapping_labels_give_the_set_both() {
     assert_eq!(middle.set, LabelSet::Both);
 }
 
-/// The p-values the wrapped crate returns, and the sets made from them, against a
+/// The p-values the calibrator returns, and the sets made from them, against a
 /// direct count over the calibration ratios. The calibration set holds many equal
 /// ratios, and every calibration ratio is itself asked for, so ties are exercised.
 #[test]

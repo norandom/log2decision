@@ -1,0 +1,47 @@
+{
+  "format": 1,
+  "kind": "conformal-calibration",
+  "revision": "2a1be4d97ed81d1b93920d2e3487b18d3dde7d7b",
+  "tool_version": "0.1.0",
+  "scorer": {
+    "kind": "baseline",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "settings": {
+    "min_per_group": 20
+  },
+  "good": 82,
+  "bad": 98,
+  "lists": [
+    {
+      "label": "good",
+      "group": null,
+      "logs": 82
+    },
+    {
+      "label": "good",
+      "group": "/a",
+      "logs": 24
+    },
+    {
+      "label": "good",
+      "group": "/b",
+      "logs": 20
+    },
+    {
+      "label": "bad",
+      "group": null,
+      "logs": 98
+    },
+    {
+      "label": "bad",
+      "group": "/a",
+      "logs": 22
+    },
+    {
+      "label": "bad",
+      "group": "/ü \"q\"",
+      "logs": 20
+    }
+  ]
+}

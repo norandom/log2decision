@@ -87,29 +87,15 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] 
 argmin = { version = "0.11", default-features = false }
 argmin-math = { version = "0.5", default-features = false, features = ["ndarray_v0_16-nolinalg"] }
 ndarray = { version = "0.16", default-features = false, features = ["std"] }
-# The conformal calibration layer (requirement 11, task 1.13; project decision of
-# 2026-11-11). Wrapped in `l2d-decide` (`conformal.rs`), the only crate that may name it.
-# Pinned exactly: the wrapper relies on the p-value formula and the tie rule of
-# `ConformalPredictor::predict`, which a test compares with a direct computation.
-#
-# The crate has no features, so everything below is linked whatever is used
-# (`cargo tree -p conformal-prediction -e normal`, 2026-11-12). `Cargo.lock` grows by
-# three packages, from 196 to 199: the crate itself, `lean-agentic` and `ndarray` 0.17.
-# - `lean-agentic` 0.1.0: no dependencies of its own, no build script, no `unsafe`, no
-#   file, process or network access. Every `ConformalPredictor` creates its (empty)
-#   term arena, symbol table and environment, so this code does run.
-# - `rand` 0.8.8 with `rand_chacha` 0.3.1, `rand_core` 0.6.4, `ppv-lite86`, `zerocopy`
-#   and `getrandom` 0.2.17 (reads the operating system's random source, no network).
-#   These were in `Cargo.lock` already, but only for the tests of `l2d-baseline`
-#   (through `linfa`); with this entry they are linked into the tool. The crate uses
-#   them only in `cpd::distribution` (sampling) and `pcp::clustering` (k-means start);
-#   `l2d` calls neither, so no random number is drawn.
-# - `ndarray` 0.17.2 (with `matrixmultiply`, `num-complex`, `num-integer`, `rawpointer`,
-#   already present), a second copy next to the 0.16 of Polars and the regression. Used
-#   by the crate's `pcp` and `cpd` modules only; build weight for `l2d`.
-# `l2d` uses `ConformalPredictor` and `NonconformityMeasure` only. Not reviewed by the
-# owner yet (handover, "Open points").
-conformal-prediction = "=2.0.1"
+# The conformal calibration layer (requirement 11) has no dependency of its own: it is
+# own code in `l2d-decide` (`conformal.rs`). Task 1.13 used the crate
+# `conformal-prediction` =2.0.1 for the p-value count; task 1.18 replaced it (owner
+# decision of 2026-11-12), and `l2d-decide/tests/conformal_fixture.rs` holds the results
+# to what that crate gave. With the entry, `conformal-prediction`, `lean-agentic` 0.1.0
+# and the second `ndarray` (0.17.2) left `Cargo.lock`. `rand` 0.8.8 with `rand_chacha`
+# 0.3.1 and `rand_core` 0.6.4 stay in the lock file for the tests of `l2d-baseline` only
+# (through `linfa`, below) and are no longer linked into the tool. `getrandom` 0.2.17,
+# `ppv-lite86` and `zerocopy` are still linked into the tool through Polars, as before.
 # The embedded store (requirement 5, task 1.8). Used by `l2d-store` only.
 #
 # The design asks for `rusqlite` 0.32 with the features `bundled` and `fts5`. Release
@@ -119,7 +105,7 @@ conformal-prediction = "=2.0.1"
 # `trigram` tokenizer, so a change of this entry that loses them fails the build's tests.
 #
 # What it brings in (`cargo tree -p rusqlite -e normal,build`, 2026-11-12). `Cargo.lock`
-# grows by seven packages, from 199 to 206:
+# grows by seven packages, from 199 to 206 (203 since task 1.18 removed three):
 # - `rusqlite` 0.32.1 and `libsqlite3-sys` 0.30.1 (the SQLite C source, compiled by `cc`,
 #   which was in the lock file already, and linked statically).
 # - `pkg-config` 0.3.34 and `vcpkg` 0.2.15: build dependencies of `libsqlite3-sys` that

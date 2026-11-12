@@ -52,27 +52,20 @@
 //! from the reported numbers, and a rate typed as a decimal (`0.01`) is treated as the
 //! fraction it stands for (`1 / 100`) at the limit.
 //!
-//! # The `conformal-prediction` crate
+//! # The count
 //!
-//! The p-values come from [`conformal_prediction::ConformalPredictor`] (version 2.0.1,
-//! pinned). Each list is one predictor:
+//! Everything here is own code (owner decision of 2026-11-12, task 1.18). Each list is
+//! kept once, sorted ascending, which is also the form it is saved and hashed in. The
+//! number of calibration logs whose nonconformity is at least the new log's is the
+//! length of the list less the number of values below the new one, found by binary
+//! search; a decision therefore costs time in proportion to the logarithm of the
+//! lengths of the two lists it uses. The p-value is
+//! `(count as f64 + 1.0) / (n as f64 + 1.0)` rounded to `f32`.
 //!
-//! - **The crate covers**: keeping the calibration scores of a list and computing the
-//!   p-value of a candidate, `(count of scores >= candidate + 1) / (n + 1)`, with ties
-//!   counted (`ConformalPredictor::calibrate` and `predict`). This path draws no random
-//!   numbers. The crate's `cpd`, `pcp` and `streaming` modules (some of which do) are
-//!   not used.
-//! - **The wrapper adds**: the nonconformity of a ratio for a label (the crate's
-//!   measures are for regression; its `NonconformityMeasure` hook is given the value
-//!   computed here), one list per label and per group, the choice of list, the label
-//!   set at an error rate chosen per call, the refusal rule, the check against the
-//!   scorer's fitting inputs, the memory check, and saving and loading.
-//! - The crate fixes one significance level per predictor and returns only candidates
-//!   whose p-value exceeds it. The predictors here are created with the smallest
-//!   positive level, so every p-value is returned, and the comparison with the error
-//!   rate of the call is made by the wrapper.
-//! - The crate scans the list for every p-value, so a decision costs time in proportion
-//!   to the number of calibration logs of the lists used.
+//! Task 1.13 took the count from the crate `conformal-prediction` 2.0.1, which scanned
+//! a second copy of each list. Count and arithmetic are the same, so p-values, label
+//! sets, revisions and saved files are those of task 1.13;
+//! `tests/conformal_fixture.rs` compares them with files written by that code.
 //!
 //! # Memory
 //!
@@ -134,7 +127,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use conformal_prediction::{ConformalPredictor, NonconformityMeasure};
 use l2d_baseline::BaselineScorer;
 use l2d_baseline::scorer::{SCORES_ABSTAINED, SCORES_RATIO};
 use l2d_core::input::content_sha256;
@@ -189,19 +181,16 @@ const ESTIMATE_FIXED_BYTES: u64 = 1024 * 1024;
 /// Memory per row of the scores frame of [`ConformalCalibrator::fit_baseline`].
 const SCORING_BYTES_PER_ROW: u64 = 48;
 
-/// The significance level the crate's predictors are created with: the smallest
-/// positive number, below every p-value, so that the crate returns every p-value.
-const EVERY_P_VALUE: f64 = f64::MIN_POSITIVE;
-
 /// The memory a calibration of `points` rows, whose group keys take `group_bytes` bytes
 /// in all, is estimated to need at its peak, in bytes:
 /// `1 MiB + 200 * points + 2 * group_bytes`.
 ///
-/// Per point that is 32 bytes kept (the value in the pooled list and at most one group
-/// list, each once here and once in the crate's predictor), 24 bytes while a predictor
-/// is calibrated, and room for counting the logs per label and group in Polars, which
-/// also copies each distinct group key. `tests/conformal_csic.rs` asserts that the heap
-/// a calibration takes stays within it.
+/// Per point that is 16 bytes kept (the value in the pooled list and in at most one
+/// group list) and room for counting the logs per label and group in Polars, which also
+/// copies each distinct group key and takes most of the peak. The figure was set in
+/// task 1.13, when every value was kept twice more (32 bytes kept and 24 while a list
+/// was built); task 1.18 left it as it was, so it now leaves more room.
+/// `tests/conformal_csic.rs` asserts that the heap a calibration takes stays within it.
 pub fn estimated_bytes(points: u64, group_bytes: u64) -> u64 {
     ESTIMATE_FIXED_BYTES
         .saturating_add(points.saturating_mul(ESTIMATE_BYTES_PER_POINT))
@@ -396,7 +385,8 @@ pub enum CalibrationError {
     /// The scorer failed on the calibration logs.
     #[error("{0}")]
     Scorer(L2dError),
-    /// The `conformal-prediction` crate or Polars failed.
+    /// Polars failed, or the lists built from the points do not have the shape of a
+    /// calibration.
     #[error("the conformal calibration failed: {detail}")]
     Internal { detail: String },
 }
@@ -495,17 +485,23 @@ fn smallest_rate(logs: u64) -> f32 {
     (1.0 / (logs as f64 + 1.0)) as f32
 }
 
-/// The crate's hook for a nonconformity measure. The crate's own measures are made for
-/// regression; here the nonconformity of a ratio for a label is computed by
-/// [`nonconformity`] and handed to the crate as the candidate value, which this measure
-/// passes through. The feature vector is not used.
-#[derive(Clone)]
-struct Given;
+/// How many of `scores` are at least `candidate`; a score equal to the candidate
+/// counts. `scores` is sorted ascending and holds no NaN, and `candidate` is not NaN
+/// ([`ConformalCalibrator::assemble`] and [`usable_ratio`] see to both), so the values
+/// below the candidate are a prefix of the list and its length is found by binary
+/// search. The two zeros compare equal, as they do in a scan.
+fn at_least(scores: &[f64], candidate: f64) -> usize {
+    scores.len() - scores.partition_point(|score| *score < candidate)
+}
 
-impl NonconformityMeasure for Given {
-    fn score(&self, _x: &[f64], y: f64) -> f64 {
-        y
-    }
+/// The p-value of `candidate` on the sorted list `scores`:
+/// `(count of scores >= candidate + 1) / (n + 1)`, in double precision.
+///
+/// The count and `n` are converted to `f64` before one is added to each, and the two
+/// sums are divided: the operations, in the order, of the crate `conformal-prediction`
+/// 2.0.1 that task 1.13 used, so the result has the same bits.
+fn p_value_of(scores: &[f64], candidate: f64) -> f64 {
+    (at_least(scores, candidate) as f64 + 1.0) / (scores.len() as f64 + 1.0)
 }
 
 fn internal(doing: &str, error: impl fmt::Display) -> CalibrationError {
@@ -514,33 +510,15 @@ fn internal(doing: &str, error: impl fmt::Display) -> CalibrationError {
     }
 }
 
-/// One list of nonconformity values and the crate's predictor calibrated on it.
+/// One list of nonconformity values.
 struct List {
     bad: bool,
     stratum: Stratum,
-    /// Sorted ascending; what is saved and hashed.
+    /// Sorted ascending and not empty; what is saved, hashed and searched.
     scores: Vec<f64>,
-    predictor: ConformalPredictor<Given>,
 }
 
 impl List {
-    /// `scores` must be sorted and not empty.
-    fn new(bad: bool, stratum: Stratum, scores: Vec<f64>) -> Result<Self, CalibrationError> {
-        let mut predictor = ConformalPredictor::new(EVERY_P_VALUE, Given)
-            .map_err(|error| internal("creating a conformal predictor", error))?;
-        // The measure takes no features: one empty vector per calibration log.
-        let no_features = vec![Vec::new(); scores.len()];
-        predictor
-            .calibrate(&no_features, &scores)
-            .map_err(|error| internal("calibrating a conformal predictor", error))?;
-        Ok(Self {
-            bad,
-            stratum,
-            scores,
-            predictor,
-        })
-    }
-
     fn label(&self) -> Label {
         if self.bad { Label::Bad } else { Label::Good }
     }
@@ -549,23 +527,10 @@ impl List {
         self.scores.len() as u64
     }
 
-    /// The p-value of a log with this ratio for the list's label, from the crate.
-    fn p_value(&self, ratio: f32) -> Result<f32, CalibrationError> {
-        let candidate = nonconformity(ratio, self.bad);
-        let found = self
-            .predictor
-            .predict(&[], &[candidate])
-            .map_err(|error| internal("computing a p-value", error))?;
-        match found.as_slice() {
-            [(_, p_value)] => Ok(*p_value as f32),
-            other => Err(internal(
-                "computing a p-value",
-                format!(
-                    "the predictor returned {} values for one candidate",
-                    other.len()
-                ),
-            )),
-        }
+    /// The p-value of a log with this ratio for the list's label, as the 32-bit value
+    /// that is reported and compared with the error rate.
+    fn p_value(&self, ratio: f32) -> f32 {
+        p_value_of(&self.scores, nonconformity(ratio, self.bad)) as f32
     }
 }
 
@@ -1094,9 +1059,12 @@ impl ConformalCalibrator {
 
         let lists = parts
             .into_iter()
-            .map(|(bad, stratum, scores)| List::new(bad, stratum, scores))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
+            .map(|(bad, stratum, scores)| List {
+                bad,
+                stratum,
+                scores,
+            })
+            .collect::<Vec<_>>();
         let revision = revision_of(scorer, &scorer_revision, &settings, &lists);
         Ok(Self {
             scorer,
@@ -1220,7 +1188,7 @@ impl ConformalCalibrator {
             return Err(CalibrationError::InvalidRatio { ratio });
         }
         let (good, bad) = (self.list(false, group), self.list(true, group));
-        let (p_good, p_bad) = (good.p_value(ratio)?, bad.p_value(ratio)?);
+        let (p_good, p_bad) = (good.p_value(ratio), bad.p_value(ratio));
         Ok(Calibrated {
             set: LabelSet::of(p_good > error_rate, p_bad > error_rate),
             p_good,
@@ -1490,44 +1458,45 @@ mod tests {
         (at_least as f64 + 1.0) / (calibration.len() as f64 + 1.0)
     }
 
-    /// What the wrapper relies on in `conformal-prediction` 2.0.1: the p-value is
-    /// `(count of calibration scores >= candidate + 1) / (n + 1)` with ties counted,
-    /// a candidate is returned exactly when its p-value is greater than the predictor's
-    /// level, and a predictor at the smallest positive level returns every candidate.
+    fn sorted(mut scores: Vec<f64>) -> Vec<f64> {
+        scores.sort_unstable_by(f64::total_cmp);
+        scores
+    }
+
+    /// The p-value is `(count of calibration scores >= candidate + 1) / (n + 1)` with
+    /// ties counted: the binary search on the sorted list against a direct count over
+    /// the list as it came. (Until task 1.18 this test pinned the same of the crate
+    /// `conformal-prediction` 2.0.1, on the same values.)
     #[test]
-    fn the_crate_computes_the_documented_p_value_with_ties_counted() {
+    fn the_p_value_is_the_documented_one_with_ties_counted() {
         // Many equal values: 200 scores on 21 distinct values.
         let calibration: Vec<f64> = (0..200)
             .map(|index| f64::from(index * 8 % 21) / 20.0)
             .collect();
-        let no_features = vec![Vec::new(); calibration.len()];
+        let list = sorted(calibration.clone());
         let candidates: Vec<f64> = (0..=80).map(|step| f64::from(step) / 80.0).collect();
 
-        let mut every = ConformalPredictor::new(EVERY_P_VALUE, Given).unwrap();
-        every.calibrate(&no_features, &calibration).unwrap();
-        let found = every.predict(&[], &candidates).unwrap();
-        assert_eq!(found.len(), candidates.len(), "every candidate is returned");
-        for ((candidate, p_value), asked) in found.iter().zip(&candidates) {
-            assert_eq!(candidate, asked);
-            assert_eq!(p_value.to_bits(), direct(&calibration, *asked).to_bits());
+        for asked in &candidates {
+            assert_eq!(
+                p_value_of(&list, *asked).to_bits(),
+                direct(&calibration, *asked).to_bits(),
+                "candidate {asked}"
+            );
         }
         // A candidate equal to calibration scores counts them: 0.5 is one of the values.
         assert!(calibration.contains(&0.5));
         let ties = calibration.iter().filter(|score| **score == 0.5).count();
         let above = calibration.iter().filter(|score| **score > 0.5).count();
         assert!(ties > 0);
-        let p_value = every.predict(&[], &[0.5]).unwrap()[0].1;
-        assert_eq!(p_value, (ties + above + 1) as f64 / 201.0);
+        assert_eq!(at_least(&list, 0.5), ties + above);
+        assert_eq!(p_value_of(&list, 0.5), (ties + above + 1) as f64 / 201.0);
 
-        // The crate's own set at a level: exactly the candidates with a greater p-value.
+        // The set at a level: exactly the candidates with a greater p-value.
         for level in [0.05, 0.1, 0.25, 0.5] {
-            let mut at_level = ConformalPredictor::new(level, Given).unwrap();
-            at_level.calibrate(&no_features, &calibration).unwrap();
-            let kept: Vec<f64> = at_level
-                .predict(&[], &candidates)
-                .unwrap()
-                .into_iter()
-                .map(|(candidate, _)| candidate)
+            let kept: Vec<f64> = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| p_value_of(&list, *candidate) > level)
                 .collect();
             let expected: Vec<f64> = candidates
                 .iter()
@@ -1538,18 +1507,60 @@ mod tests {
         }
     }
 
+    /// The count at the edges: below, between, on and above the values, runs of equal
+    /// values at both ends, one value, and both zeros.
     #[test]
-    fn the_crate_gives_the_same_p_values_on_repeat() {
+    fn the_count_of_values_at_least_a_candidate_is_exact_at_the_edges() {
+        let list = [0.0, 0.0, 0.25, 0.5, 0.5, 0.5, 1.0, 1.0];
+        for (candidate, expected) in [
+            (0.0, 8),
+            (-0.0, 8),
+            (f64::MIN_POSITIVE, 6),
+            (0.25, 6),
+            (0.3, 5),
+            (0.5, 5),
+            (0.5 + f64::EPSILON, 2),
+            (1.0 - f64::EPSILON / 2.0, 2),
+            (1.0, 2),
+        ] {
+            assert_eq!(
+                at_least(&list, candidate),
+                expected,
+                "candidate {candidate}"
+            );
+            let counted = list.iter().filter(|score| **score >= candidate).count();
+            assert_eq!(counted, expected, "candidate {candidate}");
+        }
+        assert_eq!(at_least(&[0.5], 0.5), 1);
+        assert_eq!(at_least(&[0.5], 0.6), 0);
+        assert_eq!(at_least(&[0.5], 0.4), 1);
+        // A stored negative zero (a hand-made file) is a zero.
+        assert_eq!(at_least(&[0.0, -0.0, 0.0], 0.0), 3);
+        assert_eq!(at_least(&[-0.0, 0.0], f64::MIN_POSITIVE), 0);
+        // The smallest and the largest p-value of a list.
+        assert_eq!(p_value_of(&list, 1.0 + f64::EPSILON), 1.0 / 9.0);
+        assert_eq!(p_value_of(&list, 0.0), 1.0);
+    }
+
+    #[test]
+    fn the_same_p_values_come_out_on_repeat() {
         let calibration: Vec<f64> = (0..500)
             .map(|index| f64::from(index * 37 % 101) / 100.0)
             .collect();
-        let no_features = vec![Vec::new(); calibration.len()];
         let candidates: Vec<f64> = (0..=100).map(|step| f64::from(step) / 100.0).collect();
         let run = || {
-            let mut predictor = ConformalPredictor::new(EVERY_P_VALUE, Given).unwrap();
-            predictor.calibrate(&no_features, &calibration).unwrap();
-            let first = predictor.predict(&[], &candidates).unwrap();
-            assert_eq!(first, predictor.predict(&[], &candidates).unwrap());
+            let list = sorted(calibration.clone());
+            let p_values = |list: &[f64]| -> Vec<u64> {
+                candidates
+                    .iter()
+                    .map(|candidate| p_value_of(list, *candidate).to_bits())
+                    .collect()
+            };
+            let first = p_values(&list);
+            assert_eq!(first, p_values(&list));
+            for (candidate, p_value) in candidates.iter().zip(&first) {
+                assert_eq!(*p_value, direct(&calibration, *candidate).to_bits());
+            }
             first
         };
         assert_eq!(run(), run());

@@ -11,7 +11,6 @@ l2d-core.workspace = true
 l2d-baseline.workspace = true
 l2d-encoder.workspace = true
 l2d-store.workspace = true
-conformal-prediction.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

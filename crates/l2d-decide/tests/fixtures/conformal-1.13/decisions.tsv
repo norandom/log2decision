@@ -1,0 +1,288 @@
+smallest	3d430c31
+rates	3d430c31,3d4ccccd,3dcccccd,3e800000,3f000000,3f666666
+d	00000000	-	3f800000	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	3ccccccd	-	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3d4ccccd	-	3f5afcea	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3d99999a	-	3f487b60	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3dcccccd	-	3f3f3a9a	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e000000	-	3f2fcea7	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e19999a	-	3f268de1	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e333333	-	3f1721ed	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e4ccccd	-	3f0de128	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e666666	-	3f04a063	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e800000	-	3f04a063	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e8ccccd	-	3efcea69	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3e99999a	-	3efcea69	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ea66666	-	3ee43db0	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3eb33333	-	3ede1282	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ec00000	-	3ec565c8	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ecccccd	-	3ebf3a9a	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ed9999a	-	3ea062b3	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ee66666	-	3e9a3785	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3ef33333	-	3e87b5fa	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f000000	-	3e818acc	3e1b26ca	pooled | pooled | both,both,both,good,neither,neither
+d	3f066666	-	3e51bc25	3e1b26ca	pooled | pooled | both,both,both,neither,neither,neither
+d	3f0ccccd	-	3e4565c8	3e4ede62	pooled | pooled | both,both,both,neither,neither,neither
+d	3f133333	-	3e07b5fa	3e6de624	pooled | pooled | both,both,both,neither,neither,neither
+d	3f19999a	-	3df6bf3b	3ea57eb5	pooled | pooled | both,both,both,bad,neither,neither
+d	3f200000	-	3d940c56	3ea57eb5	pooled | pooled | both,both,bad,bad,neither,neither
+d	3f266666	-	3d76bf3b	3ec9b26d	pooled | pooled | both,both,bad,bad,neither,neither
+d	3f2ccccd	-	3d4565c8	3ede6243	pooled | pooled | both,bad,bad,bad,neither,neither
+d	3f333333	-	3d140c56	3ef3121a	pooled | pooled | bad,bad,bad,bad,neither,neither
+d	3f39999a	-	3d140c56	3f0ba2e9	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f400000	-	3d140c56	3f1890cf	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f466666	-	3d140c56	3f1890cf	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f4ccccd	-	3d140c56	3f350296	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f533333	-	3d140c56	3f350296	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f59999a	-	3d140c56	3f49b26d	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f600000	-	3d140c56	3f51745d	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f666666	-	3d140c56	3f5bcc48	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f6ccccd	-	3d140c56	3f638e39	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f733333	-	3d140c56	3f73121a	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	3f79999a	-	3d140c56	3f73121a	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	3f800000	-	3cc565c8	3f800000	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	80000000	-	3f800000	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	00800000	-	3f675347	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	0da24260	-	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	2b8cbccc	-	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3effffff	-	3e818acc	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f000001	-	3e5e1282	3e1b26ca	pooled | pooled | both,both,both,neither,neither,neither
+d	3ef5c290	-	3e87b5fa	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f29999a	-	3d4565c8	3ede6243	pooled | pooled | both,bad,bad,bad,neither,neither
+d	3f7ffffe	-	3d140c56	3f75a815	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	00000000	/a	3f800000	3d321643	group /a | group /a | good,good,good,good,good,good
+d	3ccccccd	/a	3f6147ae	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	3d4ccccd	/a	3f428f5c	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	3d99999a	/a	3f23d70a	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	3dcccccd	/a	3f051eb8	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	3e000000	/a	3ecccccd	3d321643	group /a | group /a | good,good,good,good,neither,neither
+d	3e19999a	/a	3e8f5c29	3d321643	group /a | group /a | good,good,good,good,neither,neither
+d	3e333333	/a	3e23d70a	3d321643	group /a | group /a | good,good,good,neither,neither,neither
+d	3e4ccccd	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3e666666	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3e800000	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3e8ccccd	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3e99999a	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ea66666	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3eb33333	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ec00000	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ecccccd	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ed9999a	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ee66666	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ef33333	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f000000	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f066666	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f0ccccd	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f133333	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f19999a	/a	3d23d70a	3e5e9bd3	group /a | group /a | bad,bad,bad,neither,neither,neither
+d	3f200000	/a	3d23d70a	3e5e9bd3	group /a | group /a | bad,bad,bad,neither,neither,neither
+d	3f266666	/a	3d23d70a	3e5e9bd3	group /a | group /a | bad,bad,bad,neither,neither,neither
+d	3f2ccccd	/a	3d23d70a	3ec8590b	group /a | group /a | bad,bad,bad,bad,neither,neither
+d	3f333333	/a	3d23d70a	3ec8590b	group /a | group /a | bad,bad,bad,bad,neither,neither
+d	3f39999a	/a	3d23d70a	3f10b216	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f400000	/a	3d23d70a	3f10b216	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f466666	/a	3d23d70a	3f10b216	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f4ccccd	/a	3d23d70a	3f3d37a7	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f533333	/a	3d23d70a	3f3d37a7	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f59999a	/a	3d23d70a	3f5e9bd3	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f600000	/a	3d23d70a	3f5e9bd3	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f666666	/a	3d23d70a	3f5e9bd3	group /a | group /a | bad,bad,bad,bad,bad,neither
+d	3f6ccccd	/a	3d23d70a	3f800000	group /a | group /a | bad,bad,bad,bad,bad,bad
+d	3f733333	/a	3d23d70a	3f800000	group /a | group /a | bad,bad,bad,bad,bad,bad
+d	3f79999a	/a	3d23d70a	3f800000	group /a | group /a | bad,bad,bad,bad,bad,bad
+d	3f800000	/a	3d23d70a	3f800000	group /a | group /a | bad,bad,bad,bad,bad,bad
+d	80000000	/a	3f800000	3d321643	group /a | group /a | good,good,good,good,good,good
+d	00800000	/a	3f6147ae	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	0da24260	/a	3f6147ae	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	2b8cbccc	/a	3f6147ae	3d321643	group /a | group /a | good,good,good,good,good,neither
+d	3effffff	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f000001	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3ef5c290	/a	3d23d70a	3d321643	group /a | group /a | neither,neither,neither,neither,neither,neither
+d	3f29999a	/a	3d23d70a	3ec8590b	group /a | group /a | bad,bad,bad,bad,neither,neither
+d	3f7ffffe	/a	3d23d70a	3f800000	group /a | group /a | bad,bad,bad,bad,bad,bad
+d	00000000	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3ccccccd	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3d4ccccd	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3d99999a	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3dcccccd	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e000000	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e19999a	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e333333	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e4ccccd	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e666666	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e800000	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e8ccccd	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3e99999a	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3ea66666	/b	3f679e7a	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3eb33333	/b	3f5b6db7	3d257eb5	group /b | pooled | good,good,good,good,good,neither
+d	3ec00000	/b	3f4f3cf4	3d257eb5	group /b | pooled | good,good,good,good,good,neither
+d	3ecccccd	/b	3f430c31	3d257eb5	group /b | pooled | good,good,good,good,good,neither
+d	3ed9999a	/b	3f2aaaab	3d257eb5	group /b | pooled | good,good,good,good,good,neither
+d	3ee66666	/b	3f1e79e8	3d783e10	group /b | pooled | both,both,good,good,good,neither
+d	3ef33333	/b	3f124925	3d783e10	group /b | pooled | both,both,good,good,good,neither
+d	3f000000	/b	3f061862	3e1b26ca	group /b | pooled | both,both,both,good,good,neither
+d	3f066666	/b	3edb6db7	3e1b26ca	group /b | pooled | both,both,both,good,neither,neither
+d	3f0ccccd	/b	3ec30c31	3e4ede62	group /b | pooled | both,both,both,good,neither,neither
+d	3f133333	/b	3eaaaaab	3e6de624	group /b | pooled | both,both,both,good,neither,neither
+d	3f19999a	/b	3e924925	3ea57eb5	group /b | pooled | both,both,both,both,neither,neither
+d	3f200000	/b	3e430c31	3ea57eb5	group /b | pooled | both,both,both,bad,neither,neither
+d	3f266666	/b	3e124925	3ec9b26d	group /b | pooled | both,both,both,bad,neither,neither
+d	3f2ccccd	/b	3dc30c31	3ede6243	group /b | pooled | both,both,bad,bad,neither,neither
+d	3f333333	/b	3d430c31	3ef3121a	group /b | pooled | bad,bad,bad,bad,neither,neither
+d	3f39999a	/b	3d430c31	3f0ba2e9	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f400000	/b	3d430c31	3f1890cf	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f466666	/b	3d430c31	3f1890cf	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f4ccccd	/b	3d430c31	3f350296	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f533333	/b	3d430c31	3f350296	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f59999a	/b	3d430c31	3f49b26d	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f600000	/b	3d430c31	3f51745d	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f666666	/b	3d430c31	3f5bcc48	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f6ccccd	/b	3d430c31	3f638e39	group /b | pooled | bad,bad,bad,bad,bad,neither
+d	3f733333	/b	3d430c31	3f73121a	group /b | pooled | bad,bad,bad,bad,bad,bad
+d	3f79999a	/b	3d430c31	3f73121a	group /b | pooled | bad,bad,bad,bad,bad,bad
+d	3f800000	/b	3d430c31	3f800000	group /b | pooled | bad,bad,bad,bad,bad,bad
+d	80000000	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	00800000	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	0da24260	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	2b8cbccc	/b	3f800000	3d257eb5	group /b | pooled | good,good,good,good,good,good
+d	3effffff	/b	3f061862	3d783e10	group /b | pooled | both,both,good,good,good,neither
+d	3f000001	/b	3ef3cf3d	3e1b26ca	group /b | pooled | both,both,both,good,neither,neither
+d	3ef5c290	/b	3f124925	3d783e10	group /b | pooled | both,both,good,good,good,neither
+d	3f29999a	/b	3dc30c31	3ede6243	group /b | pooled | both,both,bad,bad,neither,neither
+d	3f7ffffe	/b	3d430c31	3f75a815	group /b | pooled | bad,bad,bad,bad,bad,bad
+d	00000000	/c	3f800000	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	3ccccccd	/c	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3d4ccccd	/c	3f5afcea	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3d99999a	/c	3f487b60	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3dcccccd	/c	3f3f3a9a	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e000000	/c	3f2fcea7	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e19999a	/c	3f268de1	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e333333	/c	3f1721ed	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e4ccccd	/c	3f0de128	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e666666	/c	3f04a063	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e800000	/c	3f04a063	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3e8ccccd	/c	3efcea69	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3e99999a	/c	3efcea69	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ea66666	/c	3ee43db0	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3eb33333	/c	3ede1282	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ec00000	/c	3ec565c8	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ecccccd	/c	3ebf3a9a	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ed9999a	/c	3ea062b3	3d257eb5	pooled | pooled | good,good,good,good,neither,neither
+d	3ee66666	/c	3e9a3785	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3ef33333	/c	3e87b5fa	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f000000	/c	3e818acc	3e1b26ca	pooled | pooled | both,both,both,good,neither,neither
+d	3f066666	/c	3e51bc25	3e1b26ca	pooled | pooled | both,both,both,neither,neither,neither
+d	3f0ccccd	/c	3e4565c8	3e4ede62	pooled | pooled | both,both,both,neither,neither,neither
+d	3f133333	/c	3e07b5fa	3e6de624	pooled | pooled | both,both,both,neither,neither,neither
+d	3f19999a	/c	3df6bf3b	3ea57eb5	pooled | pooled | both,both,both,bad,neither,neither
+d	3f200000	/c	3d940c56	3ea57eb5	pooled | pooled | both,both,bad,bad,neither,neither
+d	3f266666	/c	3d76bf3b	3ec9b26d	pooled | pooled | both,both,bad,bad,neither,neither
+d	3f2ccccd	/c	3d4565c8	3ede6243	pooled | pooled | both,bad,bad,bad,neither,neither
+d	3f333333	/c	3d140c56	3ef3121a	pooled | pooled | bad,bad,bad,bad,neither,neither
+d	3f39999a	/c	3d140c56	3f0ba2e9	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f400000	/c	3d140c56	3f1890cf	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f466666	/c	3d140c56	3f1890cf	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f4ccccd	/c	3d140c56	3f350296	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f533333	/c	3d140c56	3f350296	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f59999a	/c	3d140c56	3f49b26d	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f600000	/c	3d140c56	3f51745d	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f666666	/c	3d140c56	3f5bcc48	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f6ccccd	/c	3d140c56	3f638e39	pooled | pooled | bad,bad,bad,bad,bad,neither
+d	3f733333	/c	3d140c56	3f73121a	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	3f79999a	/c	3d140c56	3f73121a	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	3f800000	/c	3cc565c8	3f800000	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	80000000	/c	3f800000	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	00800000	/c	3f675347	3d257eb5	pooled | pooled | good,good,good,good,good,good
+d	0da24260	/c	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	2b8cbccc	/c	3f643db0	3d257eb5	pooled | pooled | good,good,good,good,good,neither
+d	3effffff	/c	3e818acc	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f000001	/c	3e5e1282	3e1b26ca	pooled | pooled | both,both,both,neither,neither,neither
+d	3ef5c290	/c	3e87b5fa	3d783e10	pooled | pooled | both,both,good,good,neither,neither
+d	3f29999a	/c	3d4565c8	3ede6243	pooled | pooled | both,bad,bad,bad,neither,neither
+d	3f7ffffe	/c	3d140c56	3f75a815	pooled | pooled | bad,bad,bad,bad,bad,bad
+d	00000000	/ü "q"	3f800000	3d430c31	pooled | group /ü "q" | good,good,good,good,good,good
+d	3ccccccd	/ü "q"	3f643db0	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3d4ccccd	/ü "q"	3f5afcea	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3d99999a	/ü "q"	3f487b60	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3dcccccd	/ü "q"	3f3f3a9a	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e000000	/ü "q"	3f2fcea7	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e19999a	/ü "q"	3f268de1	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e333333	/ü "q"	3f1721ed	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e4ccccd	/ü "q"	3f0de128	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e666666	/ü "q"	3f04a063	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e800000	/ü "q"	3f04a063	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3e8ccccd	/ü "q"	3efcea69	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3e99999a	/ü "q"	3efcea69	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ea66666	/ü "q"	3ee43db0	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3eb33333	/ü "q"	3ede1282	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ec00000	/ü "q"	3ec565c8	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ecccccd	/ü "q"	3ebf3a9a	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ed9999a	/ü "q"	3ea062b3	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ee66666	/ü "q"	3e9a3785	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3ef33333	/ü "q"	3e87b5fa	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3f000000	/ü "q"	3e818acc	3e430c31	pooled | group /ü "q" | both,both,both,good,neither,neither
+d	3f066666	/ü "q"	3e51bc25	3e430c31	pooled | group /ü "q" | both,both,both,neither,neither,neither
+d	3f0ccccd	/ü "q"	3e4565c8	3e430c31	pooled | group /ü "q" | both,both,both,neither,neither,neither
+d	3f133333	/ü "q"	3e07b5fa	3eaaaaab	pooled | group /ü "q" | both,both,both,bad,neither,neither
+d	3f19999a	/ü "q"	3df6bf3b	3eaaaaab	pooled | group /ü "q" | both,both,both,bad,neither,neither
+d	3f200000	/ü "q"	3d940c56	3eaaaaab	pooled | group /ü "q" | both,both,bad,bad,neither,neither
+d	3f266666	/ü "q"	3d76bf3b	3ef3cf3d	pooled | group /ü "q" | both,both,bad,bad,neither,neither
+d	3f2ccccd	/ü "q"	3d4565c8	3ef3cf3d	pooled | group /ü "q" | both,bad,bad,bad,neither,neither
+d	3f333333	/ü "q"	3d140c56	3ef3cf3d	pooled | group /ü "q" | bad,bad,bad,bad,neither,neither
+d	3f39999a	/ü "q"	3d140c56	3f1e79e8	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f400000	/ü "q"	3d140c56	3f1e79e8	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f466666	/ü "q"	3d140c56	3f1e79e8	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f4ccccd	/ü "q"	3d140c56	3f36db6e	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f533333	/ü "q"	3d140c56	3f36db6e	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f59999a	/ü "q"	3d140c56	3f36db6e	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f600000	/ü "q"	3d140c56	3f5b6db7	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f666666	/ü "q"	3d140c56	3f5b6db7	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f6ccccd	/ü "q"	3d140c56	3f5b6db7	pooled | group /ü "q" | bad,bad,bad,bad,bad,neither
+d	3f733333	/ü "q"	3d140c56	3f800000	pooled | group /ü "q" | bad,bad,bad,bad,bad,bad
+d	3f79999a	/ü "q"	3d140c56	3f800000	pooled | group /ü "q" | bad,bad,bad,bad,bad,bad
+d	3f800000	/ü "q"	3cc565c8	3f800000	pooled | group /ü "q" | bad,bad,bad,bad,bad,bad
+d	80000000	/ü "q"	3f800000	3d430c31	pooled | group /ü "q" | good,good,good,good,good,good
+d	00800000	/ü "q"	3f675347	3d430c31	pooled | group /ü "q" | good,good,good,good,good,good
+d	0da24260	/ü "q"	3f643db0	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	2b8cbccc	/ü "q"	3f643db0	3d430c31	pooled | group /ü "q" | good,good,good,good,good,neither
+d	3effffff	/ü "q"	3e818acc	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3f000001	/ü "q"	3e5e1282	3e430c31	pooled | group /ü "q" | both,both,both,neither,neither,neither
+d	3ef5c290	/ü "q"	3e87b5fa	3d430c31	pooled | group /ü "q" | good,good,good,good,neither,neither
+d	3f29999a	/ü "q"	3d4565c8	3ef3cf3d	pooled | group /ü "q" | both,bad,bad,bad,neither,neither
+d	3f7ffffe	/ü "q"	3d140c56	3f800000	pooled | group /ü "q" | bad,bad,bad,bad,bad,bad
+r	3f000000	-	3d430c30	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	/b	3d430c30	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	-	3d23d70a	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	/b	3d23d70a	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	-	3c23d70a	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	/b	3c23d70a	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	-	00800000	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	/b	00800000	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	3f000000	-	00000000	InvalidErrorRate { error_rate: 0.0 } | the error rate must be above 0 and below 1; got 0
+r	3f000000	/b	00000000	InvalidErrorRate { error_rate: 0.0 } | the error rate must be above 0 and below 1; got 0
+r	3f000000	-	80000000	InvalidErrorRate { error_rate: -0.0 } | the error rate must be above 0 and below 1; got -0
+r	3f000000	/b	80000000	InvalidErrorRate { error_rate: -0.0 } | the error rate must be above 0 and below 1; got -0
+r	3f000000	-	3f800000	InvalidErrorRate { error_rate: 1.0 } | the error rate must be above 0 and below 1; got 1
+r	3f000000	/b	3f800000	InvalidErrorRate { error_rate: 1.0 } | the error rate must be above 0 and below 1; got 1
+r	3f000000	-	bf000000	InvalidErrorRate { error_rate: -0.5 } | the error rate must be above 0 and below 1; got -0.5
+r	3f000000	/b	bf000000	InvalidErrorRate { error_rate: -0.5 } | the error rate must be above 0 and below 1; got -0.5
+r	3f000000	-	7f800000	InvalidErrorRate { error_rate: inf } | the error rate must be above 0 and below 1; got inf
+r	3f000000	/b	7f800000	InvalidErrorRate { error_rate: inf } | the error rate must be above 0 and below 1; got inf
+r	3f000000	-	7fc00000	InvalidErrorRate { error_rate: NaN } | the error rate must be above 0 and below 1; got NaN
+r	3f000000	/b	7fc00000	InvalidErrorRate { error_rate: NaN } | the error rate must be above 0 and below 1; got NaN
+r	bdcccccd	-	3d4ccccd	InvalidRatio { ratio: -0.1 } | a ratio lies between 0 and 1; got -0.1
+r	bdcccccd	/a	3d4ccccd	InvalidRatio { ratio: -0.1 } | a ratio lies between 0 and 1; got -0.1
+r	80800000	-	3d4ccccd	InvalidRatio { ratio: -1.1754944e-38 } | a ratio lies between 0 and 1; got -0.000000000000000000000000000000000000011754944
+r	80800000	/a	3d4ccccd	InvalidRatio { ratio: -1.1754944e-38 } | a ratio lies between 0 and 1; got -0.000000000000000000000000000000000000011754944
+r	3f800001	-	3d4ccccd	InvalidRatio { ratio: 1.0000001 } | a ratio lies between 0 and 1; got 1.0000001
+r	3f800001	/a	3d4ccccd	InvalidRatio { ratio: 1.0000001 } | a ratio lies between 0 and 1; got 1.0000001
+r	40000000	-	3d4ccccd	InvalidRatio { ratio: 2.0 } | a ratio lies between 0 and 1; got 2
+r	40000000	/a	3d4ccccd	InvalidRatio { ratio: 2.0 } | a ratio lies between 0 and 1; got 2
+r	7f800000	-	3d4ccccd	InvalidRatio { ratio: inf } | a ratio lies between 0 and 1; got inf
+r	7f800000	/a	3d4ccccd	InvalidRatio { ratio: inf } | a ratio lies between 0 and 1; got inf
+r	ff800000	-	3d4ccccd	InvalidRatio { ratio: -inf } | a ratio lies between 0 and 1; got -inf
+r	ff800000	/a	3d4ccccd	InvalidRatio { ratio: -inf } | a ratio lies between 0 and 1; got -inf
+r	7fc00000	-	3d4ccccd	InvalidRatio { ratio: NaN } | a ratio lies between 0 and 1; got NaN
+r	7fc00000	/a	3d4ccccd	InvalidRatio { ratio: NaN } | a ratio lies between 0 and 1; got NaN
+r	40000000	-	3c23d70a	TooFewLogs { good: 20, bad: 20, smallest_supported: 0.04761905 } | the calibration logs are too few for this error rate: the shortest lists hold 20 good and 20 bad calibration logs, which support error rates from 0.04761905 on
+r	7fc00000	-	7fc00000	InvalidErrorRate { error_rate: NaN } | the error rate must be above 0 and below 1; got NaN

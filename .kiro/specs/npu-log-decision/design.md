@@ -871,7 +871,7 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 
 **Build or adopt**
 - Build (owner decision of 2026-11-12). Task 1.13 adopted the `conformal-prediction` crate and found that it contributes only the storage of a list's scores and the p-value count by linear scan, while linking `lean-agentic`, `rand` 0.8 and a second `ndarray` into the tool. Task 1.18 replaces it with own code in `conformal.rs` behind the unchanged contract below: the p-value count on the sorted lists the calibration already saves, by binary search. Label sets, revisions and saved calibrations must come out identical to those of 1.13.
-- The task that introduces it confirms on the reference host that the crate links no network client and returns identical results on repeat, and records which parts of the method the crate covers.
+- Done by task 1.18: a fixture saved by the crate-based code (`l2d-decide/tests/fixtures/conformal-1.13/`) holds the own code to the same revision, files and decisions.
 - Calibration inputs are prepared as Polars frames (ratio, label, group) and grouped there.
 
 **Contracts**: Service [x] / State [x]
