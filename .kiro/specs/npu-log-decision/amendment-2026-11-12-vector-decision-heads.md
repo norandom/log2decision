@@ -1,8 +1,10 @@
 # Amendment draft: a fitted linear head, an outlier ranking and richer evidence
 
-Status: **draft, awaiting owner approval** (2026-11-12). Nothing here is part of
-the approved spec yet. On approval the parts below are merged into
-`requirements.md`, `design.md` and `tasks.md`.
+Status: **approved by the owner on 2026-11-12 and merged** into
+`requirements.md` (Requirement 14, and 6.6), `design.md` ("LinearHead and
+outlier ranking") and `tasks.md` (tasks 2.10 and 2.11; 2.9 and 3.7 extended).
+Where this file and those documents differ, those documents win. This file is
+kept as the record of the proposal.
 
 Background: `docs/2026-11-12-venn-vdm-gap-list.md` compares Venn's operations
 with the spec. The owner chose the spec plus three small additions, to be

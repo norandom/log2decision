@@ -22,6 +22,7 @@ features on HTTP CSIC 2010.
 - **In scope**:
   - Reading text logs and labelled log datasets from local files.
   - Reading log records from zip archives in batches, without extracting them.
+  - A fitted linear head on the encoder's vectors as a further scorer, and a ranking of logs unlike anything stored.
   - A baseline bad/good ratio from character-level features, fitted deterministically.
   - Agnostic threat scoring barrier: isolating routing context (URLs, endpoints, hosts) from payload anomaly signals so threat scores derive from general syntactic anomalies and attack patterns rather than hardcoded training-set site topography.
   - Pre-validating neural encoder architecture quality offline via `uv` on held-out grouped splits before NPU deployment.
@@ -119,7 +120,7 @@ features on HTTP CSIC 2010.
 3. If fewer labelled logs than the configured minimum support are within reach of a log, then the Log Triage Tool shall abstain for that log and say so in place of a ratio.
 4. When a set of logs is triaged, the Log Triage Tool shall return them ranked from highest to lowest ratio, with abstained logs listed separately.
 5. When the analyst sets a review budget as a number of logs, the Log Triage Tool shall return that many highest-ranked logs and mark the remaining logs as scored down.
-6. When a log is triaged, the Log Triage Tool shall state which scorer produced the ratio: the baseline scorer, the encoder-based scorer, or both.
+6. When a log is triaged, the Log Triage Tool shall state which scorer produced the ratio: the baseline scorer, the encoder-based neighbour scorer, the linear head (Requirement 14), or several of them.
 7. When evidence is reported for a triage decision, the Log Triage Tool shall report the count of nearest neighbors sharing the same endpoint/group key versus distinct endpoints.
 8. If nearest neighbors are solely composed of benign logs from the identical endpoint while payload anomaly indicators are absent, the decision logic shall avoid falsely suppressing the bad/good ratio.
 9. The Log Triage Tool shall not delete, block or alter logs as a result of triage.
@@ -219,3 +220,24 @@ Added on 2026-11-12 (owner approval of `amendment-2026-11-12-zip-batch.md`). Rea
 11. When an operation writes per-log results for an input that is processed in batches, the Log Triage Tool shall write the results to files in parts as the batches complete, and shall state where the parts are.
 12. If the deduplication state of an input would exceed the memory limit, then the Log Triage Tool shall either continue with deduplication on disk or refuse and state the memory needed and the memory available; it shall not exceed the limit.
 13. The Log Triage Tool shall record for an archive input the archive path, the archive's content hash, and for each entry read its path and record count.
+
+### Requirement 14: Fitted linear head and outlier ranking on vectors
+**Objective:** As a log analyst, I want a second decision model on the encoder's vectors that is fitted to my labelled logs, and a signal for logs unlike anything stored, so that I can compare it with the nearest-neighbour ratio and the baseline, and see what is new.
+
+Added on 2026-11-12 (owner approval of `amendment-2026-11-12-vector-decision-heads.md`, after comparing Venn's operations with this spec in `docs/2026-11-12-venn-vdm-gap-list.md`). The scorers stay separate; the decision to investigate, which brings their results together, is not part of this requirement.
+
+#### Acceptance Criteria
+1. When labelled stored logs are supplied for fitting, the Log Triage Tool shall fit a linear head on their vectors that returns a bad/good ratio between 0 and 1 for a vector, where higher means more likely bad.
+2. If fewer than ten labelled logs, or fewer than five of either label, are supplied for fitting, then the Log Triage Tool shall refuse to fit and state the counts it found.
+3. Where group keys exist, the Log Triage Tool shall choose the head's penalty by cross-validation in which all logs of a group fall on one side of every split, and shall report the penalty chosen and the score of each candidate.
+4. The Log Triage Tool shall produce the same head and the same ratios when fitting is repeated on the same logs with the same settings.
+5. If a vector from one encoder identity is given to a head fitted on another, then the Log Triage Tool shall refuse and name both identities.
+6. When a head is saved, the Log Triage Tool shall give it a revision derived from its content and record the encoder identity and the logs it was fitted on, so that calibration can exclude them.
+7. When a log is triaged with the linear head, the Log Triage Tool shall name the linear head as the scorer that produced the ratio.
+8. The Log Triage Tool shall calibrate the linear head under Requirement 11 in the same way as any other scorer.
+9. When an evaluation is run, the Log Triage Tool shall report the linear head next to the baseline scorer and the neighbour scorer on the same splits.
+10. When the analyst requests an outlier ranking for a set of logs against a store, the Log Triage Tool shall return for each log the distance to its k-th nearest stored log and rank the logs from the largest distance down.
+11. The Log Triage Tool shall describe the outlier figure in its output as a distance and not as a probability.
+12. If the store holds fewer logs than the outlier ranking needs, then the Log Triage Tool shall refuse and state the number stored and the number needed.
+13. When evidence is reported for a neighbour-based decision, the Log Triage Tool shall report, for each label, the number of neighbours used and their mean distance.
+14. The Log Triage Tool shall keep fitting a head and ranking outliers within the memory limit of Requirement 12, refusing before loading when the vectors needed do not fit.

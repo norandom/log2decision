@@ -343,6 +343,11 @@ flowchart TD
 | 13.8, 13.9, 13.10 | Batches under the memory limit; record length limit; same results as unpacked | ZipInput, MemoryBudget | `Batcher`, `ZipInputSettings.max_record_bytes` | |
 | 13.11 | Results written in parts | PartWriter | Parquet parts and manifest under the work directory | |
 | 13.12 | Deduplication state within the limit | ZipInput, PartWriter | refusal (task 1.16), on-disk deduplication (task 1.17) | |
+| 14.1 to 14.6 | Fitted linear head on vectors | LinearHead | `LinearHead::fit`, `score`, `save`, `load` | |
+| 14.7, 14.8, 14.9 | Head named as scorer, calibrated, evaluated side by side | Triage, ConformalCalibrator, Evaluator | `ScorerKind::Linear` | Triage |
+| 14.10, 14.11, 14.12 | Outlier ranking by distance to the k-th nearest stored log | OutlierRanking, Store | `rank_outliers` on `Store::nearest` | |
+| 14.13 | Per-label neighbour counts and mean distances | NeighbourScorer | `Evidence` | Triage |
+| 14.14 | Head fitting and outlier ranking within the memory limit | MemoryBudget | `require_whole`, batches | |
 | 9.8 | Single-label groups reported separately | Evaluator, Metrics | `EvaluationReport.single_label_groups` | |
 | 10.1 | No Python | whole workspace | native DLLs only | |
 | 10.2 | No network | whole workspace | dependency rule | |
@@ -927,6 +932,33 @@ pub enum ScoredDownBy { Calibration, BudgetOnly }
 - `ScoredLog` gains `calibrated: Option<Calibrated>`; entries of `TriageResult.abstained` carry an `AbstainReason`, entries of `scored_down` a `ScoredDownBy`.
 - With a calibrated primary scorer, triage places a log by its label set: bad alone goes to the review ranking, good alone to `scored_down` (by calibration), both and neither to `abstained`. The review budget then applies to the review ranking; logs beyond it are `scored_down` by budget only.
 - Evaluation reports, per label and per stratum, the share of test logs whose true label is missing from the set (achieved error rate) next to the chosen rate, and the share of each set kind (`ScorerResult.coverage`).
+
+#### LinearHead and outlier ranking
+
+| Field | Detail |
+|-------|--------|
+| Intent | A fitted decision model on the vectors next to the neighbour scorer, and a signal for logs unlike anything stored |
+| Requirements | 14.1 to 14.14 |
+
+Added on 2026-11-12, from the comparison with Venn's operations (`docs/2026-11-12-venn-vdm-gap-list.md`). Built after the NPU encoder (tasks 2.10 and 2.11). The baseline scorer, the neighbour scorer and the linear head stay separate scorers; the decision to investigate, which brings their results together, is later work.
+
+**LinearHead (`l2d-decide`, `head.rs`)**
+- Model: logistic regression on the stored, L2-normalised vectors, fitted with the deterministic regression of the baseline crate through its dense path. No new crate.
+- Penalty: chosen from 0.01, 0.1, 1, 10, 100 by 5-fold grouped cross-validation on log loss. Folds are assigned from a hash of the group key, so they do not depend on row order. Without group keys the folds are assigned from the log id, and the report says the splits were not grouped. The task records whether this grid and fold count suit the data.
+- No abstention of its own; uncertainty comes from the calibration layer.
+- The head stores the encoder identity of its vectors and refuses others.
+- Saved under `models/heads/<name>-<rev12>/`: weights, bias, penalty, cross-validation scores, encoder identity, and the hashes of the fitting texts, so that the per-log held-out check applies to it as to the baseline scorer. The revision is the SHA-256 of that content.
+- `ScorerKind` gains `Linear`; triage and calibration take it like any scorer.
+- Memory: fitting holds all labelled vectors (`require_whole`); scoring runs in batches.
+
+**Outlier ranking (`l2d-decide`, on the store's search)**
+- Figure: squared L2 distance from a log's vector to its k-th nearest stored log; k = 5 by default, option `--k`. The task measures whether a larger k separates "rare" from "new" better on logs, which repeat heavily.
+- A log that is itself stored does not count as its own neighbour.
+- Computed in batches of query vectors against the stored vectors under the memory budget; refused when the store holds fewer than k logs besides the query.
+- The output calls the figure a distance. It is a signal for the later decision to investigate, not a score.
+
+**Evidence**
+- `Evidence` gains, per label, the count and the mean distance of the neighbours used. (Venn's "spread" is left out: with the labels good and bad it follows from the ratio.)
 
 #### ShiftTest
 
