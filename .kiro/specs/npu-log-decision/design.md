@@ -48,7 +48,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 
 ### Allowed Dependencies
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
-- Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (features `bundled`, `fts5`), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
+- Rust crates: `ort` (features `load-dynamic`, `vitis`), `rusqlite` 0.32 (feature `bundled`; release 0.32 has no `fts5` feature, the bundled SQLite 3.46.0 is compiled with FTS5), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows` (process times, device query).
 - `polars` for data frames, pinned to `=0.52.0` with default features off: facade features `lazy` and `ndarray` only, and the CSV and JSON readers enabled on `polars-io` directly. The facade's own `csv` and `json` features, and releases from 0.53 on, link network client crates and are not used. Other crates import Polars only through `l2d_core::polars`. Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
 - For zip input and result parts (requirement 13): `zip` 2.x with default features off and the feature `deflate` only, `flate2` (arrives with `zip`) for gzip entries, and the `polars-io` features `parquet` and `zstd`. Checked on 2026-11-12 in a scratch copy: the resolved lock file names no network crate. The check is repeated when the task adds them.
 - No crate for the conformal calibration layer: the method is a few lines and is written in `l2d-decide` (owner decision of 2026-11-12, which replaces the adoption of `conformal-prediction`; task 1.18 removes the crate).
@@ -125,7 +125,7 @@ graph LR
 | NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
 | Data layer | `polars` (default features off; CSV, JSON, lazy, `ndarray` conversion) | Parsing of log data; frames between crates; grouping and joins in calibration, evaluation and reports | No cloud or HTTP features; lives in `l2d-core` |
 | Calibration | own code in `l2d-decide` | Conformal label sets at a stated error rate | `conformal-prediction` is removed by task 1.18 |
-| Storage | `rusqlite` 0.32 (`bundled`, `fts5`) + `faer` 0.24 | Logs, labels, FTS5 full-text, exact SIMD vector search | Single-file database (`stores/<name>.db`), zero async |
+| Storage | `rusqlite` 0.32 (`bundled`, which includes FTS5) + `faer` 0.24 | Logs, labels, FTS5 full-text, exact SIMD vector search | Single-file database (`stores/<name>.db`), zero async |
 | Baseline Scorer | Character n-grams + L2 Logistic Regression via `faer` / `linfa` | Deterministic baseline ratio | Independent of NPU and ONNX runtime |
 | Analysis | `linfa` 0.8, `faer` 0.24, `bhtsne` 0.5 | Vector-set assessment, MMD shift test, TwoNN | Pure-Rust numeric calculations |
 | Optional Training | `burn` 0.22.1 (`Flex` CPU backend) | Offline neural model training | Confined to `l2d-train` |
@@ -167,7 +167,7 @@ crates/
 │   └── export.rs                  # Burn weights export to EncoderPackage files
 ├── l2d-store/src/
 │   ├── lib.rs                     # Synchronous Store facade
-│   ├── sqlite.rs                  # SQLite setup, FTS5 index, meta table, migrations
+│   ├── sqlite.rs                  # SQLite setup, FTS5 index, meta table (format 1; no migrations yet)
 │   ├── vector.rs                  # In-memory exact SIMD vector search via faer
 │   └── query.rs                   # Nearest, text (FTS5), combined, restricted searches
 ├── l2d-decide/src/
@@ -200,7 +200,7 @@ tests/fixtures/mini-labelled.csv   # 200 synthetic labelled request lines
 runtime/README.md                  # Which DLLs belong in runtime/ryzenai/ and where they come from
 ```
 
-Runtime directories, all untracked: `models/encoders/<name>-<rev12>/`, `models/baselines/<name>-<rev12>/`, `models/calibrations/<name>-<rev12>/`, `stores/<name>/`, `runtime/ryzenai/`, `runtime/cache/`, `reports/`.
+Runtime directories, all untracked: `models/encoders/<name>-<rev12>/`, `models/baselines/<name>-<rev12>/`, `models/calibrations/<name>-<rev12>/`, `stores/<name>.db`, `runtime/ryzenai/`, `runtime/cache/`, `reports/`.
 
 ### Modified Files
 - `.gitignore` — add `/stores/`, `/runtime/ryzenai/`, `/runtime/cache/`, `/reports/`.
@@ -295,9 +295,9 @@ flowchart TD
 | 4.5 | Mark CPU runs | EncoderSession | `RunRecord.device` | |
 | 4.6 | NPU and CPU agree | EncoderSession, Quantizer | same 8-bit file on both | |
 | 4.7 | Ready within 30 s | EncoderSession | on-disk provider cache | |
-| 5.1 | Stored fields | Store | `StoredLog` | |
-| 5.2 | Similarity search | Store | `Store::nearest` | Triage |
-| 5.3 | Text search | Store | `Store::text_search` | |
+| 5.1 | Stored fields | Store | store rows frame, `Store::add_with` | |
+| 5.2 | Text search | Store | `Store::text_search` | |
+| 5.3 | Similarity search | Store | `Store::nearest` | Triage |
 | 5.4 | Combined search | Store | `Store::nearest` with `Filter.contains` | |
 | 5.5 | Restrict by label or source | Store | `Filter` | |
 | 5.6 | Refuse identity mismatch | Store | `StoreError::IdentityMismatch` | |
@@ -373,7 +373,7 @@ flowchart TD
 | EncoderPackage, OnnxWriter, Quantizer | l2d-encoder | Encoder file format and identity | 3.1, 3.2, 3.6, 4.6 | `prost` (P1) | Service, State |
 | EncoderSession, RuntimeFiles, ByteCodec | l2d-encoder | Encode on NPU or CPU | 1.5, 4.1–4.7 | `ort` and AMD DLLs (P0) | Service |
 | Trainer | l2d-train | Train the encoder on CPU | 3.1, 3.3–3.5 | `burn` (P0), l2d-encoder (P0) | Batch |
-| Store | l2d-store | Persist and search logs | 5.1–5.7, 6.7 | `lancedb` (P0), `tokio` (P1) | Service, State |
+| Store | l2d-store | Persist and search logs | 5.1–5.7, 6.7 | `rusqlite` (P0), `faer` (P0) | Service, State |
 | Scorer, NeighbourScorer, Triage | l2d-decide | Ratio, evidence, abstention, ranking | 6.1–6.7 | l2d-store (P0), l2d-encoder (P0), l2d-baseline (P1) | Service |
 | ConformalCalibrator | l2d-decide | Label sets at a stated error rate over any scorer | 11.1–11.7, 11.10 | l2d-core (P0) | Service, State |
 | ShiftTest | l2d-decide | Population-shift test | 7.1–7.4 | none | Service |
@@ -748,39 +748,47 @@ pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings
 - Full-text search uses SQLite FTS5 for exact and containment queries.
 - Vector search is exact squared L2 on normalized vectors, computed via `faer` SIMD matrix multiplication over stored vectors.
 - Entirely synchronous; no async runtime or background database daemon.
+- As built by task 1.8 (format 1): the FTS5 index is an external-content table over `logs.text` with the `trigram` tokenizer, kept in step by insert, delete and update triggers. Rows are never written with `INSERT OR REPLACE`, whose implicit delete would skip the trigger. A closed store is one file.
+- Every row carries a finite vector of the store's dimension; a store cannot hold a log without a vector. A text with a NUL byte or longer than 8 MiB (`MAX_TEXT_BYTES`) is refused by row.
+- Memory (requirement 12.9): an add holds 16 MiB plus 192 times the bytes of the longest text, counting the longest text indexed on the connection, and is refused up front when that does not fit. After an add that indexed a text over 16 KiB the store reopens its connection, because the text index keeps its hash table until the connection closes; an idle open store keeps at most 1 MiB (`Store::retained_bytes`). The caller's frame is not counted by the store.
 
 **Dependencies**
-- External: `rusqlite` 0.32 (`bundled`, `fts5`) and `faer` 0.24 (P0).
+- External: `rusqlite` 0.32 (`bundled`, which includes FTS5) and `faer` 0.24 (P0; added with the vector search in task 1.9).
 
 **Contracts**: Service [x] / State [x]
 
 ```rust
-pub struct StoredLog {
-    pub id: String,                 // SHA-256 of source id and text
-    pub text: String,
-    pub source: String,
-    pub occurrences: u32,
-    pub label: Label,
-    pub group: Option<String>,
-    pub truncated: bool,
-    pub vector: Vec<f32>,
-    pub encoder_revision: String,
-}
+// Rows go in as the store rows frame (see "Data frames"); the store computes `id` and `encoder_revision`.
+pub fn log_id(source: &str, text: &str) -> String;   // SHA-256 of the 8-byte little-endian source length, the source, the text
+pub fn rows_frame(logs: &LogsFrame, source: &str, vectors: &[f32], dimension: u16, truncated: &[bool]) -> Result<DataFrame, StoreError>;
 
-pub struct Filter { pub label: Option<Label>, pub source: Option<String>, pub contains: Vec<String> }
-
-pub struct Hit { pub log: StoredLog, pub distance: f32 }
+pub struct AddReport { pub rows: u64, pub added: u64, pub repeated: u64, pub plan: BatchPlan, pub held_bytes: u64, pub longest_text_bytes: u64 }
 
 pub enum StoreError {
     IdentityMismatch { store: EncoderIdentity, given: EncoderIdentity },
-    Missing { expected_at: PathBuf },
+    Missing { name: String, expected_at: PathBuf },
+    Exists { .. }, InvalidName { .. }, InvalidIdentity { .. }, InvalidRows { .. },
+    Memory(L2dError),
     Failed { detail: String },
 }
 
 impl Store {
     pub fn create(paths: &ProjectPaths, name: &str, identity: &EncoderIdentity) -> Result<Self, StoreError>;
     pub fn open(paths: &ProjectPaths, name: &str) -> Result<Self, StoreError>;
-    pub fn add(&mut self, logs: &[StoredLog], identity: &EncoderIdentity) -> Result<u64, StoreError>;
+    pub fn add(&mut self, rows: &DataFrame, identity: &EncoderIdentity) -> Result<AddReport, StoreError>;   // fresh budget; callers holding a frame use add_with
+    pub fn add_with(&mut self, rows: &DataFrame, identity: &EncoderIdentity, budget: &mut MemoryBudget) -> Result<AddReport, StoreError>;
+    pub fn require_identity(&self, given: &EncoderIdentity) -> Result<(), StoreError>;
+    pub fn retained_bytes(&self) -> u64;
+    pub fn len(&self) -> Result<u64, StoreError>;
+}
+
+// Task 1.9 defines reading rows back and searching; the shapes below are its starting point.
+pub struct StoredLog { pub id: String, pub text: String, pub source: String, pub occurrences: u32, pub label: Label,
+                       pub group: Option<String>, pub truncated: bool, pub vector: Vec<f32>, pub encoder_revision: String }
+pub struct Filter { pub label: Option<Label>, pub source: Option<String>, pub contains: Vec<String> }
+pub struct Hit { pub log: StoredLog, pub distance: f32 }
+
+impl Store {
     pub fn nearest(&self, vector: &[f32], identity: &EncoderIdentity, k: usize, filter: &Filter)
         -> Result<Vec<Hit>, StoreError>;
     pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<Vec<StoredLog>, StoreError>;
@@ -788,7 +796,8 @@ impl Store {
 }
 ```
 - Preconditions: `add` and `nearest` receive the identity of the encoder that produced the vectors; a difference from the store's identity returns `IdentityMismatch`.
-- Invariant: `id` is unique; adding an existing `id` adds its occurrences and leaves text, label and vector unchanged.
+- Invariant: `id` is unique; adding an existing `id` adds its occurrences and leaves text, label and vector unchanged. An add is one transaction; a failed add leaves the file as it was.
+- For task 1.9: the trigram tokenizer folds case (Unicode, not only ASCII) and needs at least three characters, so case-exact matches need a second condition and shorter phrases a scan.
 
 ### Decisions
 
@@ -1051,6 +1060,7 @@ Frames exchanged between crates. Column names and types are fixed; a crate may a
 | Logs | `text` String, `label` String (`good`, `bad`, `unknown`), `group` String nullable, `first_position` UInt64, `occurrences` UInt32 | input adapters | baseline, encoder integration, store, triage, evaluation |
 | Scores | `text` String, `scorer` String, `ratio` Float32 nullable, `abstained` Boolean, plus evidence columns owned by the scorer | scorers | triage, calibration, evaluation |
 | Calibration points | `ratio` Float32, `label` String, `group` String nullable | evaluation harness, `l2d calibrate` | ConformalCalibrator |
+| Store rows | `text` String, `source` String, `occurrences` UInt32, `label` String, `group` String nullable, `truncated` Boolean, `vector` List of Float32 (length = dimension) | `l2d_store::rows_frame`, encoder integration | Store |
 | Predictions | `text`, `label`, `group`, `fold` UInt32, `scorer`, `ratio`, `label_set` String nullable | evaluation harness | metrics, reports |
 
 - Row order is meaningful: the logs frame is in first-occurrence order, and frames derived from it keep that order unless a column says otherwise.
@@ -1062,15 +1072,18 @@ Store table `logs`:
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | string | Primary identity, unique |
-| `text` | string | N-gram index for containment |
-| `source` | string | Bitmap index |
-| `occurrences` | uint32 | |
-| `label` | string (`good`, `bad`, `unknown`) | Bitmap index |
-| `group` | string, nullable | |
-| `truncated` | bool | |
-| `vector` | fixed-size list of float32, length = dimension | No approximate index |
-| `encoder_revision` | string | Equals the store's identity |
+| `seq` | integer | Primary key; insertion order and the row id of the text index |
+| `id` | text | Unique; see `log_id` |
+| `text` | text | Indexed by the FTS5 external-content table `logs_fts` (`trigram` tokenizer) |
+| `source` | text | Ordinary SQLite index |
+| `occurrences` | integer, 1 to 4,294,967,295 | |
+| `label` | text (`good`, `bad`, `unknown`) | Ordinary SQLite index |
+| `group_key` | text, nullable | |
+| `truncated` | integer, 0 or 1 | |
+| `vector` | blob of little-endian float32, exactly 4 × dimension bytes | No approximate index |
+| `encoder_revision` | text | Equals the store's identity |
+
+Both tables are STRICT with CHECK constraints for the ranges above. The file carries `user_version` 1 and an application id.
 
 Store table `meta`: one row with encoder name, revision, dimension, creation time, tool version.
 
@@ -1136,5 +1149,5 @@ Run records are written next to the artifact they describe (`training-record.jso
 
 ## Implementation Order Constraints
 1. Runtime spike: load AMD's DLL from Rust, register the Vitis AI provider, run the spike's 8-bit model, read placement. Fix the `ort` feature level and the DLL list. If this fails, stop and return to design.
-2. `lancedb` build check on Windows.
+2. `rusqlite` with bundled SQLite builds on Windows (done in task 1.8).
 3. `l2d-core` and `l2d-baseline` (no hardware dependency) can proceed in parallel with 1 and 2.

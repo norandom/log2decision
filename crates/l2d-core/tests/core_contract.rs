@@ -127,6 +127,11 @@ fn project_directories_are_fixed_below_the_root() {
     assert_eq!(paths.baselines_dir(), root.join("models").join("baselines"));
     assert_eq!(paths.data_dir(), root.join("data"));
     assert_eq!(paths.stores_dir(), root.join("stores"));
+    // A store is one database file, `stores/<name>.db` (task 1.8).
+    assert_eq!(
+        paths.store_path("csic"),
+        root.join("stores").join("csic.db")
+    );
     assert_eq!(paths.runtime_dir(), root.join("runtime"));
     assert_eq!(paths.ryzenai_dir(), root.join("runtime").join("ryzenai"));
     assert_eq!(

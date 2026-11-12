@@ -8,3 +8,8 @@ publish.workspace = true
 
 [dependencies]
 l2d-core.workspace = true
+# Bundled SQLite with its FTS5 text-search extension; see the workspace manifest for what
+# the dependency brings in.
+rusqlite.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

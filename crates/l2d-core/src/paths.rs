@@ -64,6 +64,11 @@ impl ProjectPaths {
         self.root.join("stores")
     }
 
+    /// `stores/<name>.db` — one store is one database file.
+    pub fn store_path(&self, name: &str) -> PathBuf {
+        self.stores_dir().join(format!("{name}.db"))
+    }
+
     /// `runtime/`
     pub fn runtime_dir(&self) -> PathBuf {
         self.root.join("runtime")

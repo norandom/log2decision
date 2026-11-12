@@ -110,6 +110,39 @@ ndarray = { version = "0.16", default-features = false, features = ["std"] }
 # `l2d` uses `ConformalPredictor` and `NonconformityMeasure` only. Not reviewed by the
 # owner yet (handover, "Open points").
 conformal-prediction = "=2.0.1"
+# The embedded store (requirement 5, task 1.8). Used by `l2d-store` only.
+#
+# The design asks for `rusqlite` 0.32 with the features `bundled` and `fts5`. Release
+# 0.32 has no feature called `fts5`: `bundled` compiles the SQLite source that ships in
+# `libsqlite3-sys` (SQLite 3.46.0) with `SQLITE_ENABLE_FTS5` set, so the text-search
+# extension is always there. A test of `l2d-store` asserts the compile option and the
+# `trigram` tokenizer, so a change of this entry that loses them fails the build's tests.
+#
+# What it brings in (`cargo tree -p rusqlite -e normal,build`, 2026-11-12). `Cargo.lock`
+# grows by seven packages, from 199 to 206:
+# - `rusqlite` 0.32.1 and `libsqlite3-sys` 0.30.1 (the SQLite C source, compiled by `cc`,
+#   which was in the lock file already, and linked statically).
+# - `pkg-config` 0.3.34 and `vcpkg` 0.2.15: build dependencies of `libsqlite3-sys` that
+#   are compiled but not consulted with `bundled`.
+#   Two environment variables of the build can change what is linked, whatever this
+#   entry says: `LIBSQLITE3_SYS_USE_PKG_CONFIG` links a system SQLite in place of the
+#   bundled source, and `LIBSQLITE3_FLAGS` adds or removes compile options of the bundled
+#   source. Neither is set on the reference host. The test compares the version the
+#   linked library reports with the version of the bundled header and pins it (3.46.0),
+#   so a system library of another version fails it; a system library of exactly that
+#   version, or changed compile options other than FTS5, would not be noticed.
+# - `hashlink` 0.9.1 (the prepared-statement cache) with a third `hashbrown` (0.14.5,
+#   next to 0.16 and 0.17); its `ahash` 0.8.12 (seeded from the operating system's
+#   random source through `getrandom`, no network) was in the lock file already.
+# - `fallible-iterator` 0.3.0; `fallible-streaming-iterator`, `bitflags` and `smallvec`
+#   were present already.
+# No feature beyond `bundled` is enabled: no `load_extension`, no `url`, `chrono`,
+# `serde_json` or `csv` integration, no SQLCipher (which would bring OpenSSL). The C
+# source is compiled with `SQLITE_ENABLE_LOAD_EXTENSION`, but loading an extension is
+# switched off per connection by default and `l2d-store` does not switch it on (the
+# binding's functions for that need its `load_extension` feature). SQLite has no network
+# code; the guard test over `Cargo.lock` stays green.
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 # Test-only reference implementation for the dense path.
 linfa = "0.8.1"
 linfa-logistic = "0.8.1"

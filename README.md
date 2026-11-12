@@ -60,7 +60,8 @@ it is allowed in.
 | Character-sequence features and the scoring model | Done, tested |
 | Baseline scorer (fit, score, save, load) | Done, tested |
 | Calibrated decisions (label sets at a chosen error rate) | Library done and tested, not yet wired to a command. The error rate holds on endpoints the calibration logs cover (about 5 % measured on CSIC); on endpoints it has never seen, 32 % to 79 % of good logs were wrongly ruled out and none were called good |
-| Store, search, triage, evaluation | Specified, not built |
+| Store: one SQLite file per store with a text index and the vectors | Library done and tested, not yet wired to a command. CSIC's 25,608 distinct logs are added in about 3.5 s into a 46 MiB file. A single log text may be at most 8 MiB |
+| Search, triage, evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
 | Encoder on the NPU | Feasibility shown; gated behind the baseline evaluation |
 
