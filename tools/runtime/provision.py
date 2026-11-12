@@ -3,7 +3,9 @@
 Development only. `l2d` is Rust and needs no Python; this script is the one step that
 places AMD's native files where the tool loads them from (`runtime/README.md`). Which
 files, of which release and from which package, is said by a tracked manifest,
-`runtime/ryzenai-<release>.manifest.json`; its `source.kind` decides the route.
+`runtime/ryzenai-<release>.<source>.manifest.json`; its `source.kind` (`wheel` or
+`nuget`) decides the route. The release is the one the tool is built for unless
+`--release` names another; the source is `nuget` when a package is given.
 
 Route `wheel` (AMD's wheel on its release-specific package index; needs the index):
 
@@ -15,14 +17,16 @@ package: AMD's wheel `onnxruntime-vitisai`, pinned by its URL and by its SHA-256
 the manifest's version, installed from the manifest's index, and its `RECORD` to list
 the manifest's sizes and hashes.
 
-Route `nuget` (AMD's NuGet package inside the ZIP AMD publishes; needs no index and no
-environment, only the ZIP on disk):
+Route `nuget` (AMD's NuGet package, as a file or inside the ZIP AMD publishes; needs no
+index and no environment, only the file on disk):
 
+    uv run --no-project --python 3.12 python tools/runtime/provision.py --nupkg <path of the package>
     uv run --no-project --python 3.12 python tools/runtime/provision.py --release 1.8.0 --nuget-zip <path of the ZIP>
 
-The ZIP is read where it is. The package inside it is opened by the name the manifest
-gives, its SHA-256 is compared with the manifest's, and its id and version (the
-`.nuspec` inside) must be the manifest's. Each file is read by the name the manifest
+The file is read where it is. From a ZIP the package is opened by the name the manifest
+gives. The package's size is compared with the manifest's before it is read, its
+SHA-256 is computed as it is read and compared with the manifest's, and its id and
+version (the `.nuspec` inside) must be the manifest's. Each file is read by the name the manifest
 gives for it. No name or path found in the archive is used to read or to write: a
 member with a path that points elsewhere is never looked at.
 
@@ -56,6 +60,7 @@ import os
 import shutil
 import sys
 import sysconfig
+import tempfile
 import tomllib
 import zipfile
 from dataclasses import dataclass, field
@@ -69,7 +74,25 @@ RECEIPT_FILE = "provisioned.json"
 MANIFEST_FORMAT = 1
 RECEIPT_FORMAT = 1
 #: What a manifest's source must name besides kind, package, version and directory.
-SOURCE_KEYS = {"wheel": ("index", "wheel"), "nuget": ("archive", "nupkg", "nupkg_sha256")}
+SOURCE_KEYS = {"wheel": ("index", "wheel"), "nuget": ("nupkg", "nupkg_bytes", "nupkg_sha256")}
+#: What it may name besides: the ZIP AMD publishes the package in, where there is one.
+OPTIONAL_SOURCE_KEYS = {"wheel": (), "nuget": ("archive",)}
+#: Names Windows gives to devices, whatever extension follows.
+RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"] + [f"COM{n}" for n in range(1, 10)] + [f"LPT{n}" for n in range(1, 10)]
+)
+
+
+def is_plain_file_name(name: str) -> bool:
+    """Whether `name` can only mean a file of that name in the directory it is joined to:
+    no directory part, none of the characters Windows gives a meaning in a path (a colon
+    would address a stream of another file), no trailing dot or space (Windows drops
+    them), and not a device name such as `CON` or `NUL`, with or without an extension."""
+    if not name or name in (".", "..") or name[-1] in ". ":
+        return False
+    if any(ord(character) < 32 or character in '<>:"/\\|?*' for character in name):
+        return False
+    return name.split(".")[0].rstrip().upper() not in RESERVED_NAMES
 
 
 class ProvisioningError(RuntimeError):
@@ -94,12 +117,18 @@ def built_release(repo_root: Path = REPO_ROOT) -> str:
     return f"{major}.{minor}.0"
 
 
-def manifest_of(release: str, repo_root: Path = REPO_ROOT) -> Path:
-    return repo_root / "runtime" / f"ryzenai-{release}.manifest.json"
+def manifest_of(release: str, kind: str, repo_root: Path = REPO_ROOT) -> Path:
+    """The tracked manifest of a release from a source (`wheel` or `nuget`)."""
+    # A release is digits and dots, a source is letters: nothing that could be a path.
+    release_parts = release.split(".")
+    if not (all(part.isascii() and part.isdigit() for part in release_parts) and kind.isascii() and kind.isalpha()):
+        raise ProvisioningError(f"{release!r} from {kind!r} does not name a manifest")
+    return repo_root / "runtime" / f"ryzenai-{release}.{kind}.manifest.json"
 
 
-def default_manifest(repo_root: Path = REPO_ROOT) -> Path:
-    return manifest_of(built_release(repo_root), repo_root)
+def default_manifest(kind: str = "wheel", repo_root: Path = REPO_ROOT) -> Path:
+    """The manifest of the release the tool is built for, from the given source."""
+    return manifest_of(built_release(repo_root), kind, repo_root)
 
 
 @dataclass(frozen=True)
@@ -120,8 +149,13 @@ class Manifest:
     version: str
     directory: str
     files: tuple[ManifestFile, ...]
-    #: By kind: `index` and `wheel`, or `archive`, `nupkg` and `nupkg_sha256`.
+    #: By kind: `index` and `wheel`, or `nupkg`, `nupkg_bytes`, `nupkg_sha256` and, where
+    #: AMD publishes the package inside a ZIP, `archive`.
     detail: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def nupkg_bytes(self) -> int:
+        return int(self.detail["nupkg_bytes"])
 
     @property
     def wheel_url(self) -> str:
@@ -165,8 +199,18 @@ def load_manifest(path: Path) -> Manifest:
             version=str(source["version"]),
             directory=str(source["directory"]),
             files=files,
-            detail={key: str(source[key]) for key in SOURCE_KEYS[kind]},
+            detail={key: str(source[key]) for key in SOURCE_KEYS[kind]}
+            | {key: str(source[key]) for key in OPTIONAL_SOURCE_KEYS[kind] if key in source},
         )
+        if kind == "nuget":
+            if manifest.nupkg_bytes <= 0:
+                raise ValueError("nupkg_bytes must be the size of the package")
+            for key in ("nupkg", "archive"):
+                if key in manifest.detail and not is_plain_file_name(manifest.detail[key]):
+                    raise ProvisioningError(
+                        f"the manifest {path} names {manifest.detail[key]!r} as {key}, not a "
+                        "plain file name"
+                    )
     except KeyError as error:
         raise ProvisioningError(f"the manifest {path} lacks the key {error.args[0]!r}") from error
     except (TypeError, ValueError) as error:
@@ -174,7 +218,7 @@ def load_manifest(path: Path) -> Manifest:
     if not files:
         raise ProvisioningError(f"the manifest {path} names no file")
     for entry in files:
-        if Path(entry.name).name != entry.name or entry.name in (".", ".."):
+        if not is_plain_file_name(entry.name):
             raise ProvisioningError(f"the manifest {path} names {entry.name!r}, not a plain file name")
     return manifest
 
@@ -185,16 +229,22 @@ def require_kind(manifest: Manifest, kind: str) -> None:
         return
     if kind == "nuget":
         raise ProvisioningError(
-            f"--nuget-zip was given, but the manifest {manifest.path} ({manifest.release_text}) "
-            f"names a source of the kind {manifest.kind!r}: its files come from AMD's wheel, "
-            "whose builds differ from the NuGet package's. Name a release whose manifest is "
-            "of the kind 'nuget' with --release, or leave --nuget-zip away"
+            f"a NuGet package was given (--nupkg or --nuget-zip), but the manifest "
+            f"{manifest.path} ({manifest.release_text}) names a source of the kind "
+            f"{manifest.kind!r}: its files come from AMD's wheel, whose files have other "
+            "hashes than the NuGet package's. Leave --manifest away to have the release's "
+            "manifest of the kind 'nuget' taken"
         )
+    where = (
+        f"inside {manifest.detail['archive']} (pass --nuget-zip with the path of that ZIP, or "
+        "--nupkg with the path of the package)"
+        if "archive" in manifest.detail
+        else "(pass --nupkg with the path of the package)"
+    )
     raise ProvisioningError(
         f"the manifest {manifest.path} ({manifest.release_text}) names a source of the kind "
         f"{manifest.kind!r}: its files come from AMD's NuGet package "
-        f"{manifest.detail.get('nupkg')} inside {manifest.detail.get('archive')}, not from a "
-        "wheel. Pass --nuget-zip with the path of that ZIP"
+        f"{manifest.detail.get('nupkg')} {where}, not from a wheel"
     )
 
 
@@ -340,13 +390,21 @@ def verify_source(site_packages: Path, dist_info: Path, manifest: Manifest) -> l
 class NugetSource:
     """AMD's NuGet package, opened inside the ZIP it was published in."""
 
-    archive: Path
-    archive_bytes: int
-    archive_sha256: str
+    #: The file that was given: the package itself, or the ZIP that holds it.
+    given: Path
+    #: The ZIP, when the package was read from one: its size and SHA-256.
+    archive_bytes: int | None
+    archive_sha256: str | None
     nupkg: str
     nupkg_bytes: int
     nupkg_sha256: str
     package: zipfile.ZipFile
+
+    @property
+    def described(self) -> str:
+        if self.archive_bytes is None:
+            return str(self.given)
+        return f"{self.nupkg} in {self.given}"
 
     def member(self, manifest: Manifest, entry: ManifestFile) -> str:
         """The name of a file inside the package, built from the manifest alone."""
@@ -364,54 +422,105 @@ def _nuspec_identity(text: str) -> tuple[str | None, str | None]:
     return found.get("id"), found.get("version")
 
 
-def open_nuget(archive: Path, manifest: Manifest) -> NugetSource:
-    """Opens the package of the manifest inside `archive` and requires it to be that
-    package: its name, its SHA-256, and the id and version it states."""
-    if not archive.is_file():
-        raise ProvisioningError(f"the ZIP {archive} does not exist")
+def _refuse_other_size(described: str, found: int, manifest: Manifest) -> None:
+    if found != manifest.nupkg_bytes:
+        raise ProvisioningError(
+            f"{described} has {found} bytes, the manifest has {manifest.nupkg_bytes}: it is "
+            f"not the package of {manifest.release_text}. It was not read"
+        )
+
+
+def _refuse_other_hash(described: str, found: str, manifest: Manifest) -> None:
+    if found != manifest.detail["nupkg_sha256"]:
+        raise ProvisioningError(
+            f"{described} has SHA-256 {found}, the manifest has "
+            f"{manifest.detail['nupkg_sha256']}: another build of the package"
+        )
+
+
+def open_nuget(given: Path, manifest: Manifest, *, in_zip: bool) -> NugetSource:
+    """Opens the package of the manifest and requires it to be that package: its size,
+    its SHA-256, and the id and version it states. `given` is the package file itself,
+    or with `in_zip` the ZIP that holds it under the manifest's name.
+
+    The size is compared with the manifest's before the package is read, and the
+    package is hashed as it is read; it is never held in memory whole. From a ZIP it is
+    copied, bounded by the manifest's size, to a temporary file that is removed when the
+    package is closed.
+    """
+    kind = "ZIP" if in_zip else "package"
+    if not given.is_file():
+        raise ProvisioningError(f"the {kind} {given} does not exist")
     nupkg = manifest.detail["nupkg"]
+    archive_bytes: int | None = None
+    archive_sha256: str | None = None
     try:
-        with archive.open("rb") as handle:
-            archive_sha256, archive_bytes = sha256_of_stream(handle)
-        with zipfile.ZipFile(archive) as outer:
-            # Opened by the manifest's name, never by a name read from the archive.
-            try:
-                data = outer.read(nupkg)
-            except KeyError:
-                packages = sorted(name for name in outer.namelist() if name.lower().endswith(".nupkg"))
-                raise ProvisioningError(
-                    f"the ZIP {archive} does not hold {nupkg}, the package of "
-                    f"{manifest.release_text}; it holds: {', '.join(packages) or 'no package'}. "
-                    "Releases are not mixed"
-                ) from None
-        found = hashlib.sha256(data).hexdigest()
-        if found != manifest.detail["nupkg_sha256"]:
-            raise ProvisioningError(
-                f"{nupkg} in {archive} has SHA-256 {found}, the manifest has "
-                f"{manifest.detail['nupkg_sha256']}: another build of the package"
-            )
-        package = zipfile.ZipFile(io.BytesIO(data))
+        if in_zip:
+            described = f"{nupkg} in {given}"
+            with given.open("rb") as handle:
+                archive_sha256, archive_bytes = sha256_of_stream(handle)
+            with zipfile.ZipFile(given) as outer:
+                # Opened by the manifest's name, never by a name read from the archive.
+                try:
+                    info = outer.getinfo(nupkg)
+                except KeyError:
+                    packages = sorted(
+                        name for name in outer.namelist() if name.lower().endswith(".nupkg")
+                    )
+                    raise ProvisioningError(
+                        f"the ZIP {given} does not hold {nupkg}, the package of "
+                        f"{manifest.release_text}; it holds: "
+                        f"{', '.join(packages) or 'no package'}. Releases are not mixed"
+                    ) from None
+                _refuse_other_size(described, info.file_size, manifest)
+                # The size above is what the archive says. The copy stops at the
+                # manifest's size whatever comes out, so an archive that says one size
+                # and holds another cannot fill the disk or the memory.
+                spooled = tempfile.TemporaryFile(prefix="l2d-nupkg-")
+                digest = hashlib.sha256()
+                copied = 0
+                with outer.open(info) as member:
+                    while chunk := member.read(1 << 20):
+                        copied += len(chunk)
+                        if copied > manifest.nupkg_bytes:
+                            spooled.close()
+                            _refuse_other_size(described, copied, manifest)
+                        digest.update(chunk)
+                        spooled.write(chunk)
+                _refuse_other_size(described, copied, manifest)
+                found = digest.hexdigest()
+                source: object = spooled
+        else:
+            described = str(given)
+            _refuse_other_size(described, given.stat().st_size, manifest)
+            with given.open("rb") as handle:
+                found, _ = sha256_of_stream(handle)
+            source = given
+        _refuse_other_hash(described, found, manifest)
+        package = zipfile.ZipFile(source)  # type: ignore[arg-type]
         try:
             identity = _nuspec_identity(package.read(f"{manifest.package}.nuspec").decode("utf-8"))
         except KeyError:
             raise ProvisioningError(
-                f"{nupkg} in {archive} holds no {manifest.package}.nuspec: it is not the "
-                f"package {manifest.package}"
+                f"{described} holds no {manifest.package}.nuspec: it is not the package "
+                f"{manifest.package}"
             ) from None
     except (zipfile.BadZipFile, ElementTree.ParseError, UnicodeDecodeError) as error:
-        raise ProvisioningError(f"the ZIP {archive} cannot be read as AMD's NuGet ZIP: {error}") from error
+        raise ProvisioningError(
+            f"the {kind} {given} cannot be read as AMD's NuGet {kind}: {error}"
+        ) from error
     if identity != (manifest.package, manifest.version):
         raise ProvisioningError(
-            f"{nupkg} in {archive} states the package {identity[0]} {identity[1]}; "
+            f"{described} states the package {identity[0]} {identity[1]}; "
             f"{manifest.release_text} is {manifest.package} {manifest.version}. Releases are "
             "not mixed"
         )
     return NugetSource(
-        archive=archive,
+        given=given,
         archive_bytes=archive_bytes,
         archive_sha256=archive_sha256,
         nupkg=nupkg,
-        nupkg_bytes=len(data),
+        nupkg_bytes=manifest.nupkg_bytes,
         nupkg_sha256=found,
         package=package,
     )
@@ -441,7 +550,7 @@ def verify_nuget(source: NugetSource, manifest: Manifest) -> None:
             problems.append(f"{member} has SHA-256 {found}, the manifest has {entry.sha256}")
     if problems:
         raise ProvisioningError(
-            f"{source.nupkg} in {source.archive} is not {manifest.release_text} as the manifest "
+            f"{source.described} is not {manifest.release_text} as the manifest "
             "describes it; nothing was copied: " + "; ".join(problems)
         )
 
@@ -455,10 +564,32 @@ def extract_member(source: NugetSource, member: str, partial: Path) -> None:
 # --- Both routes --------------------------------------------------------------------------
 
 
-def refuse_unusable_target(target: Path, manifest: Manifest) -> None:
+def refuse_unusable_target(
+    target: Path,
+    manifest: Manifest,
+    *,
+    source_file: Path | None = None,
+    repo_root: Path = REPO_ROOT,
+) -> None:
     resolved = target.resolve()
     if resolved == Path(resolved.anchor):
         raise ProvisioningError(f"the target {target} is a drive root")
+    # The directory the package or ZIP lies in (a download folder, say) is not a runtime
+    # directory: the files would be placed among whatever else is there.
+    if source_file is not None and resolved == source_file.resolve().parent:
+        raise ProvisioningError(
+            f"the target {target} is the directory that holds {source_file.name}; choose a "
+            "directory of its own for the runtime files"
+        )
+    # Inside the repository only `runtime/ryzenai/` is for these files (it is ignored by
+    # git); anywhere else they would lie in the tracked tree.
+    root = repo_root.resolve()
+    allowed = root / "runtime" / "ryzenai"
+    if (resolved == root or root in resolved.parents) and resolved != allowed:
+        raise ProvisioningError(
+            f"the target {target} lies inside the repository {root}; there the runtime files "
+            f"belong in {allowed} only"
+        )
     if target.exists() and not target.is_dir():
         raise ProvisioningError(f"the target {target} is not a directory")
     if not target.is_dir():
@@ -551,38 +682,53 @@ def provision(
     site_packages: Path | None = None,
     accept_unrecorded_origin: bool = False,
     nuget_zip: Path | None = None,
+    nupkg: Path | None = None,
+    repo_root: Path = REPO_ROOT,
 ) -> list[str]:
     """Runs the steps of the module text. Returns the lines of its report."""
     manifest = load_manifest(manifest_path)
     report = [f"release: {manifest.release_text}"]
     writers: list[tuple[Callable[[Path], None], str]]
-    if nuget_zip is not None:
+    if nuget_zip is not None and nupkg is not None:
+        raise ProvisioningError("--nupkg and --nuget-zip were both given; name one source")
+    given = nuget_zip if nuget_zip is not None else nupkg
+    if given is not None:
         require_kind(manifest, "nuget")
-        nuget = open_nuget(nuget_zip, manifest)
-        refuse_unusable_target(target, manifest)
+        # The target is judged before the package is opened: nothing is read for a
+        # target that will be refused.
+        refuse_unusable_target(target, manifest, source_file=given, repo_root=repo_root)
+        nuget = open_nuget(given, manifest, in_zip=nuget_zip is not None)
         verify_nuget(nuget, manifest)
         source: dict[str, object] = {
             "kind": "nuget",
             "package": manifest.package,
             "version": manifest.version,
             "directory": manifest.directory,
-            "archive": {
-                "name": nuget.archive.name,
-                "path": str(nuget.archive.resolve()),
-                "bytes": nuget.archive_bytes,
-                "sha256": nuget.archive_sha256,
-            },
             "nupkg": {
                 "name": nuget.nupkg,
                 "bytes": nuget.nupkg_bytes,
                 "sha256": nuget.nupkg_sha256,
             },
         }
-        report.append(
-            f"source: {manifest.package} {manifest.version} ({nuget.nupkg}, {nuget.nupkg_bytes} "
-            f"bytes, sha256 {nuget.nupkg_sha256}) in {nuget.archive} ({nuget.archive_bytes} "
-            f"bytes, sha256 {nuget.archive_sha256})"
-        )
+        if nuget.archive_bytes is None:
+            # The package file itself was given.
+            source["nupkg"] |= {"file": given.name, "path": str(given.resolve())}  # type: ignore[operator]
+            report.append(
+                f"source: {manifest.package} {manifest.version}, the package {given} "
+                f"({nuget.nupkg_bytes} bytes, sha256 {nuget.nupkg_sha256})"
+            )
+        else:
+            source["archive"] = {
+                "name": given.name,
+                "path": str(given.resolve()),
+                "bytes": nuget.archive_bytes,
+                "sha256": nuget.archive_sha256,
+            }
+            report.append(
+                f"source: {manifest.package} {manifest.version} ({nuget.nupkg}, "
+                f"{nuget.nupkg_bytes} bytes, sha256 {nuget.nupkg_sha256}) in {given} "
+                f"({nuget.archive_bytes} bytes, sha256 {nuget.archive_sha256})"
+            )
         writers = [
             (
                 lambda partial, member=nuget.member(manifest, entry): extract_member(
@@ -598,7 +744,7 @@ def provision(
             site_packages = Path(sysconfig.get_paths()["purelib"])
         dist_info = find_dist_info(site_packages, manifest)
         origin = check_origin(dist_info, manifest, accept_unrecorded_origin)
-        refuse_unusable_target(target, manifest)
+        refuse_unusable_target(target, manifest, repo_root=repo_root)
         sources = verify_source(site_packages, dist_info, manifest)
         source = {
             "kind": "wheel",
@@ -649,8 +795,9 @@ def build_parser() -> argparse.ArgumentParser:
     chosen = parser.add_mutually_exclusive_group()
     chosen.add_argument(
         "--release",
-        help="release to provision, for example 1.8.0: its manifest is "
-        "runtime/ryzenai-<release>.manifest.json (default: the release the tool is built for)",
+        help="release to provision, for example 1.8.0 (default: the release the tool is "
+        "built for). Its manifest is runtime/ryzenai-<release>.<source>.manifest.json, the "
+        "source being 'nuget' when --nupkg or --nuget-zip is given and 'wheel' otherwise",
     )
     chosen.add_argument(
         "--manifest",
@@ -658,12 +805,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="manifest to provision, in place of --release",
     )
-    parser.add_argument(
+    package = parser.add_mutually_exclusive_group()
+    package.add_argument(
+        "--nupkg",
+        type=Path,
+        default=None,
+        help="AMD's NuGet package file (for example RyzenAI_Deployment.1.9.0.nupkg), read "
+        "where it is",
+    )
+    package.add_argument(
         "--nuget-zip",
         type=Path,
         default=None,
-        help="AMD's NuGet ZIP (for example ryzen_ai_nuget_1.8.0.zip), read where it is; "
-        "for a release whose manifest names a source of the kind 'nuget'",
+        help="AMD's NuGet ZIP that holds the package (for example ryzen_ai_nuget_1.8.0.zip), "
+        "read where it is",
     )
     parser.add_argument(
         "--site-packages",
@@ -684,22 +839,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
+        # The source decides which manifest of the release is meant.
+        kind = "nuget" if (arguments.nupkg or arguments.nuget_zip) else "wheel"
         if arguments.manifest is not None:
             manifest_path = arguments.manifest
         elif arguments.release is not None:
-            manifest_path = manifest_of(arguments.release)
+            manifest_path = manifest_of(arguments.release, kind)
         else:
-            manifest_path = default_manifest()
+            manifest_path = default_manifest(kind)
         report = provision(
             manifest_path=manifest_path,
             target=arguments.target,
             site_packages=arguments.site_packages,
             accept_unrecorded_origin=arguments.accept_unrecorded_origin,
             nuget_zip=arguments.nuget_zip,
+            nupkg=arguments.nupkg,
         )
     except ProvisioningError as error:
         print(f"provision: refused: {error}", file=sys.stderr)
         return 1
+    except zipfile.BadZipFile as error:
+        # The archive was read whole and found right before anything was placed; if it
+        # cannot be read now, it changed or the disk failed underneath. As for a failed
+        # copy: files already placed are whole, and there is no record.
+        print(f"provision: failed: the archive could not be read while placing: {error}", file=sys.stderr)
+        return 2
     except OSError as error:
         # A copy or a write that failed (disk full, a file in use, no permission). Files
         # already placed are whole, since each takes its name only after it was hashed;

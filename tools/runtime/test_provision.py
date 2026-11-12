@@ -302,10 +302,19 @@ class PinningTests(unittest.TestCase):
         )
         self.assertEqual(cargo["features"]["default"], ["ryzenai-1-9"])
         self.assertEqual(provision.built_release(), "1.9.0")
-        self.assertEqual(provision.default_manifest().name, "ryzenai-1.9.0.manifest.json")
+        self.assertEqual(provision.default_manifest().name, "ryzenai-1.9.0.wheel.manifest.json")
+        self.assertEqual(
+            provision.default_manifest("nuget").name, "ryzenai-1.9.0.nuget.manifest.json"
+        )
+        for release, kind in (("1.9.0", "wheel"), ("1.9.0", "nuget"), ("1.8.0", "nuget")):
+            manifest = provision.load_manifest(provision.manifest_of(release, kind))
+            self.assertEqual((manifest.release, manifest.kind), (release, kind))
+        for release, kind in (("..", "wheel"), ("1.9.0", "a/b"), ("1.9.0", "x.y"), ("1:9", "nuget")):
+            with self.assertRaises(provision.ProvisioningError):
+                provision.manifest_of(release, kind)
 
     def test_the_tracked_manifest_of_1_8_0_is_of_the_kind_nuget(self) -> None:
-        manifest = provision.load_manifest(provision.manifest_of("1.8.0"))
+        manifest = provision.load_manifest(provision.manifest_of("1.8.0", "nuget"))
         self.assertEqual(manifest.kind, "nuget")
         self.assertEqual(manifest.package, "RyzenAI_Deployment")
         self.assertEqual(manifest.version, "1.8.0")
@@ -315,7 +324,7 @@ class PinningTests(unittest.TestCase):
 
     def test_a_manifest_of_an_unknown_kind_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="l2d-provision-test-") as scratch:
-            data = json.loads(provision.manifest_of("1.8.0").read_text(encoding="utf-8"))
+            data = json.loads(provision.manifest_of("1.8.0", "nuget").read_text(encoding="utf-8"))
             data["source"]["kind"] = "msi"
             path = Path(scratch) / "manifest.json"
             path.write_text(json.dumps(data), encoding="utf-8")

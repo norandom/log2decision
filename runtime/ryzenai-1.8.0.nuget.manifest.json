@@ -6,6 +6,7 @@
     "kind": "nuget",
     "archive": "ryzen_ai_nuget_1.8.0.zip",
     "nupkg": "RyzenAI_Deployment.1.8.0.nupkg",
+    "nupkg_bytes": "274829591",
     "nupkg_sha256": "46d66c12080422004ee7418da5ec2ab2e52e5f69160957f7b177cbd0ff4bc20b",
     "package": "RyzenAI_Deployment",
     "version": "1.8.0",

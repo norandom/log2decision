@@ -503,18 +503,74 @@ fn a_record_that_cannot_be_read_is_treated_as_no_record_and_replaced() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     std::fs::remove_dir_all(&dir).unwrap();
 
-    // A folder in the record's place cannot be read or replaced: the check passes, hashes
-    // at every start and says both.
-    let dir = complete("unreadable-folder");
-    std::fs::create_dir(dir.join(RECEIPT_FILE)).unwrap();
-    let checked = fast(&dir).unwrap();
-    assert_eq!(checked.hashed, ALL);
-    assert!(
-        matches!(checked.record, RecordState::NotWritten { .. }),
-        "{:?}",
-        checked.record
-    );
+    // Bytes that are not text are content that is not a record, too.
+    let dir = complete("unreadable-binary");
+    std::fs::write(dir.join(RECEIPT_FILE), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+    assert!(matches!(
+        fast(&dir).unwrap().record,
+        RecordState::Replaced { .. }
+    ));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A record that is there but cannot be opened for the moment is not a record that
+/// cannot be read: it may be a good one that another process has open. Nothing is
+/// trusted for this start, and the record is neither replaced nor rewritten.
+#[test]
+fn a_record_that_cannot_be_opened_is_left_as_it_is() {
+    // A folder in the record's place cannot be opened as a file.
+    let dir = complete("unavailable-folder");
+    std::fs::create_dir(dir.join(RECEIPT_FILE)).unwrap();
+    for _ in 0..2 {
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.hashed, ALL);
+        let RecordState::Unavailable { reason } = &checked.record else {
+            panic!("{:?}", checked.record);
+        };
+        assert!(reason.contains(RECEIPT_FILE), "{reason}");
+        assert!(checked.record.describe().contains("left as it is"));
+        assert!(dir.join(RECEIPT_FILE).is_dir());
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // A record another process holds open without sharing it (Windows): the check
+    // passes, hashes everything, and the record is byte for byte what it was; once it is
+    // free again it is used as before.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = complete("unavailable-locked");
+        write_provisioning_record(&dir, "2.0.0", "1.30.0");
+        let path = dir.join(RECEIPT_FILE);
+        let before = std::fs::read(&path).unwrap();
+        // Touched, so that with a readable record this file would be re-verified and
+        // the record rewritten.
+        set_modified(
+            &dir.join("provider.dll"),
+            std::time::SystemTime::now() + Duration::from_secs(300),
+        );
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.hashed, ALL);
+        assert!(
+            matches!(checked.record, RecordState::Unavailable { .. }),
+            "{:?}",
+            checked.record
+        );
+        assert_eq!(checked.refresh, RecordRefresh::NotNeeded);
+        drop(lock);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let checked = fast(&dir).unwrap();
+        assert_eq!(checked.record, RecordState::Provisioning);
+        assert_eq!(checked.hashed, vec!["provider.dll"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 // --- The record is bound to the manifest -------------------------------------------------
@@ -569,7 +625,9 @@ fn a_record_whose_hashes_belong_to_another_source_does_not_make_files_trusted() 
 }
 
 /// A record without sizes and hashes, or with other ones, over files that are right: the
-/// files are hashed once, found right, and the record gets the manifest's values.
+/// files are hashed once and found right. A record that lacked the values gets them and
+/// stays what it was; a record that held other hashes described other content, so its
+/// source is not kept: a record of the check replaces it.
 #[test]
 fn a_record_without_the_manifests_hashes_is_not_trusted_and_is_brought_up_to_date() {
     for strip in [true, false] {
@@ -593,12 +651,7 @@ fn a_record_without_the_manifests_hashes_is_not_trusted_and_is_brought_up_to_dat
 
         let checked = fast(&dir).unwrap();
         assert_eq!(checked.hashed, ALL, "strip {strip}");
-        assert_eq!(
-            checked.refresh,
-            RecordRefresh::Refreshed {
-                files: ALL.iter().map(|name| name.to_string()).collect()
-            }
-        );
+        let files: Vec<String> = ALL.iter().map(|name| name.to_string()).collect();
         let after = read_record(&dir);
         for (entry, file) in after["files"]
             .as_array()
@@ -609,7 +662,16 @@ fn a_record_without_the_manifests_hashes_is_not_trusted_and_is_brought_up_to_dat
             assert_eq!(entry["sha256"], file.sha256);
             assert_eq!(entry["bytes"], file.bytes);
         }
-        assert_eq!(after["written_by"], "provisioning");
+        if strip {
+            assert_eq!(checked.refresh, RecordRefresh::Refreshed { files });
+            assert_eq!(after["written_by"], "provisioning");
+            assert!(after.get("source").is_some());
+        } else {
+            assert_eq!(checked.refresh, RecordRefresh::Rewritten { files });
+            assert!(checked.refresh.describe().contains("another source"));
+            assert_eq!(after["written_by"], "check");
+            assert!(after.get("source").is_none(), "{after}");
+        }
         assert!(fast(&dir).unwrap().hashed.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -815,7 +877,48 @@ fn a_manifest_is_validated_when_parsed() {
     bad_hash.files[0].sha256 = "ABC".into();
     let mut twice = manifest();
     twice.files[1].name = "ONNXRUNTIME.DLL".into();
-    for broken in [other_format, no_files, path_name, bad_hash, twice] {
+    let mut broken_names = Vec::new();
+    // Names that are not plainly a file of that name in the directory: a stream of
+    // another file, names Windows changes (trailing dot or space), device names with or
+    // without an extension, and characters that have a meaning in a path.
+    for name in [
+        "second.dll:stream",
+        "onnxruntime.dll::$DATA",
+        "C:onnxruntime.dll",
+        "trailing.dll.",
+        "trailing.dll ",
+        "CON",
+        "con.dll",
+        "NUL.dll",
+        "COM1.dll",
+        "lpt9.txt.dll",
+        "sub/onnxruntime.dll",
+        "what?.dll",
+        "star*.dll",
+        "pipe|.dll",
+        "tab\t.dll",
+        ".",
+        "..",
+        "",
+    ] {
+        assert!(!l2d_encoder::runtime::is_plain_file_name(name), "{name:?}");
+        let mut named = manifest();
+        named.files[0].name = name.into();
+        broken_names.push(named);
+    }
+    for name in [
+        "onnxruntime.dll",
+        "onnxruntime-genai.dll",
+        "a b.dll",
+        "CONSOLE.dll",
+        "x.y.z",
+    ] {
+        assert!(l2d_encoder::runtime::is_plain_file_name(name), "{name:?}");
+    }
+    for broken in [other_format, no_files, path_name, bad_hash, twice]
+        .into_iter()
+        .chain(broken_names)
+    {
         let text = serde_json::to_string(&broken).unwrap();
         let error = RuntimeManifest::parse(&text).unwrap_err();
         assert!(
@@ -833,10 +936,11 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-fn tracked_manifest(release: &str) -> RuntimeManifest {
+/// The tracked manifest of a release from a source: `runtime/ryzenai-<release>.<kind>.manifest.json`.
+fn tracked_manifest(release: &str, kind: &str) -> RuntimeManifest {
     let path = workspace_root()
         .join("runtime")
-        .join(format!("ryzenai-{release}.manifest.json"));
+        .join(format!("ryzenai-{release}.{kind}.manifest.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
     RuntimeManifest::parse(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
@@ -854,7 +958,39 @@ fn the_built_release_is_one_choice_that_everything_agrees_on() {
         "1.8.0"
     };
     assert_eq!(expected.release, by_feature);
-    assert_eq!(&tracked_manifest(by_feature), expected);
+    // The manifests a directory may match: one per source of the built release.
+    let built: Vec<RuntimeManifest> = if by_feature == "1.9.0" {
+        vec![
+            tracked_manifest("1.9.0", "wheel"),
+            tracked_manifest("1.9.0", "nuget"),
+        ]
+    } else {
+        vec![tracked_manifest("1.8.0", "nuget")]
+    };
+    assert_eq!(RuntimeManifest::built(), built.as_slice());
+    assert_eq!(expected, &built[0]);
+    // The sources of a release differ in the hashes only: same release, same names, same
+    // sizes, same file versions (the builds are the same, signed separately).
+    for manifest in RuntimeManifest::built() {
+        assert_eq!(manifest.release, expected.release);
+        assert_eq!(manifest.onnxruntime, expected.onnxruntime);
+        let shape = |manifest: &RuntimeManifest| -> Vec<(String, u64, String)> {
+            manifest
+                .files
+                .iter()
+                .map(|file| (file.name.clone(), file.bytes, file.version.clone()))
+                .collect()
+        };
+        assert_eq!(shape(manifest), shape(expected));
+    }
+    let kinds: Vec<&str> = RuntimeManifest::built()
+        .iter()
+        .map(|manifest| manifest.source.kind.as_str())
+        .collect();
+    let mut distinct = kinds.clone();
+    distinct.dedup();
+    assert_eq!(kinds, distinct, "one manifest per source");
+    assert_eq!(RuntimeManifest::known().len(), 3);
 
     // `ort` asks the runtime for the API level of the release's ONNX Runtime (1.NN.x).
     let minor: u32 = expected
@@ -890,7 +1026,7 @@ fn the_built_release_is_one_choice_that_everything_agrees_on() {
     );
 }
 
-/// Both releases have a tracked manifest, and the tables of `runtime/README.md` say the
+/// Every tracked manifest has its table in `runtime/README.md`, and the tables say the
 /// same as the manifests.
 #[test]
 fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
@@ -898,9 +1034,10 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
         std::fs::read_to_string(workspace_root().join("runtime").join("README.md")).unwrap();
     for (release, onnxruntime, kind, count, total) in [
         ("1.9.0", "1.30.0", "wheel", 5, 713_594_768u64),
+        ("1.9.0", "1.30.0", "nuget", 5, 713_594_768u64),
         ("1.8.0", "1.27.0", "nuget", 6, 451_655_648u64),
     ] {
-        let manifest = tracked_manifest(release);
+        let manifest = tracked_manifest(release, kind);
         assert_eq!(manifest.release, release);
         assert_eq!(manifest.onnxruntime, onnxruntime);
         assert_eq!(manifest.source.kind, kind);
@@ -909,7 +1046,7 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
         assert_eq!(manifest.total_bytes(), total);
 
         // The section of the release: from its heading to the next heading.
-        let heading = format!("### AMD Ryzen AI {release}");
+        let heading = format!("### AMD Ryzen AI {release}, {kind}");
         let section: Vec<&str> = readme
             .lines()
             .skip_while(|line| !line.starts_with(&heading))
@@ -944,18 +1081,27 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
                 )
             })
             .collect();
-        assert_eq!(rows, manifest_rows, "{release}");
+        assert_eq!(rows, manifest_rows, "{release} {kind}");
     }
-    let wheel = tracked_manifest("1.9.0");
+    let wheel = tracked_manifest("1.9.0", "wheel");
     assert_eq!(wheel.source.package, "onnxruntime-vitisai");
     assert!(wheel.source.detail["index"].contains("/1.9.0/"));
-    let nuget = tracked_manifest("1.8.0");
-    assert_eq!(nuget.source.package, "RyzenAI_Deployment");
-    assert_eq!(
-        nuget.source.detail["nupkg"],
-        "RyzenAI_Deployment.1.8.0.nupkg"
-    );
-    assert_eq!(nuget.source.detail["nupkg_sha256"].len(), 64);
+    for (release, bytes) in [("1.9.0", "289269284"), ("1.8.0", "274829591")] {
+        let nuget = tracked_manifest(release, "nuget");
+        assert_eq!(nuget.source.package, "RyzenAI_Deployment");
+        assert_eq!(nuget.source.version, release);
+        assert_eq!(
+            nuget.source.detail["nupkg"],
+            format!("RyzenAI_Deployment.{release}.nupkg")
+        );
+        assert_eq!(nuget.source.detail["nupkg_sha256"].len(), 64);
+        assert_eq!(nuget.source.detail["nupkg_bytes"], bytes);
+    }
+    // The two sources of 1.9.0 have no hash in common.
+    let nuget = tracked_manifest("1.9.0", "nuget");
+    for (a, b) in wheel.files.iter().zip(&nuget.files) {
+        assert_ne!(a.sha256, b.sha256, "{}", a.name);
+    }
 }
 
 /// A runtime directory of the other release is refused, and both releases are named: by
@@ -963,11 +1109,11 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
 #[test]
 fn a_directory_of_the_other_release_is_refused_naming_both() {
     let built = RuntimeManifest::expected();
-    let other = tracked_manifest(if built.release == "1.9.0" {
-        "1.8.0"
+    let other = if built.release == "1.9.0" {
+        tracked_manifest("1.8.0", "nuget")
     } else {
-        "1.9.0"
-    });
+        tracked_manifest("1.9.0", "wheel")
+    };
     // The files of the other release, by name and size, without a record. Their content
     // does not matter: nothing of that size is read, except where the two releases have
     // a file of the same size, and that one is then refused by its hash.
@@ -1017,6 +1163,233 @@ fn a_directory_of_the_other_release_is_refused_naming_both() {
     ] {
         assert!(reason.contains(part.as_str()), "{part}: {reason}");
     }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+// --- Two sources of one release ----------------------------------------------------------
+
+/// The other source of the test release: the same names and sizes, other content.
+fn other_source() -> (RuntimeManifest, Vec<(&'static str, Vec<u8>)>) {
+    let files: Vec<(&'static str, Vec<u8>)> = FILES
+        .iter()
+        .map(|(name, content, _)| (*name, content.to_ascii_uppercase()))
+        .collect();
+    let mut other = manifest();
+    other.source.kind = "nuget".into();
+    other.source.package = "RuntimePackage".into();
+    other.source.detail = [("nupkg", "RuntimePackage.2.0.0.nupkg")]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    for (file, (_, content)) in other.files.iter_mut().zip(&files) {
+        file.sha256 = sha256_hex(content);
+    }
+    (other, files)
+}
+
+fn among(dir: &Path) -> Result<RuntimeFiles, L2dError> {
+    RuntimeFiles::check_among(&[manifest(), other_source().0], dir, CheckDepth::Fast)
+}
+
+/// A directory that matches either manifest of the release passes, and the check says
+/// which source it matched; the record holds that source's hashes, and the next start
+/// hashes nothing.
+#[test]
+fn a_directory_of_either_source_passes_and_the_source_is_reported() {
+    let wheel = complete("source-wheel");
+    let first = among(&wheel).unwrap();
+    assert_eq!(first.source, "wheel");
+    assert_eq!(first.hashed, ALL);
+    assert_eq!(first.record, RecordState::Written);
+    assert_eq!(read_record(&wheel)["matched_source"], "wheel");
+    let again = among(&wheel).unwrap();
+    assert_eq!(again.source, "wheel");
+    assert!(again.hashed.is_empty(), "{:?}", again.hashed);
+
+    let (other, files) = other_source();
+    let nuget = scratch("source-nuget");
+    for (name, content) in &files {
+        std::fs::write(nuget.join(name), content).unwrap();
+    }
+    let first = among(&nuget).unwrap();
+    assert_eq!(first.source, "nuget");
+    assert_eq!(
+        first.hashed, ALL,
+        "each file is hashed once, not once per manifest"
+    );
+    assert_eq!(first.record, RecordState::Written);
+    let record = read_record(&nuget);
+    assert_eq!(record["matched_source"], "nuget");
+    for (entry, file) in record["files"].as_array().unwrap().iter().zip(&other.files) {
+        assert_eq!(entry["sha256"], file.sha256);
+    }
+    let again = among(&nuget).unwrap();
+    assert_eq!(again.source, "nuget");
+    assert!(again.hashed.is_empty(), "{:?}", again.hashed);
+    // The full check passes for it too; against the wheel manifest alone it is refused.
+    let full = RuntimeFiles::check_among(&[manifest(), other], &nuget, CheckDepth::Full).unwrap();
+    assert_eq!((full.source.as_str(), full.hashed.len()), ("nuget", 3));
+    refusal(RuntimeFiles::check_against(
+        &manifest(),
+        &nuget,
+        CheckDepth::Fast,
+    ));
+    std::fs::remove_dir_all(&wheel).unwrap();
+    std::fs::remove_dir_all(&nuget).unwrap();
+}
+
+/// A directory with some files of each source matches neither manifest: it is refused,
+/// and the refusal says that it is a mix and which file is from which source. With and
+/// without a record.
+#[test]
+fn a_directory_that_mixes_the_two_sources_is_refused_naming_the_mix() {
+    let (_, files) = other_source();
+    for with_record in [false, true] {
+        let dir = complete(if with_record { "mix-record" } else { "mix" });
+        if with_record {
+            assert_eq!(among(&dir).unwrap().source, "wheel");
+        }
+        let before = std::fs::read(dir.join(RECEIPT_FILE)).ok();
+        std::fs::write(dir.join("provider.dll"), &files[1].1).unwrap();
+
+        let reason = refusal(among(&dir));
+        assert!(reason.contains("mixes files of 2 sources"), "{reason}");
+        assert!(
+            reason.contains("onnxruntime.dll, dispatch.dll from the source `wheel`"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("provider.dll from the source `nuget`"),
+            "{reason}"
+        );
+        assert!(reason.contains("one source"), "{reason}");
+        assert!(
+            reason.contains(&dir.join("provider.dll").display().to_string()),
+            "{reason}"
+        );
+        // Nothing was written for a directory that is refused.
+        assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).ok(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// A record stays bound to the manifest it was made against. A directory verified as the
+/// wheel's whose files are then replaced by the NuGet package's (same sizes) is not
+/// trusted through that record: every file is hashed; they are all the other source's,
+/// so the directory passes as that source, and the record is replaced by one that says
+/// so (its old source would no longer be true). And the other way round.
+#[test]
+fn a_record_of_one_source_does_not_make_the_other_sources_files_trusted() {
+    let (other, other_files) = other_source();
+    let own_files: Vec<(&str, Vec<u8>)> = FILES
+        .iter()
+        .map(|(name, content, _)| (*name, content.to_vec()))
+        .collect();
+    for (from, to, to_manifest, to_files) in [
+        ("wheel", "nuget", &other, &other_files),
+        ("nuget", "wheel", &manifest(), &own_files),
+    ] {
+        let dir = scratch(&format!("bound-{from}-to-{to}"));
+        let from_files = if from == "wheel" {
+            &own_files
+        } else {
+            &other_files
+        };
+        for (name, content) in from_files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        // A provisioning record of the first source, as the script writes it.
+        let entries: Vec<serde_json::Value> = from_files
+            .iter()
+            .map(|(name, content)| {
+                serde_json::json!({
+                    "name": name, "bytes": content.len(), "sha256": sha256_hex(content),
+                    "modified_unix_ns": modified_ns(&dir.join(name)),
+                })
+            })
+            .collect();
+        let record = serde_json::json!({
+            "format": 1, "release": "2.0.0", "onnxruntime": "1.30.0",
+            "written_by": "provisioning", "source": { "kind": from }, "files": entries,
+        });
+        std::fs::write(dir.join(RECEIPT_FILE), record.to_string()).unwrap();
+        let checked = among(&dir).unwrap();
+        assert_eq!((checked.source.as_str(), checked.hashed.len()), (from, 0));
+        assert_eq!(checked.record, RecordState::Provisioning);
+
+        // The binding: a build that carried only the other source's manifest finds this
+        // record, whose times are right, and trusts nothing through it, because the
+        // record's hashes are not that manifest's. Every file is hashed and refused.
+        let before = std::fs::read(dir.join(RECEIPT_FILE)).unwrap();
+        let reason = refusal(RuntimeFiles::check_against(
+            to_manifest,
+            &dir,
+            CheckDepth::Fast,
+        ));
+        for ((_, content), file) in from_files.iter().zip(&to_manifest.files) {
+            assert!(reason.contains(&sha256_hex(content)), "found: {reason}");
+            assert!(reason.contains(&file.sha256), "expected: {reason}");
+        }
+        assert_eq!(std::fs::read(dir.join(RECEIPT_FILE)).unwrap(), before);
+
+        // The files are replaced by the other source's (same sizes).
+        for (name, content) in to_files {
+            std::fs::write(dir.join(name), content).unwrap();
+            set_modified(
+                &dir.join(name),
+                std::time::SystemTime::now() + Duration::from_secs(300),
+            );
+        } // Against the first source's manifest alone: refused (the record makes nothing
+        // trusted, the hashes are the other source's).
+        let first_manifest = if from == "wheel" {
+            manifest()
+        } else {
+            other.clone()
+        };
+        let reason = refusal(RuntimeFiles::check_against(
+            &first_manifest,
+            &dir,
+            CheckDepth::Full,
+        ));
+        assert!(reason.contains(&to_manifest.files[0].sha256), "{reason}");
+
+        // Among both: the directory is the other source's, whole.
+        let checked = among(&dir).unwrap();
+        assert_eq!(checked.source, to);
+        assert_eq!(checked.hashed, ALL, "{from} to {to}: nothing was trusted");
+        assert_eq!(
+            checked.refresh,
+            RecordRefresh::Rewritten {
+                files: ALL.iter().map(|name| name.to_string()).collect()
+            }
+        );
+        let after = read_record(&dir);
+        assert_eq!(after["written_by"], "check");
+        assert_eq!(after["matched_source"], to);
+        assert!(
+            after.get("source").is_none(),
+            "the old source is gone: {after}"
+        );
+        for (entry, file) in after["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&to_manifest.files)
+        {
+            assert_eq!(entry["sha256"], file.sha256);
+        }
+        let again = among(&dir).unwrap();
+        assert_eq!((again.source.as_str(), again.hashed.len()), (to, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn a_check_among_no_manifests_is_an_error() {
+    let dir = complete("no-manifests");
+    assert!(matches!(
+        RuntimeFiles::check_among(&[], &dir, CheckDepth::Fast),
+        Err(L2dError::InvalidInput { .. })
+    ));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 // --- File versions (Windows) ------------------------------------------------------------
@@ -1111,7 +1484,8 @@ fn the_real_runtime_directory_passes_and_the_checks_are_timed() {
         let elapsed = started.elapsed();
         assert_eq!(checked.release, RuntimeManifest::expected().release);
         println!(
-            "runtime_files: fast check {elapsed:?}, hashed {}, record: {}",
+            "runtime_files: fast check {elapsed:?}, source `{}`, hashed {}, record: {}",
+            checked.source,
             checked.hashed.len(),
             checked.record.describe()
         );

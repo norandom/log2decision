@@ -1,0 +1,46 @@
+{
+  "format": 1,
+  "release": "1.9.0",
+  "onnxruntime": "1.30.0",
+  "source": {
+    "kind": "nuget",
+    "nupkg": "RyzenAI_Deployment.1.9.0.nupkg",
+    "nupkg_bytes": "289269284",
+    "nupkg_sha256": "b96db85a612f8ac5579a6684ef8f254b27c6e181df3ab6d86bc98f2c97ffc3e9",
+    "package": "RyzenAI_Deployment",
+    "version": "1.9.0",
+    "directory": "runtimes/win-x64/native"
+  },
+  "files": [
+    {
+      "name": "onnxruntime.dll",
+      "bytes": 25442896,
+      "sha256": "a495db24b3bcf337c83b5145a6cfc49c81354fe58eced433a573cf7c25d40d5c",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_providers_shared.dll",
+      "bytes": 117840,
+      "sha256": "86322cd2d6665a37a0b1eecb2c99ebcebd9b0b25944cea4d8b471387db5068ed",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_providers_vitisai.dll",
+      "bytes": 466000,
+      "sha256": "d33a827b2c9eeb82d87c483198a381dc3979963e09ab5bfa5f94f98a49eeee73",
+      "version": "1.30.0"
+    },
+    {
+      "name": "onnxruntime_vitisai_ep.dll",
+      "bytes": 517920336,
+      "sha256": "a92cef8e451b1e0a404f9dacdd8d15d6af7ea7bf8be82dea2715243c22ef0d35",
+      "version": "1.9.0"
+    },
+    {
+      "name": "dyn_dispatch_core.dll",
+      "bytes": 169647696,
+      "sha256": "32ca7381bdeceae210ce2d7b106f2aa2db46c852e669a669a05c5cb75a0ef7c9",
+      "version": "1.9.0"
+    }
+  ]
+}
