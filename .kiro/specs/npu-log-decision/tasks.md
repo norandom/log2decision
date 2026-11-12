@@ -224,6 +224,17 @@
   - _Depends: 2.3_
   - _Requirements: 10.2, 10.5_
 
+- [ ] 2.14 Provision release 1.9.0 from AMD's NuGet package
+  - Owner, 2026-11-12: downloaded `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg` (289,269,284 bytes, SHA-256 `b96db85a612f8ac5579a6684ef8f254b27c6e181df3ab6d86bc98f2c97ffc3e9`, id `RyzenAI_Deployment`, version 1.9.0). It holds the five runtime files of release 1.9.0 with the same names and sizes as the wheel's, as other builds (other hashes)
+  - Make the source part of a manifest's identity, so that release 1.9.0 can have a wheel manifest and a NuGet manifest side by side; the tool accepts a runtime directory that matches either manifest of its built release, says which, and a record stays bound to the manifest it was verified against
+  - The provisioning script takes a bare package file as well as a ZIP that holds one
+  - Show whether the NuGet files are the wheel's builds signed separately (compare the files with signature and checksum left out, as the reference project does), then run the hardware gate on a directory provisioned from the package; it must give the same placement and the same output as the wheel's files, bit for bit, or the difference is reported
+  - Close the advisory findings of the 2.13 review: names with a colon, a trailing dot or space, or a reserved device name are refused in the script and in the manifest parser; the package's size is in the manifest and compared before it is read into memory; a target that is the package's own directory or inside the tracked tree is refused; a record that is only locked or denied for a moment is not replaced; a bad archive during placing ends in an error line
+  - After review, provision the main checkout's `runtime/ryzenai/` from the package, so that the files in use come from a source recorded in the repository's manifest
+  - Done when a directory provisioned from the package passes the full check and the hardware gate with the default build, and the wheel-provisioned directory still does
+  - _Depends: 2.13_
+  - _Requirements: 10.2, 10.5_
+
 - [ ] 2.4 Encoder packaging and revision verification
   - Define package layout under `models/encoders/<name>-<rev12>/`: `encoder.json`, `table.bin`, `model.int8.onnx`, `training-record.json`
   - Compute 40-character revision hash from SHA-256 over `model.int8.onnx`, `table.bin`, and architecture parameters
