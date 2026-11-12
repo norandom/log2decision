@@ -448,7 +448,7 @@ Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (
 - Entry selection: glob patterns over the entry path (`--entry`, repeatable). Without a pattern every entry is tried.
 - Text check on the first 8 KiB of an entry: a NUL byte or invalid UTF-8 marks the entry as not text.
 - A gzip entry (by magic bytes, not by name) is read through a second decompressor. Every other nested archive (`.zip`, `.bz2`, `.xz`, `.tar`) is skipped and reported (owner decision).
-- Maximum record length: default 64 KiB (owner decision of 2026-11-12), option `--max-record-bytes`, at most the 8 MiB the store accepts. The default follows from the store's charge of 192 times the longest text: an add then holds about 28 MiB, against about 208 MiB at 1 MiB and about 1.5 GiB at 8 MiB.
+- Maximum record length: default 64 KiB (owner decision of 2026-11-12), option `--max-record-bytes`, at most the 1 MiB the store accepts. The default follows from the store's charge of 192 times the longest text: an add then holds about 28 MiB, against about 208 MiB at 1 MiB.
 - The archive's content hash is SHA-256 over the archive file, computed in one streaming pass. Entry checksums are verified when an entry is read to its end.
 
 **Batches and memory**
@@ -754,7 +754,7 @@ pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings
 - Vector search is exact squared L2 on normalized vectors, computed via `faer` SIMD matrix multiplication over stored vectors.
 - Entirely synchronous; no async runtime or background database daemon.
 - As built by task 1.8 (format 1): the FTS5 index is an external-content table over `logs.text` with the `trigram` tokenizer, kept in step by insert, delete and update triggers. Rows are never written with `INSERT OR REPLACE`, whose implicit delete would skip the trigger. A closed store is one file.
-- Every row carries a finite vector of the store's dimension; a store cannot hold a log without a vector. A text with a NUL byte or longer than 8 MiB (`MAX_TEXT_BYTES`) is refused by row.
+- Every row carries a finite vector of the store's dimension; a store cannot hold a log without a vector. A text with a NUL byte or longer than 1 MiB (`MAX_TEXT_BYTES`; lowered from 8 MiB by the owner on 2026-11-12, because the memory an add and a search must hold grows with the longest text) is refused by row.
 - Memory (requirement 12.9): an add holds 16 MiB plus 192 times the bytes of the longest text, counting the longest text indexed on the connection, and is refused up front when that does not fit. After an add that indexed a text over 16 KiB the store reopens its connection, because the text index keeps its hash table until the connection closes; an idle open store keeps at most 1 MiB (`Store::retained_bytes`). The caller's frame is not counted by the store.
 
 **Dependencies**
