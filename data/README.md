@@ -5,7 +5,7 @@ One directory per dataset under `data/`. Every dataset gets a row here.
 | Directory | Dataset | Added | Role | Source |
 | --- | --- | --- | --- | --- |
 | `csic-2010/` | HTTP CSIC 2010 web application attacks | 2026-11-11 | Step 1, primary | https://www.kaggle.com/datasets/ispangler/csic-2010-web-application-attacks |
-| `ait-lds-v2/` | AIT Log Data Set V2.0 | 2026-11-12 (download started, `russellmitchell` first) | Step 2 | https://zenodo.org/records/5789064 |
+| `ait-lds-v2/` | AIT Log Data Set V2.0 | 2026-11-12 | Step 2 | https://zenodo.org/records/5789064 |
 
 The code of this project is under the MIT licence (`LICENSE`). The datasets are
 not part of the repository and keep their own terms.
@@ -42,6 +42,10 @@ not part of the repository and keep their own terms.
 | `wheeler.zip` | 18.25 GB | `e3f5605d867fcc644f93ae6c736cdb30` |
 | `wilson.zip` | 24.72 GB | `952dd37cb262ef0054ad6d5371bdbe70` |
 
-- Downloaded so far: `russellmitchell.zip` (7,132,670,599 bytes, MD5 verified
-  on 2026-11-12). The other seven are in progress through
-  `aria2-resume.ps1` in the dataset directory (capped at 4 MiB/s, resumable).
+- Downloaded on 2026-11-12, all eight, 121.7 GB: `russellmitchell.zip` with
+  `curl` (MD5 compared by hand), the other seven with `aria2c` through
+  `aria2-resume.ps1` in the dataset directory, which checks each file against
+  its MD5 sum; all seven passed, and `santos.zip` was hashed again by hand.
+- The archives are not unpacked. `russellmitchell.zip` holds 11,992 entries,
+  13.95 GB unpacked; most entries are not logs (configuration and scripts),
+  the largest are packet captures of about 1 GB, and 108 are nested archives.
