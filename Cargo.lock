@@ -127,7 +127,7 @@ checksum = "ba6958a87117ff5e1d0d7716856a4303752518012ec4a67a68446b6631a1a54d"
 dependencies = [
  "anyhow",
  "cfg-if",
- "ndarray",
+ "ndarray 0.16.1",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -318,6 +318,17 @@ dependencies = [
  "ryu",
  "serde",
  "static_assertions",
+]
+
+[[package]]
+name = "conformal-prediction"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78df43087221ada0515c40f92cc88dfee703f7369630223c14b61a3ad7f0b15f"
+dependencies = [
+ "lean-agentic",
+ "ndarray 0.17.2",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -653,7 +664,7 @@ dependencies = [
  "l2d-core",
  "linfa",
  "linfa-logistic",
- "ndarray",
+ "ndarray 0.16.1",
  "serde",
  "serde_json",
  "thiserror",
@@ -689,10 +700,14 @@ dependencies = [
 name = "l2d-decide"
 version = "0.1.0"
 dependencies = [
+ "conformal-prediction",
  "l2d-baseline",
  "l2d-core",
  "l2d-encoder",
  "l2d-store",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -727,6 +742,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lean-agentic"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3b6dcd7e59353c45bde9490cac01423f16eb535da84f3be277c08087842778b"
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -745,7 +766,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87b84e47ca7a9d63f5be24c104e216c8263bfada38080cbdfe1082e611a81fd3"
 dependencies = [
  "approx",
- "ndarray",
+ "ndarray 0.16.1",
  "num-traits",
  "rand 0.8.8",
  "sprs",
@@ -761,7 +782,7 @@ dependencies = [
  "argmin",
  "argmin-math",
  "linfa",
- "ndarray",
+ "ndarray 0.16.1",
  "ndarray-stats",
  "num-traits",
  "thiserror",
@@ -818,6 +839,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
 name = "ndarray-stats"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -825,7 +861,7 @@ checksum = "17ebbe97acce52d06aebed4cd4a87c0941f4b2519b59b82b4feb5bd0ce003dfd"
 dependencies = [
  "indexmap",
  "itertools",
- "ndarray",
+ "ndarray 0.16.1",
  "noisy_float",
  "num-integer",
  "num-traits",
@@ -1030,7 +1066,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "itoa",
- "ndarray",
+ "ndarray 0.16.1",
  "num-traits",
  "polars-arrow",
  "polars-compute",
@@ -1707,7 +1743,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "704ef26d974e8a452313ed629828cd9d4e4fa34667ca1ad9d6b1fffa43c6e166"
 dependencies = [
- "ndarray",
+ "ndarray 0.16.1",
  "num-complex",
  "num-traits",
  "smallvec",

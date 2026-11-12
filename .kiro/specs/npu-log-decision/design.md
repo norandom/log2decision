@@ -819,23 +819,45 @@ pub fn triage(logs: &[LogRecord], scorers: &mut [Box<dyn Scorer>], primary: Scor
 pub enum LabelSet { Good, Bad, Both, Neither }
 pub enum Stratum { Pooled, Group(String) }
 
-pub struct Calibrated { pub set: LabelSet, pub p_good: f32, pub p_bad: f32, pub stratum: Stratum, pub error_rate: f32 }
+// A group can have its own list for one label and the pooled list for the other
+// (requirement 11.4 is per label), so each p-value names its own stratum.
+pub struct Calibrated { pub set: LabelSet, pub p_good: f32, pub p_bad: f32, pub good_stratum: Stratum, pub bad_stratum: Stratum, pub error_rate: f32 }
 
 pub struct CalibrationSettings { pub min_per_group: u32 }
 
+// The row view of the calibration points frame (columns ratio, label, group); `points_frame` builds the frame.
 pub struct CalibrationPoint { pub ratio: f32, pub label: Label, pub group: Option<String> }
 
 pub enum CalibrationError {
-    TooFewLogs { good: u64, bad: u64, smallest_supported: f32 },
+    TooFewLogs { good: u64, bad: u64, smallest_supported: f32 },   // lengths of the shortest lists in use
     SameInputAsFitting { content_sha256: String },
+    UnknownFittingInputs,
+    UnknownCalibrationInputs,
+    InvalidErrorRate { error_rate: f32 },
+    InvalidRatio { ratio: f32 },
+    InvalidPoints { detail: String },
+    InvalidSettings { detail: String },
+    OtherScorer { calibrated_kind: &'static str, calibrated_revision: String, kind: &'static str, revision: String },
+    Memory(L2dError),
+    Scorer(L2dError),
+    Internal { detail: String },
 }
 
 impl ConformalCalibrator {
-    pub fn fit(points: &[CalibrationPoint], scorer: ScorerKind, scorer_revision: &str, settings: &CalibrationSettings)
-        -> Result<Self, CalibrationError>;   // the caller checks the input hash against the scorer's fitting inputs first
+    // `points` is the calibration points frame. The caller checks the input hash against the
+    // scorer's fitting inputs first (`require_held_out`); `fit_baseline` does both.
+    pub fn fit(points: &DataFrame, scorer: ScorerKind, scorer_revision: &str, settings: &CalibrationSettings)
+        -> Result<Self, CalibrationError>;
+    pub fn fit_with(points: &DataFrame, scorer: ScorerKind, scorer_revision: &str, settings: &CalibrationSettings, budget: &MemoryBudget)
+        -> Result<Self, CalibrationError>;
+    pub fn fit_baseline(scorer: &BaselineScorer, logs: &LogsFrame, inputs: &[InputSummary], settings: &CalibrationSettings, budget: &MemoryBudget)
+        -> Result<Self, CalibrationError>;
     pub fn predict(&self, ratio: f32, group: Option<&str>, error_rate: f32) -> Result<Calibrated, CalibrationError>;
+    pub fn require_error_rate(&self, error_rate: f32) -> Result<(), CalibrationError>;
+    pub fn require_scorer(&self, kind: ScorerKind, revision: &str) -> Result<(), CalibrationError>;
     pub fn save(&self, paths: &ProjectPaths, name: &str) -> Result<PathBuf, L2dError>;
     pub fn load(dir: &Path) -> Result<Self, L2dError>;
+    pub fn load_under(paths: &ProjectPaths, dir: &Path) -> Result<Self, L2dError>;
 }
 
 pub enum AbstainReason { ScorerAbstained, Uncertain, UnlikeCalibration }

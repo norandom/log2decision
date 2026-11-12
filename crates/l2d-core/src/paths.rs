@@ -43,6 +43,17 @@ impl ProjectPaths {
             .join(format!("{name}-{}", short_revision(revision)))
     }
 
+    /// `models/calibrations/`
+    pub fn calibrations_dir(&self) -> PathBuf {
+        self.models_dir().join("calibrations")
+    }
+
+    /// `models/calibrations/<name>-<rev12>/`
+    pub fn calibration_dir(&self, name: &str, revision: &str) -> PathBuf {
+        self.calibrations_dir()
+            .join(format!("{name}-{}", short_revision(revision)))
+    }
+
     /// `data/` — where datasets are read from unless the analyst supplies a path.
     pub fn data_dir(&self) -> PathBuf {
         self.root.join("data")

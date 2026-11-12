@@ -59,7 +59,7 @@ it is allowed in.
 | Batches sized to free memory, with a memory limit that holds | Done, measured on files up to 564 MB |
 | Character-sequence features and the scoring model | Done, tested |
 | Baseline scorer (fit, score, save, load) | Done, tested |
-| Calibrated decisions | Specified, not built |
+| Calibrated decisions (label sets at a chosen error rate) | Library done and tested, not yet wired to a command. The error rate holds on endpoints the calibration logs cover (about 5 % measured on CSIC); on endpoints it has never seen, 32 % to 79 % of good logs were wrongly ruled out and none were called good |
 | Store, search, triage, evaluation | Specified, not built |
 | Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
 | Encoder on the NPU | Feasibility shown; gated behind the baseline evaluation |

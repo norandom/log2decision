@@ -154,6 +154,18 @@ fn encoder_and_baseline_directories_use_name_and_twelve_character_revision() {
             .join("baselines")
             .join("ngram-0123456789ab")
     );
+    assert_eq!(
+        paths.calibrations_dir(),
+        Path::new("r").join("models").join("calibrations")
+    );
+    assert_eq!(
+        paths.calibration_dir("csic", revision),
+        Path::new("r")
+            .join("models")
+            .join("calibrations")
+            .join("csic-0123456789ab")
+    );
+    assert!(paths.is_under_models(&paths.calibration_dir("csic", revision)));
     // A revision shorter than twelve characters is used as is.
     assert_eq!(
         paths.encoder_dir("e", "abc"),
