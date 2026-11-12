@@ -8,9 +8,15 @@ publish.workspace = true
 
 [dependencies]
 l2d-core.workspace = true
+# The runtime manifest and the provisioning record are JSON; the full file check hashes.
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+# The NPU device query (configuration manager) and the file version of a DLL that does
+# not match the manifest (version resource, read as data; the DLL is not loaded).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 ort.workspace = true
-sha2.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties"] }
-serde_json.workspace = true

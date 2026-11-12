@@ -228,6 +228,42 @@ fn dataset_resolves_to_data_directory_or_supplied_path() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn runtime_files_resolve_to_the_project_directory_or_a_supplied_path() {
+    let root = PathBuf::from("project");
+    let paths = ProjectPaths::new(&root);
+
+    // The fixed location, like `models/` and `data/`.
+    assert_eq!(
+        paths.runtime_files_dir(None),
+        root.join("runtime").join("ryzenai")
+    );
+    // A supplied directory wins, as a supplied dataset path does.
+    let supplied = Path::new("elsewhere").join("ryzenai");
+    assert_eq!(paths.runtime_files_dir(Some(&supplied)), supplied);
+    // The provider's cache stays in the project whatever the runtime directory is.
+    assert_eq!(
+        paths.runtime_cache_dir(),
+        root.join("runtime").join("cache")
+    );
+}
+
+#[test]
+fn the_runtime_directory_variable_is_read_as_a_path_and_empty_counts_as_unset() {
+    use std::ffi::OsString;
+
+    assert_eq!(l2d_core::paths::RUNTIME_DIR_VARIABLE, "L2D_RUNTIME_DIR");
+    assert_eq!(l2d_core::paths::runtime_dir_from(None), None);
+    assert_eq!(
+        l2d_core::paths::runtime_dir_from(Some(OsString::new())),
+        None
+    );
+    assert_eq!(
+        l2d_core::paths::runtime_dir_from(Some(OsString::from("D:\\shared\\ryzenai"))),
+        Some(PathBuf::from("D:\\shared\\ryzenai"))
+    );
+}
+
 // --- Shared types and the run record's JSON form ------------------------------------------
 
 #[test]

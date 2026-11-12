@@ -195,3 +195,9 @@ linfa-logistic = "0.8.1"
 # time (`link.exe` failed with 0xe0000001).
 [profile.dev.package."*"]
 debug = false
+# SHA-256 is optimized in debug builds too. The full check of the runtime files hashes
+# 714 MB (task 2.3): unoptimized that took 24 s (29 MB/s), against 0.7 s in a release
+# build, and the hardware gate test runs that check in a debug build.
+[profile.dev.package.sha2]
+opt-level = 3
+debug = false

@@ -1,0 +1,46 @@
+# Development-only environment that fetches the AMD runtime for `l2d`.
+#
+# `l2d` itself is Rust only and needs no Python, neither to build nor to run. This
+# environment exists for one step: `provision.py` copies the native files of AMD's wheel
+# into `runtime/ryzenai/` (see `runtime/README.md`). Nothing of it is imported.
+#
+#     uv run --project tools/runtime python tools/runtime/provision.py
+#
+# The wheel is pinned by its direct URL on AMD's release-specific index for Ryzen AI
+# 1.9.0 (the form the sibling project `npu_rag_from_folder` uses for 1.8.0). `uv lock`
+# adds `uv.lock` with the wheel's SHA-256, so that a changed file on the index fails the
+# sync; the lock file is committed with the project.
+#
+# State of 2026-11-12 (task 2.3): there is no `uv.lock` yet. `pypi.amd.com` answered
+# every request from the reference host with 403 "Access Denied" that day, this URL and
+# the 1.8.0 URL of the sibling project alike, so the URL below is the expected one and
+# was not fetched. Run `uv lock --project tools/runtime` when the index answers, and
+# commit the result. Whatever is fetched, `provision.py` copies only files that have the
+# sizes and SHA-256 values of `runtime/ryzenai.manifest.json`.
+[project]
+name = "l2d-runtime-provisioning"
+version = "0.0.0"
+description = "Fetches the AMD Ryzen AI 1.9.0 runtime files for l2d (development only)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "onnxruntime-vitisai @ https://pypi.amd.com/ryzenai_llm/1.9.0/windows/simple/onnxruntime-vitisai/onnxruntime_vitisai-1.30.0-py3-none-win_amd64.whl",
+]
+
+[tool.uv]
+# Not a package: there is nothing to build or install besides the dependency.
+package = false
+# The wheel is unpacked for its DLLs and never imported, so none of what it declares as
+# a requirement is installed. `voe` 1.9.0 alone would bring `torch`, `torchvision`,
+# `transformers`, `datasets` and `pandas`; it holds no DLL (only `vaip_config.json` and
+# an `.xclbin`, neither of which `l2d` passes to the provider).
+exclude-dependencies = [
+    "voe",
+    "coloredlogs",
+    "flatbuffers",
+    "numpy",
+    "packaging",
+    "protobuf",
+    "sympy",
+]
+# The wheel exists for Windows on x86-64 only.
+environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
