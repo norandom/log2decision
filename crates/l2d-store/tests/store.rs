@@ -3,8 +3,9 @@
 //! Everything here runs on the mini fixture or on synthetic logs with synthetic vectors
 //! (no encoder exists yet), and writes only below the system temporary directory.
 //!
-//! The search operations are task 1.9. Until then the tests read the database file
-//! themselves, through their own SQLite connection, which also pins the schema as built.
+//! The tests read the database file themselves, through their own SQLite connection,
+//! which also pins the schema as built. The search operations of task 1.9 are tested in
+//! `search.rs`.
 //! The measurements on HTTP CSIC 2010 are in `store_csic.rs` and run on request.
 
 use std::path::{Path, PathBuf};
@@ -21,8 +22,9 @@ use l2d_core::{
     LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
 };
 use l2d_store::{
-    ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, IDLE_BYTES, MAX_NAME_BYTES, MAX_TEXT_BYTES,
-    RELEASE_TEXT_BYTES, SCHEMA_VERSION, Store, StoreError, VECTOR, log_id, rows_frame, rows_schema,
+    ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, Filter, IDLE_BYTES, MAX_NAME_BYTES,
+    MAX_TEXT_BYTES, RELEASE_TEXT_BYTES, SCHEMA_VERSION, Store, StoreError, VECTOR, log_id,
+    rows_frame, rows_schema,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -543,17 +545,125 @@ fn the_schema_has_the_tables_columns_and_indexes_of_the_task() {
              pragma_index_info(list.name) AS info WHERE info.seqno = 0",
         )
         .unwrap();
-    let indexed: Vec<String> = statement
+    // An index over an expression has no column name.
+    let indexed: Vec<Option<String>> = statement
         .query_map([], |row| row.get(0))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     for column in ["id", "label", "source"] {
         assert!(
-            indexed.iter().any(|name| name == column),
+            indexed.iter().any(|name| name.as_deref() == Some(column)),
             "no index leads with '{column}': {indexed:?}"
         );
     }
+
+    // The index over the lengths of the texts (task 1.9): the longest stored text is
+    // one look-up, not a pass over the rows.
+    let sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'logs_text_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the index over the text lengths exists");
+    assert!(sql.contains("octet_length(text)"), "{sql}");
+    let plan: Vec<String> = connection
+        .prepare("EXPLAIN QUERY PLAN SELECT ifnull(max(octet_length(text)), 0) FROM logs")
+        .unwrap()
+        .query_map([], |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|step| step.contains("logs_text_bytes")),
+        "the longest text is not read from the index: {plan:?}"
+    );
+}
+
+/// The store knows the bytes of its longest text, after every add and after a
+/// restart; a store written before the index over the text lengths existed (format 1
+/// without it) opens, answers all the same, and gets the index with its next add.
+#[test]
+fn the_longest_stored_text_is_known_also_for_a_store_without_its_index() {
+    let scratch = Scratch::new("longest");
+    let paths = scratch.paths();
+    let path = paths.store_path("s");
+    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    assert_eq!(store.longest_text_bytes().unwrap(), 0);
+    let short = three_logs();
+    store
+        .add_with(&rows(&short, "a.log", 1), &identity(), &mut budget())
+        .unwrap();
+    assert_eq!(store.longest_text_bytes().unwrap(), longest_text(&short));
+    let long = logs_of(&[record(&"é".repeat(2_500), Label::Bad, None, 1)]);
+    store
+        .add_with(&rows(&long, "b.log", 1), &identity(), &mut budget())
+        .unwrap();
+    assert_eq!(
+        store.longest_text_bytes().unwrap(),
+        5_000,
+        "bytes, not characters"
+    );
+    // Adding the same long text again changes nothing; a failed add neither.
+    store
+        .add_with(&rows(&long, "b.log", 1), &identity(), &mut budget())
+        .unwrap();
+    let spoiled = logs_of(&[
+        record(&"x".repeat(9_000), Label::Bad, None, 1),
+        record("GET /zero", Label::Good, None, 0),
+    ]);
+    store
+        .add_with(&rows(&spoiled, "c.log", 1), &identity(), &mut budget())
+        .unwrap_err();
+    assert_eq!(store.longest_text_bytes().unwrap(), 5_000);
+    drop(store);
+
+    // As task 1.8 wrote it: without the index.
+    let has_index = || -> bool {
+        read_only(&path)
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'logs_text_bytes'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    };
+    assert!(has_index());
+    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .unwrap()
+        .execute_batch("DROP INDEX logs_text_bytes")
+        .unwrap();
+    assert!(!has_index());
+    let before = std::fs::read(&path).unwrap();
+    let mut store = Store::open(&paths, "s").expect("a store without the index is a store");
+    assert_eq!(store.longest_text_bytes().unwrap(), 5_000);
+    let filter = Filter {
+        contains: vec!["ééé".to_string()],
+        ..Filter::default()
+    };
+    assert_eq!(store.text_search(&filter, 10).unwrap().height(), 1);
+    assert_eq!(store.explain(&filter).unwrap().longest_text_bytes, 5_000);
+    // Opening and searching wrote nothing.
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!has_index());
+    // The next add brings the index.
+    let longer = logs_of(&[record(&"y".repeat(7_000), Label::Good, None, 1)]);
+    store
+        .add_with(&rows(&longer, "d.log", 1), &identity(), &mut budget())
+        .unwrap();
+    assert!(has_index());
+    assert_eq!(store.longest_text_bytes().unwrap(), 7_000);
+    drop(store);
+    assert_fts_consistent(&path);
+    assert_eq!(
+        Store::open(&paths, "s")
+            .unwrap()
+            .longest_text_bytes()
+            .unwrap(),
+        7_000
+    );
 }
 
 #[test]
@@ -1834,4 +1944,120 @@ fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connect
     assert!(fts_ids(&paths.store_path("s"), "klmnopqrst").is_empty());
     assert_fts_consistent(&paths.store_path("s"));
     assert_eq!(scratch.store_files(), ["s.db"]);
+}
+
+/// Another program can change the file of an open store. Every add reads the file's
+/// description inside its own transaction, before it writes a row, and every search
+/// reads it before it reads a row: when the file names another encoder than the open
+/// store does, nothing is written or read, and both are named. Short adds notice as
+/// well as long ones.
+#[test]
+fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
+    let scratch = Scratch::new("identity-changed");
+    let paths = scratch.paths();
+    let path = paths.store_path("s");
+    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    store
+        .add_with(&rows(&three_logs(), "a.log", 1), &identity(), &mut budget())
+        .unwrap();
+
+    let set_revision = |revision: &str| {
+        let changed = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap()
+            .execute("UPDATE meta SET encoder_revision = ?1", [revision])
+            .unwrap();
+        assert_eq!(changed, 1);
+    };
+    set_revision(OTHER_REVISION);
+    let before = std::fs::read(&path).unwrap();
+
+    let changed = |error: StoreError| {
+        let StoreError::Failed { detail } = &error else {
+            panic!("expected a failure of the store, got {error:?}");
+        };
+        for part in [REVISION, OTHER_REVISION, "open it again"] {
+            assert!(detail.contains(part), "{detail} lacks {part}");
+        }
+    };
+    // A short add, a long one (which would end by opening the file again) and an
+    // empty one: refused before anything is written.
+    const LONG: u64 = 100_000;
+    const { assert!(LONG > RELEASE_TEXT_BYTES) };
+    let short = rows(&three_logs(), "c.log", 1);
+    let long = rows(
+        &logs_of(&[record(&"abcdefghij".repeat(10_000), Label::Bad, None, 1)]),
+        "b.log",
+        1,
+    );
+    for frame in [&short, &long, &short.head(Some(0))] {
+        changed(
+            store
+                .add_with(frame, &identity(), &mut budget())
+                .unwrap_err(),
+        );
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "something was written"
+    );
+    assert_eq!(store.retained_bytes(), IDLE_BYTES);
+    assert_eq!(store.identity(), &identity());
+
+    // Searches read nothing either.
+    let query = unit_vector("q", 1, DIM);
+    changed(store.text_search(&Filter::default(), 10).unwrap_err());
+    changed(store.vectors(&Filter::default()).unwrap_err());
+    changed(
+        store
+            .matching_with(&Filter::default(), 10, &mut budget())
+            .unwrap_err(),
+    );
+    changed(
+        store
+            .nearest(&query, &identity(), 3, &Filter::default())
+            .unwrap_err(),
+    );
+    changed(store.explain(&Filter::default()).unwrap_err());
+    // The creation time and the tool version are part of what is compared.
+    set_revision(REVISION);
+    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .unwrap()
+        .execute("UPDATE meta SET created_at = '2001-01-01T00:00:00Z'", [])
+        .unwrap();
+    let error = store
+        .add_with(&short, &identity(), &mut budget())
+        .unwrap_err();
+    assert!(
+        matches!(&error, StoreError::Failed { detail } if detail.contains("2001-01-01T00:00:00Z")),
+        "{error:?}"
+    );
+    assert_eq!(dump(&path).len(), 3);
+
+    // Once the file describes the store again, everything goes through.
+    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .unwrap()
+        .execute("UPDATE meta SET created_at = ?1", [store.created_at()])
+        .unwrap();
+    let report = store
+        .add_with(&short, &identity(), &mut budget())
+        .expect("the file is the store's again");
+    assert_eq!(report.added, 3);
+    let report = store.add_with(&long, &identity(), &mut budget()).unwrap();
+    assert_eq!(report.added, 1);
+    assert_eq!(store.retained_bytes(), IDLE_BYTES);
+    assert_eq!(
+        store.text_search(&Filter::default(), 10).unwrap().height(),
+        7
+    );
+    assert_eq!(
+        store
+            .nearest(&query, &identity(), 3, &Filter::default())
+            .unwrap()
+            .hits
+            .height(),
+        3
+    );
+    drop(store);
+    assert_fts_consistent(&path);
 }

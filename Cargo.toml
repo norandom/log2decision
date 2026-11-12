@@ -129,6 +129,36 @@ ndarray = { version = "0.16", default-features = false, features = ["std"] }
 # binding's functions for that need its `load_extension` feature). SQLite has no network
 # code; the guard test over `Cargo.lock` stays green.
 rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+# The exact vector search of the store (requirement 5.3, task 1.9). Used by `l2d-store`
+# only: the squared L2 distance is the product of the difference of two vectors with
+# itself, computed by faer's SIMD kernel (`faer::linalg::matmul::dot::inner_prod`).
+#
+# Default features are off; only `std` is on, which gives the kernels their run-time
+# choice of SIMD width (through `pulp`). Left off: `rayon` (faer's own use of a thread
+# pool; the search runs on the calling thread), `sparse-linalg`, `rand` and `npy`
+# (reading and writing .npy files).
+#
+# What it brings in (`cargo tree -p faer -e normal,build --target x86_64-pc-windows-msvc`,
+# 2026-11-12). `Cargo.lock` grows by 44 packages, from 203 to 247:
+# - 32 that are compiled on the reference host: `faer` 0.24.4 and `faer-traits` 0.24.0;
+#   the matrix-product kernels `gemm` 0.19.0 with `gemm-common`, `gemm-f32`, `gemm-f64`,
+#   `gemm-c32`, `gemm-c64`, `nano-gemm` 0.2.2 with `nano-gemm-core`, `-codegen`, `-f32`,
+#   `-f64`, `-c32`, `-c64`, and `private-gemm-x86` 0.1.22 with `defer`, `interpol` (a
+#   macro, which brings a second `syn`, 1.0.109) and `num_cpus` 1.17.0 (the number of
+#   processors); the SIMD layer `pulp` 0.22.3 with `pulp-wasm-simd-flag`; `qd` 0.8.0
+#   (double-double numbers, a type faer supports); `dyn-stack` with `dyn-stack-macros`,
+#   `equator` 0.6.0 and 0.2.2 with their macros, `generativity`, `reborrow` and
+#   `seq-macro`. `bytemuck`, `libm`, `num-complex`, `num-traits`, `raw-cpuid` (CPU
+#   feature and cache detection) and `once_cell` were present already.
+# - 12 that are in the lock file for other targets or features and are not compiled
+#   here: `gemm-f16` with `half` and `crunchy`; `sysctl` (cache sizes on macOS) with
+#   `walkdir`, `same-file`, `winapi-util`, `byteorder`, `enum-as-inner`, `thiserror`
+#   1.0.69 and `thiserror-impl`; `hermit-abi` (for `num_cpus`).
+# None of them opens a network connection, and none is in the list of the guard test
+# over `Cargo.lock`, which stays green. faer's kernels are "non portable across
+# platforms" by their own description: a distance can differ in its last bits between
+# CPUs of different SIMD widths, never between runs on one host.
+faer = { version = "0.24", default-features = false, features = ["std"] }
 # Test-only reference implementation for the dense path.
 linfa = "0.8.1"
 linfa-logistic = "0.8.1"

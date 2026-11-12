@@ -1,5 +1,5 @@
 //! The local store: logs with their labels and vectors in one SQLite database file,
-//! `stores/<name>.db` (requirements 5.1, 5.6, 5.7; task 1.8).
+//! `stores/<name>.db`, and its searches (requirements 5.1 to 5.7; tasks 1.8 and 1.9).
 //!
 //! A store holds the vectors of exactly one encoder identity, written to its `meta`
 //! table when it is created. [`Store::add`] takes the identity of the encoder that
@@ -65,12 +65,19 @@
 //! budget it holds it under ([`Store::add`] does not see it), and a caller with more
 //! logs than its budget allows in one frame adds them frame by frame.
 //!
-//! # Not here yet
+//! # Searching and reading rows back
 //!
-//! Searching (by text, by vector, combined, restricted) and reading rows back are task
-//! 1.9. [`Store::require_identity`] is the check its vector search needs.
+//! [`query`] holds the search by text, label and source and the reading of rows
+//! ([`Store::text_search`], [`Store::vectors`], [`Filter`]); [`vector`] holds the exact
+//! search by vector ([`Store::nearest`]), which refuses a query vector of another
+//! encoder identity as [`Store::add`] does. Rows come back as Polars frames too
+//! ([`stored_schema`], [`hits_schema`]). Searches change nothing in the store, hold
+//! their own share of the caller's memory budget while they run, and leave an open
+//! store at the level [`Store::retained_bytes`] reports.
 
+pub mod query;
 pub mod sqlite;
+pub mod vector;
 
 use std::fs;
 use std::io;
@@ -87,7 +94,13 @@ use l2d_core::{
 use rusqlite::{Connection, Statement};
 use sha2::{Digest, Sha256};
 
+pub use query::{
+    DISTANCE, Explain, Filter, ID, INDEX_PIECE_CHARS, INDEX_TEXT_FACTOR, MAX_INDEX_PIECES,
+    Matching, PHRASE_BYTE_BYTES, QUERY, READ_FIXED_BYTES, READ_ROW_BYTES, SEARCH_FIXED_BYTES,
+    TEXT_READ_FACTOR, fold, fold_char, hits_schema, index_folds_alike, stored_schema,
+};
 pub use sqlite::{APPLICATION_ID, CACHE_BYTES, SCHEMA_VERSION};
+pub use vector::{NEAREST_ROW_BYTES, Nearest};
 
 /// The longest store name, in bytes.
 pub const MAX_NAME_BYTES: usize = 64;
@@ -165,21 +178,27 @@ pub const ADD_FIXED_BYTES: u64 = 16 * 1024 * 1024;
 /// take what one takes and at most 7 MiB more; eight texts without a repeat of
 /// 2^18 + 64 trigrams each use 0.77 of the share against 0.72 for one. That test
 /// asserts, for every length up to [`MAX_TEXT_BYTES`] of the four kinds above and for
-/// the texts without a repeat, that the add's own share covers SQLite's heap.
+/// the texts without a repeat, that the add's own share covers SQLite's heap. The
+/// columns for 8 MiB and for 2^20 + 64 trigrams (a text of 1,066,985 bytes) were
+/// measured before the limit came down to 1 MiB; such texts are refused now.
 pub const ADD_TEXT_FACTOR: u64 = 192;
 
 /// The longest text a store takes, in bytes. A longer one is refused
 /// ([`StoreError::InvalidRows`], naming the row and this limit) before anything is
 /// written.
 ///
-/// Up to this length the memory of the text index was measured for every kind of text
-/// in the table at [`ADD_TEXT_FACTOR`], and is checked again by every run of that test.
-/// Above it only two kinds were measured once (request lines up to 64 MiB: 320 MiB;
-/// random ASCII up to 32 MiB: 286 MiB), not the kinds that take the most, and indexing
-/// gets slow: 8 MiB take half a minute as random ASCII and 80 seconds as the counting
-/// text, 32 MiB of random ASCII two and a half minutes. An add holds `ADD_TEXT_FACTOR * 8 MiB` = 1.5 GiB of the budget for a text
-/// of this length.
-pub const MAX_TEXT_BYTES: u64 = 8 * 1024 * 1024;
+/// The limit is 1 MiB (owner decision of 2026-11-12; it was 8 MiB before). What a store
+/// holds of the memory limit grows with its longest text, in adds and in searches, and
+/// at 8 MiB that was out of proportion: an add held `ADD_TEXT_FACTOR * 8 MiB` = 1.5 GiB,
+/// and a search for a phrase had to hold tens of mebibytes per character it gave the
+/// text index (see [`query`]). At 1 MiB an add holds at most 16 MiB + 192 MiB = 208
+/// MiB. 1 MiB is also the default longest record of the input layer.
+///
+/// Up to this length the memory of the text index is measured for every kind of text
+/// in the table at [`ADD_TEXT_FACTOR`], and checked again by every run of that test.
+/// The figures given there and elsewhere for longer texts were measured while such
+/// texts were still stored.
+pub const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
 /// The most of SQLite's memory an open store keeps between adds, as long as every add
 /// could give back what it took (see [`Store::retained_bytes`]).
@@ -201,7 +220,8 @@ pub const IDLE_BYTES: u64 = 1024 * 1024;
 /// so far, and SQLite keeps it at that size until the connection is closed. Nothing
 /// else gives it back (measured: `PRAGMA shrink_memory` releases the page cache only,
 /// and releasing prepared statements releases nothing). After one text of 8 MiB of
-/// two-byte characters that table is 64 MiB; after a text of 1 MiB in which no trigram
+/// two-byte characters (stored before the limit of 1 MiB) that table was 64 MiB; after
+/// a text of 1 MiB in which no trigram
 /// repeats, 32 MiB. Opening the connection again takes 2 to 3 ms.
 pub const RELEASE_TEXT_BYTES: u64 = 16 * 1024;
 
@@ -249,6 +269,9 @@ pub enum StoreError {
     /// The frame is not a store rows frame, or one of its rows cannot be stored.
     #[error("not store rows: {detail}")]
     InvalidRows { detail: String },
+    /// The search cannot be one: an empty phrase, a query vector of another length.
+    #[error("not a search: {detail}")]
+    InvalidQuery { detail: String },
     /// The memory budget does not allow the operation, or could not be observed.
     #[error("{0}")]
     Memory(L2dError),
@@ -274,11 +297,11 @@ impl From<StoreError> for L2dError {
             StoreError::IdentityMismatch { .. } | StoreError::Exists { .. } => L2dError::Refused {
                 reason: error.to_string(),
             },
-            StoreError::InvalidName { .. } | StoreError::InvalidIdentity { .. } => {
-                L2dError::InvalidInput {
-                    detail: error.to_string(),
-                }
-            }
+            StoreError::InvalidName { .. }
+            | StoreError::InvalidIdentity { .. }
+            | StoreError::InvalidQuery { .. } => L2dError::InvalidInput {
+                detail: error.to_string(),
+            },
             StoreError::Memory(inner) => inner,
             StoreError::InvalidRows { .. } | StoreError::Failed { .. } => L2dError::Runtime {
                 detail: error.to_string(),
@@ -611,7 +634,14 @@ impl Store {
     /// [`RELEASE_TEXT_BYTES`]. Only if that reopening failed (the add itself is not
     /// undone by it) is the figure larger, by [`RETAINED_TEXT_FACTOR`] bytes for each
     /// byte of the longest text; later adds then count that text in their own share and
-    /// try again to give it back.
+    /// try again to give it back. The reopening also counts as failed when the file
+    /// opens but no longer names this store's encoder and creation: the store then
+    /// keeps its connection (every operation checks the file itself, see
+    /// [`Store::add_with`]).
+    ///
+    /// Searching and reading rows back ([`query`], [`vector`]) end by releasing the
+    /// page cache as well, so the figure holds after them too; a search counts what is
+    /// retained above [`IDLE_BYTES`] in its own share.
     pub fn retained_bytes(&self) -> u64 {
         if self.indexed_text_bytes <= RELEASE_TEXT_BYTES {
             IDLE_BYTES
@@ -623,17 +653,69 @@ impl Store {
     /// Gives back what an add took of SQLite's memory (see [`Store::retained_bytes`]).
     /// Failures are not reported: the outcome of the add stands, and what could not be
     /// given back stays counted.
+    ///
+    /// The file is read again when it is opened again, and it has to describe this
+    /// store still: the same encoder identity, creation time and tool version. If it
+    /// does not (another program wrote to it), the new connection is dropped and the
+    /// old one is kept as after a reopening that failed. Nothing is remembered about
+    /// it: every operation that stores or reads rows reads the file's description
+    /// itself, in its own transaction ([`Store::require_same_file`]).
     fn release(&mut self) {
-        if self.indexed_text_bytes > RELEASE_TEXT_BYTES {
-            // The file was checked when the store was opened; only the connection is
-            // replaced. The old one is closed when it is dropped by the assignment.
-            if let Ok((connection, _)) = sqlite::open(&self.path) {
-                self.connection = connection;
-                self.indexed_text_bytes = 0;
-                return;
-            }
+        if self.indexed_text_bytes > RELEASE_TEXT_BYTES
+            && let Ok((connection, meta)) = sqlite::open(&self.path)
+            && meta == self.meta
+        {
+            // The old connection is closed when it is dropped by the assignment.
+            self.connection = connection;
+            self.indexed_text_bytes = 0;
+            return;
         }
         let _ = self.connection.execute_batch("PRAGMA shrink_memory");
+    }
+
+    /// [`StoreError::Failed`], naming both, unless the file still describes this open
+    /// store: the encoder identity, the creation time and the tool version of its
+    /// `meta` row, read through `connection` (inside the transaction of the operation
+    /// that asks, so that what is checked is what is then written to or read).
+    ///
+    /// Another program can write to the file while the store is open. Without this
+    /// check an add would store vectors under an identity the file no longer has, and a
+    /// search would compare vectors with those of another encoder.
+    pub(crate) fn require_same_file(&self, connection: &Connection) -> Result<(), StoreError> {
+        let found = sqlite::read_meta(connection)
+            .map_err(|error| failed("reading the description of the store", &self.path, error))?;
+        if found == self.meta {
+            return Ok(());
+        }
+        let say = |meta: &sqlite::Meta| {
+            format!(
+                "the encoder {}, created at {} by version {} of the tool",
+                describe(&meta.identity),
+                meta.created_at,
+                meta.tool_version
+            )
+        };
+        Err(failed(
+            "using the open store",
+            &self.path,
+            format!(
+                "the file changed under it: it was opened as a store of {}, and now says {}; \
+                 nothing was stored or read through this open store; open it again",
+                say(&self.meta),
+                say(&found)
+            ),
+        ))
+    }
+
+    /// The bytes of the longest stored text; 0 for an empty store.
+    ///
+    /// The file keeps an index over the lengths of the texts (`logs_text_bytes`), so
+    /// this is one look-up. A store written before that index existed answers by
+    /// reading the length of every row, until its next add creates the index.
+    pub fn longest_text_bytes(&self) -> Result<u64, StoreError> {
+        self.connection
+            .query_row(sqlite::LONGEST_TEXT_SQL, [], |row| row.get(0))
+            .map_err(|error| failed("reading the longest text of", &self.path, error))
     }
 
     /// The number of stored logs.
@@ -695,6 +777,12 @@ impl Store {
     ///   longest text this open store still holds a table for, if that is longer), or
     ///   not enough for the smallest batch, the add is refused ([`StoreError::Memory`])
     ///   with the memory needed and the memory left.
+    ///
+    /// - When the file no longer describes this open store (another program changed
+    ///   its `meta` row: encoder identity, creation time or tool version), the add is
+    ///   [`StoreError::Failed`], naming what the store was opened as and what the file
+    ///   says now, and nothing is written. This is read inside the add's transaction,
+    ///   before the first row, for every add.
     ///
     /// The frame is written in batches in row order; the free memory is read again
     /// before each batch. The stored rows do not depend on the batches. Whatever the
@@ -776,19 +864,25 @@ impl Store {
             longest_text_bytes,
             plan: plan.clone(),
         };
-        if total == 0 {
-            return Ok(report);
-        }
-
         let path = self.path.clone();
         let fail = |error: rusqlite::Error| failed("adding to the store", &path, error);
         let dimension = usize::from(self.meta.identity.dimension);
         let revision = self.meta.identity.revision.clone();
-        // From here on texts are indexed, also by an add that fails later.
-        self.indexed_text_bytes = self.indexed_text_bytes.max(longest_text_bytes);
         // Dropped without a commit, the transaction is rolled back: an add is all or
         // nothing.
-        let transaction = self.connection.transaction().map_err(fail)?;
+        let transaction = self.connection.unchecked_transaction().map_err(fail)?;
+        // Before anything is written: the file must still be this store's.
+        self.require_same_file(&transaction)?;
+        if total == 0 {
+            return Ok(report);
+        }
+        // From here on texts are indexed, also by an add that fails later.
+        self.indexed_text_bytes = self.indexed_text_bytes.max(longest_text_bytes);
+        // A store written before the index over the text lengths existed gets it with
+        // its first add; otherwise this does nothing.
+        transaction
+            .execute_batch(sqlite::TEXT_BYTES_INDEX_SQL)
+            .map_err(fail)?;
         {
             let mut writer = Writer {
                 insert: transaction

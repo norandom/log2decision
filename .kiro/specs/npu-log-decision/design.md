@@ -750,15 +750,23 @@ pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings
 **Responsibilities & Constraints**
 - One SQLite database `stores/<name>.db` holds one encoder identity, written to a `meta` table when the store is created.
 - Rows are added; existing rows are never changed or removed by triage.
-- Full-text search uses SQLite FTS5 for exact and containment queries.
-- Vector search is exact squared L2 on normalized vectors, computed via `faer` SIMD matrix multiplication over stored vectors.
+- Full-text search uses SQLite FTS5 for exact and containment queries (the index narrows, a comparison decides; see "Search as built" below).
+- Vector search is exact squared L2 with `faer`'s SIMD kernel over the stored vectors (see "Search as built" below).
 - Entirely synchronous; no async runtime or background database daemon.
 - As built by task 1.8 (format 1): the FTS5 index is an external-content table over `logs.text` with the `trigram` tokenizer, kept in step by insert, delete and update triggers. Rows are never written with `INSERT OR REPLACE`, whose implicit delete would skip the trigger. A closed store is one file.
 - Every row carries a finite vector of the store's dimension; a store cannot hold a log without a vector. A text with a NUL byte or longer than 1 MiB (`MAX_TEXT_BYTES`; lowered from 8 MiB by the owner on 2026-11-12, because the memory an add and a search must hold grows with the longest text) is refused by row.
 - Memory (requirement 12.9): an add holds 16 MiB plus 192 times the bytes of the longest text, counting the longest text indexed on the connection, and is refused up front when that does not fit. After an add that indexed a text over 16 KiB the store reopens its connection, because the text index keeps its hash table until the connection closes; an idle open store keeps at most 1 MiB (`Store::retained_bytes`). The caller's frame is not counted by the store.
+- Search as built by task 1.9:
+  - Text: the FTS5 trigram index narrows and a comparison in Rust decides every match. Each phrase gives the index pieces of four characters (its first, then its last, then its middle; at most four distinct pieces per search); a phrase without three indexable characters in a row is answered by a scan, and `Store::explain` names such phrases. User text never reaches SQL or the index's query syntax unquoted.
+  - Ignoring case has one definition on both paths: each character of text and phrase is replaced by its Unicode lower-case mapping when that mapping is one character, otherwise it stays (so `ß` does not match `SS`, final `ς` does not match `σ`). Case-insensitive pieces are taken only from character ranges in which the index folds the same way.
+  - Label and source restrictions use the SQL indexes. When a phrase is given, the text index leads and label and source are checked per row.
+  - Nearest neighbours: exact squared L2, computed per stored vector from the difference vector with `faer`'s SIMD inner product. This is not one matrix product over normalised vectors: that form loses small distances to cancellation, and the store does not require unit vectors. Vectors are read in batches. Nearest first; among equal 32-bit distances the log stored first comes first, also at the cut at `k`.
+  - Every add and every search reads the store's identity from the file first; on a difference nothing is written or read and both identities are named.
+  - Memory: a phrase search holds 16 MiB, three times the longest stored text for the text being compared, 128 KiB per byte of piece, and twice the longest stored text per character of piece (at most about 59 MiB at the 1 MiB text limit); it also counts what the open store retains. It is refused up front, with the figures, when that does not fit. The store knows its longest text through the index `logs_text_bytes`.
+  - Results are Polars frames (the stored rows frame and the hits frame, see "Data frames"), not structs.
 
 **Dependencies**
-- External: `rusqlite` 0.32 (`bundled`, which includes FTS5) and `faer` 0.24 (P0; added with the vector search in task 1.9).
+- External: `rusqlite` 0.32 (`bundled`, which includes FTS5) and `faer` 0.24 (P0; `default-features = false`, feature `std`; the store uses it for one inner product; kept by the owner's decision of 2026-11-12 although it brings 44 packages into the lock file).
 
 **Contracts**: Service [x] / State [x]
 
@@ -787,22 +795,26 @@ impl Store {
     pub fn len(&self) -> Result<u64, StoreError>;
 }
 
-// Task 1.9 defines reading rows back and searching; the shapes below are its starting point.
-pub struct StoredLog { pub id: String, pub text: String, pub source: String, pub occurrences: u32, pub label: Label,
-                       pub group: Option<String>, pub truncated: bool, pub vector: Vec<f32>, pub encoder_revision: String }
-pub struct Filter { pub label: Option<Label>, pub source: Option<String>, pub contains: Vec<String> }
-pub struct Hit { pub log: StoredLog, pub distance: f32 }
+// Reading rows back and searching (task 1.9). Results are frames; every read has a `_with` form taking the caller's budget.
+pub struct Filter { pub label: Option<Label>, pub source: Option<String>, pub contains: Vec<String>, pub case_exact: bool, pub equals: Option<String> }
+
+pub struct Nearest { pub hits: DataFrame, pub queries: usize, pub candidates: u64, pub held_bytes: u64, pub hits_bytes: u64, pub plan: Option<BatchPlan> }
+pub struct Matching { pub rows: u64, pub read_bytes: u64 }
+pub struct Explain { pub text_index: bool, pub scanned_phrases: Vec<String>, pub index_phrase_bytes: u64, pub held_bytes: u64, pub steps: Vec<String> }
 
 impl Store {
-    pub fn nearest(&self, vector: &[f32], identity: &EncoderIdentity, k: usize, filter: &Filter)
-        -> Result<Vec<Hit>, StoreError>;
-    pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<Vec<StoredLog>, StoreError>;
-    pub fn vectors(&self, filter: &Filter) -> Result<Vec<StoredLog>, StoreError>;   // for assessment and shift
+    // `queries` holds one or more query vectors one after the other; the hits frame has a `query` column.
+    pub fn nearest(&self, queries: &[f32], identity: &EncoderIdentity, k: usize, filter: &Filter) -> Result<Nearest, StoreError>;
+    pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<DataFrame, StoreError>;   // stored rows frame, insertion order
+    pub fn vectors(&self, filter: &Filter) -> Result<DataFrame, StoreError>;                      // for assessment and shift
+    pub fn matching_with(&self, filter: &Filter, limit: usize, budget: &mut MemoryBudget) -> Result<Matching, StoreError>;   // counts without reading rows back
+    pub fn explain(&self, filter: &Filter) -> Result<Explain, StoreError>;
+    pub fn longest_text_bytes(&self) -> Result<u64, StoreError>;
 }
 ```
-- Preconditions: `add` and `nearest` receive the identity of the encoder that produced the vectors; a difference from the store's identity returns `IdentityMismatch`.
+- Preconditions: `add` and `nearest` receive the identity of the encoder that produced the vectors; a difference from the store's identity returns `IdentityMismatch`. A query vector with a NaN or an infinity is `InvalidQuery`, as is an empty phrase.
 - Invariant: `id` is unique; adding an existing `id` adds its occurrences and leaves text, label and vector unchanged. An add is one transaction; a failed add leaves the file as it was.
-- For task 1.9: the trigram tokenizer folds case (Unicode, not only ASCII) and needs at least three characters, so case-exact matches need a second condition and shorter phrases a scan.
+- The field lists above are a summary; the crate documentation is authoritative for exact fields.
 
 ### Decisions
 
@@ -825,7 +837,7 @@ impl Store {
 pub enum ScorerKind { Baseline, Neighbour }
 
 pub struct Evidence {
-    pub neighbours: Vec<Hit>,
+    pub neighbours: DataFrame,   // rows of the hits frame (task 1.9)
     pub used: u32,
     pub same_group_count: u32,
     pub cross_group_count: u32,
@@ -1093,6 +1105,8 @@ Frames exchanged between crates. Column names and types are fixed; a crate may a
 | Scores | `text` String, `scorer` String, `ratio` Float32 nullable, `abstained` Boolean, plus evidence columns owned by the scorer | scorers | triage, calibration, evaluation |
 | Calibration points | `ratio` Float32, `label` String, `group` String nullable | evaluation harness, `l2d calibrate` | ConformalCalibrator |
 | Store rows | `text` String, `source` String, `occurrences` UInt32, `label` String, `group` String nullable, `truncated` Boolean, `vector` List of Float32 (length = dimension) | `l2d_store::rows_frame`, encoder integration | Store |
+| Stored rows | `id` String, then the store rows columns, in insertion order | `Store::text_search`, `Store::vectors` | assessment, shift test, evaluation |
+| Hits | `query` (index of the query vector), `distance` Float32 (squared L2), `id`, `text`, `source`, `occurrences`, `label`, `group`, `truncated`; no vector | `Store::nearest` | neighbour scorer, outlier ranking, evidence |
 | Predictions | `text`, `label`, `group`, `fold` UInt32, `scorer`, `ratio`, `label_set` String nullable | evaluation harness | metrics, reports |
 
 - Row order is meaningful: the logs frame is in first-occurrence order, and frames derived from it keep that order unless a column says otherwise.
@@ -1114,6 +1128,8 @@ Store table `logs`:
 | `truncated` | integer, 0 or 1 | |
 | `vector` | blob of little-endian float32, exactly 4 × dimension bytes | No approximate index |
 | `encoder_revision` | text | Equals the store's identity |
+
+Indexes on `logs`: `label`, `source`, and `logs_text_bytes` over the byte length of `text` (added by task 1.9 so that the store knows its longest text; a store written before it gains the index on its next add).
 
 Both tables are STRICT with CHECK constraints for the ranges above. The file carries `user_version` 1 and an application id.
 

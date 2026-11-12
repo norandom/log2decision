@@ -35,6 +35,14 @@
 //! matches the texts that contain it, ignoring case, whatever characters it holds.
 //! Triggers on `logs` keep it in step.
 //!
+//! `logs_text_bytes` is an index over `octet_length(text)`: the bytes of the longest
+//! stored text are one look-up ([`crate::Store::longest_text_bytes`]), which every
+//! search for a phrase needs to size its share of the memory limit. It was added with
+//! task 1.9 without a new format number: a file without it is a valid store (the
+//! look-up reads every row's length then), it gets the index with its next add, and
+//! a version of the tool that does not know the index reads and writes a file that
+//! has it, since SQLite keeps it up to date.
+//!
 //! The file carries the application id [`APPLICATION_ID`] and its format number
 //! ([`SCHEMA_VERSION`]) in `PRAGMA user_version`.
 
@@ -55,6 +63,14 @@ pub const CACHE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How long a statement waits for another process that has the file locked.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Creates the index over the lengths of the texts, unless it is there.
+pub(crate) const TEXT_BYTES_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS logs_text_bytes ON logs (octet_length(text))";
+
+/// The bytes of the longest stored text, 0 without a log. The expression is the one of
+/// the index `logs_text_bytes`, so that SQLite answers from the index when it is there.
+pub(crate) const LONGEST_TEXT_SQL: &str = "SELECT ifnull(max(octet_length(text)), 0) FROM logs";
 
 /// What the `meta` table says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +106,7 @@ fn schema_sql(dimension: u16) -> String {
         ) STRICT;
         CREATE INDEX logs_label ON logs (label);
         CREATE INDEX logs_source ON logs (source);
+        {TEXT_BYTES_INDEX_SQL};
         CREATE VIRTUAL TABLE logs_fts USING fts5(
             text, content = 'logs', content_rowid = 'seq', tokenize = 'trigram'
         );
@@ -187,7 +204,7 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
     Ok((connection, meta))
 }
 
-fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
+pub(crate) fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
     connection.query_row(
         "SELECT encoder_name, encoder_revision, encoder_dimension, created_at, tool_version \
          FROM meta WHERE id = 1",

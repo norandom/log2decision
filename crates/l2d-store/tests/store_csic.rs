@@ -20,8 +20,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use l2d_core::polars::prelude::DataFrame;
@@ -30,7 +30,10 @@ use l2d_core::{
     MemoryBudget, MemorySettings, ProjectPaths,
 };
 use l2d_store::{
-    ADD_FIXED_BYTES, AddReport, IDLE_BYTES, MAX_TEXT_BYTES, Store, StoreError, log_id, rows_frame,
+    ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, DISTANCE, Filter, IDLE_BYTES, INDEX_TEXT_FACTOR,
+    MAX_TEXT_BYTES, Nearest, PHRASE_BYTE_BYTES, RELEASE_TEXT_BYTES, RETAINED_TEXT_FACTOR,
+    SCHEMA_VERSION, SEARCH_FIXED_BYTES, Store, StoreError, TEXT, TEXT_READ_FACTOR, log_id,
+    rows_frame,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -84,14 +87,46 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The measurements share the counters: one at a time.
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+/// The tests of this file share two sets of counters, the allocation counters above and
+/// SQLite's own, so they run one at a time. That is enforced here, in one place: a
+/// scratch directory (and so a store) and every reading of the counters need this guard,
+/// and only [`alone`] makes one. A test added to this file cannot open a store or
+/// measure beside a running measurement without it.
+///
+/// SQLite's figures are read as differences from what SQLite held when the guard was
+/// taken, so that a connection left open elsewhere in the process shifts no figure.
+struct Alone {
+    _guard: MutexGuard<'static, ()>,
+    /// What SQLite held when this test got its turn.
+    sqlite_before: u64,
+}
+
+fn alone() -> Alone {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: reads SQLite's allocation counter; no pointers, callable at any time.
+    let sqlite_before = unsafe { rusqlite::ffi::sqlite3_memory_used() } as u64;
+    Alone {
+        _guard: guard,
+        sqlite_before,
+    }
+}
+
+impl Alone {
+    /// The bytes SQLite holds now, beyond what it held when this test started.
+    fn sqlite_used(&self) -> u64 {
+        sqlite_heap(self, false).0
+    }
+}
 
 const MIB: f64 = 1024.0 * 1024.0;
 const REVISION: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// The bytes SQLite holds now, and the most it held since the last reset.
-fn sqlite_heap(reset: bool) -> (u64, u64) {
+/// The bytes SQLite holds now, and the most it held since the last reset, both beyond
+/// what it held when the test started.
+fn sqlite_heap(one: &Alone, reset: bool) -> (u64, u64) {
     // SAFETY: both functions only read (and, on request, reset) SQLite's allocation
     // counters; they take no pointers and may be called at any time.
     let (used, peak) = unsafe {
@@ -100,7 +135,10 @@ fn sqlite_heap(reset: bool) -> (u64, u64) {
             rusqlite::ffi::sqlite3_memory_highwater(i32::from(reset)),
         )
     };
-    (used as u64, peak as u64)
+    (
+        (used as u64).saturating_sub(one.sqlite_before),
+        (peak as u64).saturating_sub(one.sqlite_before),
+    )
 }
 
 /// What `run` took at its peak.
@@ -113,13 +151,13 @@ struct Taken {
     sqlite_bytes: u64,
 }
 
-fn measure<T>(run: impl FnOnce() -> T) -> (T, Taken) {
+fn measure<T>(one: &Alone, run: impl FnOnce() -> T) -> (T, Taken) {
     let rust_before = CURRENT.load(Ordering::Relaxed);
     PEAK.store(rust_before, Ordering::Relaxed);
-    sqlite_heap(true);
+    sqlite_heap(one, true);
     let result = run();
     let rust_peak = PEAK.load(Ordering::Relaxed);
-    let (_, sqlite_peak) = sqlite_heap(false);
+    let (_, sqlite_peak) = sqlite_heap(one, false);
     (
         result,
         Taken {
@@ -139,7 +177,8 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new(name: &str) -> Self {
+    /// Only a test that has its turn ([`alone`]) gets a place for a store.
+    fn new(_one: &Alone, name: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("l2d-store-csic-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -272,9 +311,7 @@ fn print_taken(what: &str, report: &AddReport, taken: &Taken) {
 #[test]
 #[ignore = "12,000-row measurement; run in release mode on request"]
 fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let one = alone();
     // 12,000 logs of about 400 bytes with 128-dimension vectors: a database file of
     // about 23 MiB, nearly three times the page cache, written in twelve batches.
     let records: Vec<LogRecord> = (0..12_000u32)
@@ -302,7 +339,7 @@ fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
 
     {
         let batch_rows = Some(1_024);
-        let scratch = Scratch::new("synthetic");
+        let scratch = Scratch::new(&one, "synthetic");
         let paths = scratch.paths();
         let mut store = Store::create(&paths, "s", &identity(128)).unwrap();
         let settings = MemorySettings {
@@ -333,7 +370,7 @@ fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
         assert_eq!(std::fs::read(paths.store_path("s")).unwrap(), empty);
 
         let started = Instant::now();
-        let (report, taken) = measure(|| store.add_with(&rows, &identity(128), &mut budget));
+        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(128), &mut budget));
         let report = report.expect("the logs are added");
         let seconds = started.elapsed().as_secs_f64();
         drop(store);
@@ -488,11 +525,6 @@ fn roomy_budget() -> MemoryBudget {
         .expect("the budget is usable")
 }
 
-/// The bytes SQLite holds now.
-fn sqlite_used() -> u64 {
-    sqlite_heap(false).0
-}
-
 /// 300 short logs from `source`, with 8-dimension vectors.
 fn short_rows(source: &str) -> DataFrame {
     let records: Vec<LogRecord> = (0..300u64)
@@ -516,24 +548,17 @@ fn short_rows(source: &str) -> DataFrame {
 /// of the long text until the store was dropped, counted by nobody.)
 #[test]
 fn an_open_store_gives_the_memory_of_a_long_text_back() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(
-        sqlite_used(),
-        0,
-        "another connection is open in this process"
-    );
-    let scratch = Scratch::new("give-back");
+    let one = alone();
+    let scratch = Scratch::new(&one, "give-back");
     let paths = scratch.paths();
     let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
     let mut budget = roomy_budget();
     let left = budget.left_bytes();
 
     let long = rows_with_long_texts(Kind::Distinct, 256 * 1024, 1);
-    let (first, taken) = measure(|| store.add_with(&long, &identity(8), &mut budget));
+    let (first, taken) = measure(&one, || store.add_with(&long, &identity(8), &mut budget));
     let first = first.expect("the long text is added");
-    let idle = sqlite_used();
+    let idle = one.sqlite_used();
     println!(
         "first add (one text of 256 KiB): SQLite heap peak {:.1} MiB, share held {:.1} MiB; \
          in use afterwards {:.2} MiB, the store says it retains at most {:.2} MiB",
@@ -552,15 +577,16 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
     assert_eq!(budget.left_bytes(), left);
 
     // The same open store, short texts only.
-    let (second, taken) =
-        measure(|| store.add_with(&short_rows("later"), &identity(8), &mut budget));
+    let (second, taken) = measure(&one, || {
+        store.add_with(&short_rows("later"), &identity(8), &mut budget)
+    });
     let second = second.expect("the short texts are added");
     println!(
         "second add on the same open store (300 short texts): SQLite heap peak {:.2} MiB, \
          share held {:.2} MiB; in use afterwards {:.2} MiB",
         taken.sqlite_bytes as f64 / MIB,
         second.held_bytes as f64 / MIB,
-        sqlite_used() as f64 / MIB,
+        one.sqlite_used() as f64 / MIB,
     );
     assert!(second.held_bytes < ADD_FIXED_BYTES + 64 * 1024);
     assert!(
@@ -569,7 +595,7 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
         taken.sqlite_bytes,
         second.held_bytes
     );
-    assert!(sqlite_used() <= store.retained_bytes());
+    assert!(one.sqlite_used() <= store.retained_bytes());
     assert_eq!(store.len().unwrap(), 501);
 
     // A failed add gives back as well: the long text is indexed, then the last row fails.
@@ -598,14 +624,14 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
         Err(StoreError::InvalidRows { .. })
     ));
     assert!(
-        sqlite_used() <= store.retained_bytes(),
+        one.sqlite_used() <= store.retained_bytes(),
         "after the failed add SQLite holds {} bytes",
-        sqlite_used()
+        one.sqlite_used()
     );
     assert_eq!(store.len().unwrap(), 501);
 
     drop(store);
-    assert_eq!(sqlite_used(), 0);
+    assert_eq!(one.sqlite_used(), 0);
     assert_fts_consistent(&paths.store_path("s"));
 }
 
@@ -617,30 +643,28 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
 #[test]
 #[ignore = "retained-memory measurement; run in release mode on request"]
 fn retained_memory_measured() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let one = alone();
     println!(
         "text                 | plain connection, MiB in use: after commit | after shrink_memory \
          | after statement cache flush | after close || store, MiB: after the add | says it \
          retains | peak of a later short add | share that add held"
     );
-    let no_repeat = no_repeat_text((1 << 20) + 64);
+    let no_repeat = no_repeat_text((1 << 19) + 64);
     let cases: [(&str, String); 6] = [
         ("log-like 1 MiB", long_text(Kind::Realistic, 1 << 20, 1)),
         ("random ASCII 1 MiB", long_text(Kind::Noisy, 1 << 20, 1)),
         ("two-byte 1 MiB", long_text(Kind::Distinct, 1 << 20, 1)),
-        ("no repeat 2^20+64", no_repeat),
-        ("two-byte 8 MiB", long_text(Kind::Distinct, 8 << 20, 1)),
+        ("no repeat 2^19+64", no_repeat),
+        ("random ASCII 256 KiB", long_text(Kind::Noisy, 256 << 10, 1)),
         ("short texts only", String::from("GET /a?x=1")),
     ];
     let mut failures = Vec::new();
     for (label, text) in &cases {
         // The plain connection.
-        let scratch = Scratch::new("retained-plain");
+        let scratch = Scratch::new(&one, "retained-plain");
         let paths = scratch.paths();
         drop(Store::create(&paths, "s", &identity(8)).unwrap());
-        assert_eq!(sqlite_used(), 0);
+        assert_eq!(one.sqlite_used(), 0);
         let connection =
             Connection::open_with_flags(paths.store_path("s"), OpenFlags::SQLITE_OPEN_READ_WRITE)
                 .unwrap();
@@ -658,17 +682,17 @@ fn retained_memory_measured() {
                 rusqlite::params![text, vec![0u8; 32]],
             )
             .unwrap();
-        let after_commit = sqlite_used();
+        let after_commit = one.sqlite_used();
         connection.execute_batch("PRAGMA shrink_memory").unwrap();
-        let after_shrink = sqlite_used();
+        let after_shrink = one.sqlite_used();
         connection.flush_prepared_statement_cache();
-        let after_flush = sqlite_used();
+        let after_flush = one.sqlite_used();
         drop(connection);
-        let after_close = sqlite_used();
+        let after_close = one.sqlite_used();
         drop(scratch);
 
         // The store.
-        let scratch = Scratch::new("retained-store");
+        let scratch = Scratch::new(&one, "retained-store");
         let paths = scratch.paths();
         let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
         let mut budget = roomy_budget();
@@ -683,10 +707,11 @@ fn retained_memory_measured() {
         store
             .add_with(&rows_of(&logs, "long", 8), &identity(8), &mut budget)
             .expect("the text is added");
-        let idle = sqlite_used();
+        let idle = one.sqlite_used();
         let retains = store.retained_bytes();
-        let (later, taken) =
-            measure(|| store.add_with(&short_rows("later"), &identity(8), &mut budget));
+        let (later, taken) = measure(&one, || {
+            store.add_with(&short_rows("later"), &identity(8), &mut budget)
+        });
         let later = later.expect("the short texts are added");
         drop(store);
         println!(
@@ -774,16 +799,14 @@ fn no_repeat_text(trigrams: usize) -> String {
 /// budget covers it, where the fixed share alone would not.
 #[test]
 fn a_long_text_among_short_ones_stays_within_the_adds_own_share() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let one = alone();
     for (kind, bytes) in [(Kind::Noisy, 256 * 1024), (Kind::Distinct, 256 * 1024)] {
         let rows = rows_with_long_texts(kind, bytes, 1);
-        let scratch = Scratch::new("long-row");
+        let scratch = Scratch::new(&one, "long-row");
         let paths = scratch.paths();
         let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
         let mut budget = roomy_budget();
-        let (report, taken) = measure(|| store.add_with(&rows, &identity(8), &mut budget));
+        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
         let report = report.expect("the rows are added");
         drop(store);
         println!(
@@ -815,9 +838,7 @@ fn a_long_text_among_short_ones_stays_within_the_adds_own_share() {
 #[test]
 #[ignore = "long-text measurement; run in release mode on request"]
 fn long_texts_measured() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let one = alone();
     const KIB: usize = 1024;
     let longest = usize::try_from(MAX_TEXT_BYTES).unwrap();
     // One long text of each length up to the longest that is stored, and sixteen texts
@@ -847,12 +868,13 @@ fn long_texts_measured() {
     for kind in [Kind::Realistic, Kind::Noisy, Kind::Distinct, Kind::Counting] {
         for &(bytes, count) in &ladder {
             let rows = rows_with_long_texts(kind, bytes, count);
-            let scratch = Scratch::new("long");
+            let scratch = Scratch::new(&one, "long");
             let paths = scratch.paths();
             let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
             let mut budget = roomy_budget();
             let started = Instant::now();
-            let (report, taken) = measure(|| store.add_with(&rows, &identity(8), &mut budget));
+            let (report, taken) =
+                measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
             let seconds = started.elapsed().as_secs_f64();
             let report = report.expect("the rows are added");
             drop(store);
@@ -888,7 +910,6 @@ fn long_texts_measured() {
         ((1 << 19) - 64, 1),
         ((1 << 19) + 64, 1),
         (1_030_301, 1),
-        ((1 << 20) + 64, 1),
         ((1 << 18) + 64, 8),
     ] {
         let text = no_repeat_text(trigrams);
@@ -914,12 +935,12 @@ fn long_texts_measured() {
         }
         let rows = rows_of(&LogsFrame::from_records(&records).unwrap(), "long", 8);
         drop(records);
-        let scratch = Scratch::new("long");
+        let scratch = Scratch::new(&one, "long");
         let paths = scratch.paths();
         let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
         let mut budget = roomy_budget();
         let started = Instant::now();
-        let (report, taken) = measure(|| store.add_with(&rows, &identity(8), &mut budget));
+        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
         let seconds = started.elapsed().as_secs_f64();
         let report = report.expect("the rows are added");
         drop(store);
@@ -963,9 +984,7 @@ fn csic(test: &str) -> Option<LogsFrame> {
 #[test]
 #[ignore = "CSIC measurement; run in release mode on request"]
 fn csic_populates_a_store_within_its_memory_share() {
-    let _one = ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let one = alone();
     let Some(logs) = csic("csic_populates_a_store_within_its_memory_share") else {
         return;
     };
@@ -975,14 +994,16 @@ fn csic_populates_a_store_within_its_memory_share() {
     let text_bytes: usize = logs.records().map(|record| record.text.len()).sum();
     let rows = rows_of(&logs, SOURCE, DIMENSION);
 
-    let scratch = Scratch::new("csic");
+    let scratch = Scratch::new(&one, "csic");
     let paths = scratch.paths();
     let mut store = Store::create(&paths, "csic", &identity(DIMENSION)).unwrap();
     let mut budget =
         MemoryBudget::observe(&MemorySettings::default()).expect("the host has free memory");
 
     let started = Instant::now();
-    let (report, taken) = measure(|| store.add_with(&rows, &identity(DIMENSION), &mut budget));
+    let (report, taken) = measure(&one, || {
+        store.add_with(&rows, &identity(DIMENSION), &mut budget)
+    });
     let report = report.expect("the logs are added");
     let seconds = started.elapsed().as_secs_f64();
     assert_eq!(
@@ -1012,7 +1033,9 @@ fn csic_populates_a_store_within_its_memory_share() {
 
     // The same logs again: every id is stored already.
     let started = Instant::now();
-    let (again, taken) = measure(|| store.add_with(&rows, &identity(DIMENSION), &mut budget));
+    let (again, taken) = measure(&one, || {
+        store.add_with(&rows, &identity(DIMENSION), &mut budget)
+    });
     let again = again.expect("the logs are added again");
     println!(
         "  second add of the same logs: {:.2} s, all {} repeated",
@@ -1079,4 +1102,1392 @@ fn csic_populates_a_store_within_its_memory_share() {
         "  text index agrees with the logs table (checked in {:.2} s)",
         started.elapsed().as_secs_f64()
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// The reopening that fails (follow-up of the 1.8 review)
+// ---------------------------------------------------------------------------------------
+
+/// After an add that indexed a long text the store opens its connection again. When
+/// that fails the add stands, the store goes on with the connection it has, says what
+/// that connection keeps, counts the long text in the share of later adds, and gives
+/// the memory back with the first add after which the file opens again.
+#[test]
+fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
+    let one = alone();
+    let scratch = Scratch::new(&one, "reopen-fails");
+    let paths = scratch.paths();
+    let path = paths.store_path("s");
+    let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+    let mut budget = roomy_budget();
+    let left = budget.left_bytes();
+
+    // Another connection gives the file a format number this tool does not open.
+    let set_format = |format: u32| {
+        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .unwrap()
+            .pragma_update(None, "user_version", format)
+            .unwrap();
+    };
+    set_format(SCHEMA_VERSION + 1);
+
+    let long = rows_with_long_texts(Kind::Distinct, 256 * 1024, 1);
+    let first = store
+        .add_with(&long, &identity(8), &mut budget)
+        .expect("the add stands although the store could not be opened again");
+    assert_eq!((first.added, first.repeated), (201, 0));
+    assert_eq!(budget.left_bytes(), left);
+    let longest = first.longest_text_bytes;
+    assert!(longest > RELEASE_TEXT_BYTES);
+    assert!(matches!(
+        Store::open(&paths, "s"),
+        Err(StoreError::Failed { .. })
+    ));
+
+    // The store says what its connection keeps, and that covers what SQLite holds.
+    let kept = IDLE_BYTES + RETAINED_TEXT_FACTOR * longest;
+    assert_eq!(store.retained_bytes(), kept);
+    let used = one.sqlite_used();
+    println!(
+        "after the add whose reopening failed: SQLite holds {:.2} MiB, the store says it \
+         retains {:.2} MiB",
+        used as f64 / MIB,
+        kept as f64 / MIB
+    );
+    assert!(
+        used > IDLE_BYTES,
+        "the table of the text index was given back after all ({used} bytes in use): the \
+         reopening did not fail"
+    );
+    assert!(used <= kept);
+
+    // A search counts what the connection keeps above the idle level in its own
+    // share, and is refused one byte short of it.
+    let explained = store.explain(&Filter::default()).unwrap();
+    let kept_more = RETAINED_TEXT_FACTOR * longest;
+    assert_eq!(explained.held_bytes, SEARCH_FIXED_BYTES + kept_more);
+    let queries = query_vectors(1, 8);
+    let limit = (32 << 20) + explained.held_bytes;
+    let mut short = fixed_budget(Some(limit - 1), None);
+    for error in [
+        store
+            .text_search_with(&Filter::default(), 10, &mut short)
+            .unwrap_err(),
+        store
+            .matching_with(&Filter::default(), 10, &mut short)
+            .unwrap_err(),
+        store
+            .nearest_with(&queries, &identity(8), 3, &Filter::default(), &mut short)
+            .unwrap_err(),
+    ] {
+        let StoreError::Memory(L2dError::Refused { reason }) = &error else {
+            panic!("expected a memory refusal, got {error:?}");
+        };
+        // The nearest search names a larger total: it holds its best hits as well.
+        assert!(reason.contains(&kept_more.to_string()), "{reason}");
+        assert!(reason.contains("still keeps"), "{reason}");
+    }
+    let mut enough = fixed_budget(Some(limit + (1 << 20)), None);
+    assert_eq!(
+        store
+            .text_search_with(&Filter::default(), 10, &mut enough)
+            .unwrap()
+            .height(),
+        10
+    );
+    let found = store
+        .nearest_with(&queries, &identity(8), 3, &Filter::default(), &mut enough)
+        .unwrap();
+    assert!(found.held_bytes >= explained.held_bytes);
+    assert!(one.sqlite_used() <= kept);
+
+    // It stays usable, and the long text stays counted in the share of the next add,
+    // which tries again and fails again.
+    assert_eq!(store.len().unwrap(), 201);
+    let second = store
+        .add_with(&short_rows("second"), &identity(8), &mut budget)
+        .expect("the store takes adds on the connection it kept");
+    assert_eq!((second.added, second.repeated), (300, 0));
+    assert_eq!(
+        second.held_bytes,
+        ADD_FIXED_BYTES + ADD_TEXT_FACTOR * longest
+    );
+    assert_eq!(store.retained_bytes(), kept);
+    assert!(one.sqlite_used() <= kept);
+    assert_eq!(budget.left_bytes(), left);
+
+    // The file is right again: the next add still counts the text, because the table is
+    // there while it runs, and ends by opening the store again.
+    set_format(SCHEMA_VERSION);
+    let third = store
+        .add_with(&short_rows("third"), &identity(8), &mut budget)
+        .unwrap();
+    assert_eq!(
+        third.held_bytes,
+        ADD_FIXED_BYTES + ADD_TEXT_FACTOR * longest
+    );
+    assert_eq!(store.retained_bytes(), IDLE_BYTES);
+    let used = one.sqlite_used();
+    assert!(
+        used <= IDLE_BYTES,
+        "after the reopening SQLite still holds {used} bytes"
+    );
+    assert_eq!(
+        store.explain(&Filter::default()).unwrap().held_bytes,
+        SEARCH_FIXED_BYTES
+    );
+    let fourth = store
+        .add_with(&short_rows("fourth"), &identity(8), &mut budget)
+        .unwrap();
+    assert!(fourth.held_bytes < ADD_FIXED_BYTES + 64 * 1024);
+    assert_eq!(store.len().unwrap(), 201 + 900);
+
+    drop(store);
+    assert_eq!(one.sqlite_used(), 0);
+    assert_fts_consistent(&path);
+}
+
+// ---------------------------------------------------------------------------------------
+// Searching (task 1.9)
+// ---------------------------------------------------------------------------------------
+
+/// Whether a text is one the search under test has to return.
+type Keep<'a> = Box<dyn Fn(&str) -> bool + 'a>;
+
+/// A budget that does not depend on the host, with a limit or a batch size if given.
+fn fixed_budget(limit: Option<u64>, batch_rows: Option<u64>) -> MemoryBudget {
+    let settings = MemorySettings {
+        memory_limit_bytes: limit,
+        max_batch_rows: batch_rows,
+        ..MemorySettings::default()
+    };
+    MemoryBudget::observe_with(&settings, || Ok(64 << 30)).expect("the budget is usable")
+}
+
+/// `rows` request lines, every other one bad, over seven groups.
+fn search_logs(rows: u64) -> LogsFrame {
+    let records: Vec<LogRecord> = (0..rows)
+        .map(|index| LogRecord {
+            text: format!(
+                "GET http://localhost:8080/tienda1/publico/anadir.jsp?id={index}&nombre={}",
+                long_text(Kind::Noisy, 40, index + 3)
+            ),
+            label: if index % 2 == 0 {
+                Label::Bad
+            } else {
+                Label::Good
+            },
+            group: Some(format!("/tienda1/{}", index % 7)),
+            first_position: index + 1,
+            occurrences: 1,
+        })
+        .collect();
+    LogsFrame::from_records(&records).unwrap()
+}
+
+/// `count` query vectors of `dimension`, one after the other.
+fn query_vectors(count: u64, dimension: u16) -> Vec<f32> {
+    let records: Vec<LogRecord> = (0..count)
+        .map(|index| LogRecord {
+            text: format!("a log that is searched for, number {index}"),
+            label: Label::Unknown,
+            group: None,
+            first_position: index + 1,
+            occurrences: 1,
+        })
+        .collect();
+    vectors_of(&LogsFrame::from_records(&records).unwrap(), dimension)
+}
+
+fn phrase(text: &str) -> Filter {
+    Filter {
+        contains: vec![text.to_string()],
+        ..Filter::default()
+    }
+}
+
+/// What a nearest search asked of the budget: its own share (SQLite's, the texts it
+/// reads, and its best hits), one batch of vectors, and the hits.
+fn asked_by(found: &Nearest, stored: u64) -> u64 {
+    let plan = found.plan.as_ref().expect("the search read the store");
+    found.held_bytes + plan.bytes_per_row * plan.max_rows_used.min(stored) + found.hits_bytes
+}
+
+/// Asserts that a nearest search stayed within what it asked: SQLite within the share
+/// of a search with its filter, the Rust side within the rest (and its part of what
+/// is held for reading texts, the lower-case copy).
+fn assert_nearest_within(
+    what: &str,
+    store: &Store,
+    filter: &Filter,
+    found: &Nearest,
+    stored: u64,
+    taken: &Taken,
+) {
+    let asked = asked_by(found, stored);
+    let explained = store.explain(filter).unwrap();
+    let sqlite_share = explained.held_bytes;
+    let text_share = TEXT_READ_FACTOR * explained.longest_text_bytes;
+    assert!(sqlite_share >= SEARCH_FIXED_BYTES && sqlite_share <= found.held_bytes);
+    let plan = found.plan.as_ref().expect("the search read the store");
+    println!(
+        "{what}: {} hits of {} candidates; SQLite heap peak {:.2} MiB of {:.2} MiB held for \
+         it, Rust heap peak {:.3} MiB, together {:.2} of the {:.2} MiB asked of the budget \
+         ({} bytes per row, batches of up to {} rows)",
+        found.hits.height(),
+        found.candidates,
+        taken.sqlite_bytes as f64 / MIB,
+        sqlite_share as f64 / MIB,
+        taken.rust_bytes as f64 / MIB,
+        (taken.sqlite_bytes + taken.rust_bytes) as f64 / MIB,
+        asked as f64 / MIB,
+        plan.bytes_per_row,
+        plan.max_rows_used,
+    );
+    assert!(
+        taken.sqlite_bytes > 0,
+        "SQLite's allocation counters are off"
+    );
+    assert!(
+        taken.sqlite_bytes <= sqlite_share,
+        "{what}: SQLite took {} bytes, {sqlite_share} were held for it",
+        taken.sqlite_bytes,
+    );
+    assert!(
+        taken.rust_bytes <= asked - sqlite_share + text_share,
+        "{what}: the Rust side took {} bytes of the {} asked beside SQLite's share",
+        taken.rust_bytes,
+        asked - sqlite_share + text_share
+    );
+    assert!(taken.sqlite_bytes + taken.rust_bytes <= asked);
+}
+
+/// Reads the rows that match and asserts that it stayed within what was asked.
+fn read_within(
+    one: &Alone,
+    what: &str,
+    store: &Store,
+    filter: &Filter,
+    limit: Option<usize>,
+    budget: &mut MemoryBudget,
+) -> DataFrame {
+    let matching = store
+        .matching_with(filter, limit.unwrap_or(usize::MAX), budget)
+        .expect("the matching rows are counted");
+    let (frame, taken) = measure(one, || match limit {
+        Some(limit) => store.text_search_with(filter, limit, budget),
+        None => store.vectors_with(filter, budget),
+    });
+    let frame = frame.expect("the rows are read");
+    let explained = store.explain(filter).unwrap();
+    let sqlite_share = explained.held_bytes;
+    let text_share = TEXT_READ_FACTOR * explained.longest_text_bytes;
+    println!(
+        "{what}: {} rows; SQLite heap peak {:.2} MiB of the {:.2} MiB held for it, Rust heap \
+         peak {:.3} MiB of the {:.3} MiB asked for the rows; the frame takes {:.3} MiB",
+        frame.height(),
+        taken.sqlite_bytes as f64 / MIB,
+        sqlite_share as f64 / MIB,
+        taken.rust_bytes as f64 / MIB,
+        matching.read_bytes as f64 / MIB,
+        frame.estimated_size() as f64 / MIB,
+    );
+    assert_eq!(frame.height() as u64, matching.rows);
+    assert!(
+        taken.sqlite_bytes <= sqlite_share,
+        "{what}: SQLite took {} bytes, {sqlite_share} were held for it",
+        taken.sqlite_bytes
+    );
+    assert!(
+        taken.rust_bytes <= matching.read_bytes + text_share,
+        "{what}: the Rust side took {} bytes, {} were asked",
+        taken.rust_bytes,
+        matching.read_bytes + text_share
+    );
+    assert!(taken.sqlite_bytes + taken.rust_bytes <= sqlite_share + matching.read_bytes);
+    frame
+}
+
+/// A text of `bytes` bytes that repeats `unit`.
+fn repeated(unit: &str, bytes: usize) -> String {
+    let mut text = unit.repeat(bytes / unit.len() + 1);
+    while text.len() > bytes || !text.is_char_boundary(text.len()) {
+        text.pop();
+    }
+    text
+}
+
+/// A store named `name` with 200 short logs and the one long `text`, 8-dimension
+/// vectors.
+fn store_with_long_text(scratch: &Scratch, name: &str, text: &str) -> Store {
+    let mut records: Vec<LogRecord> = (0..200u64)
+        .map(|index| LogRecord {
+            text: format!(
+                "GET /short/{index}?x={}",
+                long_text(Kind::Noisy, 60, index + 7)
+            ),
+            label: Label::Good,
+            group: None,
+            first_position: index + 1,
+            occurrences: 1,
+        })
+        .collect();
+    records.push(LogRecord {
+        text: text.to_string(),
+        label: Label::Bad,
+        group: None,
+        first_position: 201,
+        occurrences: 1,
+    });
+    let mut store = Store::create(&scratch.paths(), name, &identity(8)).unwrap();
+    store
+        .add_with(
+            &rows_of(&LogsFrame::from_records(&records).unwrap(), "long", 8),
+            &identity(8),
+            &mut roomy_budget(),
+        )
+        .expect("the long text is added");
+    store
+}
+
+/// Searches `store` for `filter`, whose phrases occur in its long text, in the three
+/// ways (counting, reading back, nearest) and asserts each time that SQLite's heap
+/// stayed within what the search held for it (requirement 12.9) and the Rust side
+/// within the rest. Returns the largest part of the held share that SQLite used.
+fn assert_phrase_search_within(one: &Alone, what: &str, store: &Store, filter: &Filter) -> f64 {
+    let explained = store.explain(filter).unwrap();
+    let held = explained.held_bytes;
+    let text_share = TEXT_READ_FACTOR * explained.longest_text_bytes;
+    let mut budget = roomy_budget();
+    let left = budget.left_bytes();
+    let within = |way: &str, sqlite: u64| {
+        assert!(
+            sqlite <= held,
+            "{what}, {way}: SQLite took {sqlite} bytes, the search held {held} ({:.2})",
+            sqlite as f64 / held as f64
+        );
+    };
+
+    let (matching, counting) =
+        measure(one, || store.matching_with(filter, usize::MAX, &mut budget));
+    let matching = matching.expect("the logs are counted");
+    assert!(
+        matching.rows >= 1,
+        "{what}: the long text holds the phrases"
+    );
+    within("counting", counting.sqlite_bytes);
+    // What is held already contains the share for the texts: both sides together.
+    assert!(
+        counting.sqlite_bytes + counting.rust_bytes <= held,
+        "{what}, counting: SQLite and the Rust side took {} bytes together, {held} were held",
+        counting.sqlite_bytes + counting.rust_bytes
+    );
+    assert!(
+        counting.rust_bytes <= text_share,
+        "{what}, counting: the Rust side took {} bytes",
+        counting.rust_bytes
+    );
+
+    let (frame, reading) = measure(one, || {
+        store.text_search_with(filter, usize::MAX, &mut budget)
+    });
+    let frame = frame.expect("the logs are read back");
+    assert_eq!(frame.height() as u64, matching.rows);
+    drop(frame);
+    within("reading back", reading.sqlite_bytes);
+    assert!(
+        reading.sqlite_bytes + reading.rust_bytes <= held + matching.read_bytes,
+        "{what}, reading back: SQLite and the Rust side took {} bytes together",
+        reading.sqlite_bytes + reading.rust_bytes
+    );
+    assert!(
+        reading.rust_bytes <= matching.read_bytes + text_share,
+        "{what}, reading back: the Rust side took {} bytes",
+        reading.rust_bytes
+    );
+
+    let queries = query_vectors(1, 8);
+    let (found, nearest) = measure(one, || {
+        store.nearest_with(&queries, &identity(8), 3, filter, &mut budget)
+    });
+    let found = found.expect("the nearest logs are found");
+    assert_eq!(found.candidates, matching.rows);
+    assert!(found.held_bytes >= held);
+    within("nearest", nearest.sqlite_bytes);
+    assert!(
+        nearest.sqlite_bytes + nearest.rust_bytes <= asked_by(&found, 201),
+        "{what}, nearest: SQLite and the Rust side took {} bytes together",
+        nearest.sqlite_bytes + nearest.rust_bytes
+    );
+    assert!(
+        nearest.rust_bytes <= asked_by(&found, 201) - held + text_share,
+        "{what}, nearest: the Rust side took {} bytes",
+        nearest.rust_bytes
+    );
+    drop(found);
+    assert_eq!(budget.left_bytes(), left);
+    assert!(one.sqlite_used() <= IDLE_BYTES);
+
+    let most = counting
+        .sqlite_bytes
+        .max(reading.sqlite_bytes)
+        .max(nearest.sqlite_bytes);
+    println!(
+        "{what}: pieces {:?}; held {:.2} MiB; SQLite heap peak {:.2} MiB counting, {:.2} \
+         reading back, {:.2} nearest ({:.2} of held)",
+        explained.index_pieces,
+        held as f64 / MIB,
+        counting.sqlite_bytes as f64 / MIB,
+        reading.sqlite_bytes as f64 / MIB,
+        nearest.sqlite_bytes as f64 / MIB,
+        most as f64 / held as f64
+    );
+    most as f64 / held as f64
+}
+
+/// The lower-case copy of a text that is compared ignoring case is allocated once and
+/// stays within what the share counts for it, twice the bytes of the longest stored
+/// text: a text of `Ⱥ` (U+023A, two bytes), whose lower-case form has three bytes, and
+/// a text of four-byte characters, each exactly as long as a store takes.
+#[test]
+fn the_lower_case_copy_of_a_text_stays_within_what_is_held_for_it() {
+    let one = alone();
+    let scratch = Scratch::new(&one, "lower-case");
+    let longest = usize::try_from(MAX_TEXT_BYTES).unwrap();
+    for (name, unit, grows) in [("stroke", "\u{23A}", 3), ("emoji", "\u{1F600}", 2)] {
+        let text = repeated(unit, longest);
+        assert_eq!(text.len(), longest);
+        let store = store_with_long_text(&scratch, name, &text);
+        // Two characters: answered by reading every text, each of which is lowered.
+        let filter = phrase(&unit.repeat(2));
+        let explained = store.explain(&filter).unwrap();
+        assert!(!explained.text_index);
+        let copy_share = 2 * MAX_TEXT_BYTES;
+        assert_eq!(
+            explained.held_bytes,
+            SEARCH_FIXED_BYTES
+                + TEXT_READ_FACTOR * MAX_TEXT_BYTES
+                + l2d_store::fold(&unit.repeat(2)).len() as u64
+        );
+        let mut budget = roomy_budget();
+        let (matching, taken) = measure(&one, || {
+            store.matching_with(&filter, usize::MAX, &mut budget)
+        });
+        assert_eq!(matching.expect("the logs are counted").rows, 1);
+        let copy = l2d_store::fold(&text).len() as u64;
+        println!(
+            "1 MiB of U+{:04X}: the lower-case copy has {:.2} MiB; Rust heap peak {:.2} MiB of \
+             the {:.2} MiB counted for it; SQLite heap peak {:.2} MiB; held {:.2} MiB",
+            u32::from(unit.chars().next().unwrap()),
+            copy as f64 / MIB,
+            taken.rust_bytes as f64 / MIB,
+            copy_share as f64 / MIB,
+            taken.sqlite_bytes as f64 / MIB,
+            explained.held_bytes as f64 / MIB,
+        );
+        assert_eq!(copy, MAX_TEXT_BYTES * grows / 2);
+        // One allocation of exactly the copy, and little beside it.
+        assert!(taken.rust_bytes >= copy && taken.rust_bytes <= copy + 64 * 1024);
+        assert!(taken.rust_bytes <= copy_share);
+        assert!(taken.sqlite_bytes + taken.rust_bytes <= explained.held_bytes);
+        // The other ways of searching, and phrases that go through the index.
+        for (what, filter) in [
+            ("two characters", filter.clone()),
+            ("sixteen characters", phrase(&unit.repeat(16))),
+        ] {
+            assert_phrase_search_within(&one, &format!("1 MiB of {name}, {what}"), &store, &filter);
+        }
+        drop(store);
+        assert_eq!(one.sqlite_used(), 0);
+    }
+}
+
+/// The phrase searches of the memory tests over one long text: one phrase of 3, 4, 16
+/// and 300 characters, four phrases and six, each ignoring case (given in upper case)
+/// and case-exactly, and the long text itself as the exact text.
+fn phrase_filters(text: &str) -> Vec<(String, Filter)> {
+    let start = |characters: usize| -> String { text.chars().take(characters).collect() };
+    let sets: Vec<(&str, Vec<String>)> = vec![
+        ("one phrase of 3 characters", vec![start(3)]),
+        ("one phrase of 4 characters", vec![start(4)]),
+        ("one phrase of 16 characters", vec![start(16)]),
+        ("one phrase of 300 characters", vec![start(300)]),
+        ("four phrases", vec![start(5), start(6), start(7), start(8)]),
+        (
+            "six phrases",
+            vec![start(4), start(5), start(6), start(7), start(8), start(9)],
+        ),
+    ];
+    let mut filters = Vec::new();
+    for (name, phrases) in sets {
+        filters.push((
+            format!("{name}, ignoring case"),
+            Filter {
+                contains: phrases.iter().map(|phrase| phrase.to_uppercase()).collect(),
+                ..Filter::default()
+            },
+        ));
+        filters.push((
+            format!("{name}, case-exact"),
+            Filter {
+                contains: phrases,
+                case_exact: true,
+                ..Filter::default()
+            },
+        ));
+    }
+    filters.push((
+        "the exact text".to_string(),
+        Filter {
+            equals: Some(text.to_string()),
+            ..Filter::default()
+        },
+    ));
+    filters
+}
+
+/// Searches stay within what they ask of the budget (requirement 12.9), hand the
+/// budget back, and leave an open store at its idle level.
+#[test]
+fn a_search_takes_no_more_memory_than_it_asks_of_the_budget() {
+    let one = alone();
+    let scratch = Scratch::new(&one, "search-heap");
+    let paths = scratch.paths();
+    const DIMENSION: u16 = 64;
+    const ROWS: u64 = 4_000;
+    let logs = search_logs(ROWS);
+    let mut store = Store::create(&paths, "s", &identity(DIMENSION)).unwrap();
+    let mut budget = roomy_budget();
+    store
+        .add_with(
+            &rows_of(&logs, "search", DIMENSION),
+            &identity(DIMENSION),
+            &mut budget,
+        )
+        .unwrap();
+    drop(logs);
+    let left = budget.left_bytes();
+    let idle = |what: &str| {
+        let used = one.sqlite_used();
+        assert_eq!(store.retained_bytes(), IDLE_BYTES);
+        assert!(
+            used <= IDLE_BYTES,
+            "{what}: SQLite holds {used} bytes; an idle store keeps at most {IDLE_BYTES}"
+        );
+    };
+    idle("after the add");
+
+    let queries = query_vectors(5, DIMENSION);
+    let exact = Filter {
+        case_exact: true,
+        ..phrase("anadir.jsp?id=12")
+    };
+    let cases: [(&str, Filter, Option<u64>); 6] = [
+        ("nearest, all logs", Filter::default(), None),
+        ("nearest, batches of 1,024", Filter::default(), Some(1_024)),
+        ("nearest, batches of 100", Filter::default(), Some(100)),
+        ("nearest, a phrase through the index", phrase("ID=12"), None),
+        ("nearest, a case-exact phrase", exact.clone(), None),
+        ("nearest, a short phrase by a scan", phrase("=7"), None),
+    ];
+    for (what, filter, batch_rows) in &cases {
+        let mut budget = fixed_budget(None, *batch_rows);
+        let left = budget.left_bytes();
+        let (found, taken) = measure(&one, || {
+            store.nearest_with(&queries, &identity(DIMENSION), 10, filter, &mut budget)
+        });
+        let found = found.expect("the nearest logs are found");
+        assert!(found.candidates > 0, "{what}");
+        assert_nearest_within(what, &store, filter, &found, ROWS, &taken);
+        assert_eq!(budget.left_bytes(), left);
+        drop(found);
+        idle(what);
+    }
+
+    let bad = Filter {
+        label: Some(Label::Bad),
+        ..Filter::default()
+    };
+    for (what, filter, limit) in [
+        ("export, all logs", &Filter::default(), None),
+        ("export, one label", &bad, None),
+        ("export, a phrase", &phrase("id=12"), None),
+        (
+            "text search, a phrase, 50 rows",
+            &phrase("nombre="),
+            Some(50),
+        ),
+        ("text search, case-exact", &exact, Some(usize::MAX)),
+        (
+            "text search, a short phrase by a scan",
+            &phrase("=7"),
+            Some(usize::MAX),
+        ),
+    ] {
+        let frame = read_within(&one, what, &store, filter, limit, &mut budget);
+        assert!(frame.height() > 0, "{what}");
+        assert_eq!(budget.left_bytes(), left);
+        drop(frame);
+        idle(what);
+    }
+    drop(store);
+    assert_eq!(one.sqlite_used(), 0);
+}
+
+/// Requirement 12.9 where it is hardest: a phrase that occurs in a long text that
+/// repeats itself. The text index reads, for that log, the list of all places of
+/// every trigram it is given, and each list is as long as the text. The store's
+/// longest text is exactly the longest a store takes (the worst case: the buffers
+/// double just there), a run of one character and a cycle of three; every search
+/// stays within what it held, and is refused up front one byte short of it.
+#[test]
+fn a_phrase_search_over_a_long_repetitive_text_stays_within_what_it_holds() {
+    let one = alone();
+    let scratch = Scratch::new(&one, "repetitive");
+    let longest = usize::try_from(MAX_TEXT_BYTES).unwrap();
+    let mut worst = 0.0f64;
+    for (name, unit) in [("run", "a"), ("cycle", "abc")] {
+        let text = repeated(unit, longest);
+        let store = store_with_long_text(&scratch, name, &text);
+        assert_eq!(store.longest_text_bytes().unwrap(), MAX_TEXT_BYTES);
+        assert!(one.sqlite_used() <= IDLE_BYTES);
+        for (what, filter) in phrase_filters(&text) {
+            let what = format!("1 MiB of '{unit}', {what}");
+            worst = worst.max(assert_phrase_search_within(&one, &what, &store, &filter));
+        }
+
+        // What is held, and the refusal one byte short of it.
+        let filter = phrase(&text[..16].to_uppercase());
+        let explained = store.explain(&filter).unwrap();
+        // The three pieces of the phrase are one and the same: given once.
+        assert_eq!(explained.index_pieces.len(), 1);
+        assert_eq!(explained.longest_text_bytes, MAX_TEXT_BYTES);
+        let index_share = 4 * PHRASE_BYTE_BYTES + INDEX_TEXT_FACTOR * 4 * MAX_TEXT_BYTES;
+        // With the lower-case copy of the phrase, 16 bytes.
+        let text_share = TEXT_READ_FACTOR * MAX_TEXT_BYTES + 16;
+        assert_eq!(
+            explained.held_bytes,
+            SEARCH_FIXED_BYTES + text_share + index_share
+        );
+        let limit = (32 << 20) + explained.held_bytes;
+        let queries = query_vectors(1, 8);
+        let mut short = fixed_budget(Some(limit - 1), None);
+        let left = short.left_bytes();
+        for error in [
+            store
+                .matching_with(&filter, usize::MAX, &mut short)
+                .unwrap_err(),
+            store
+                .text_search_with(&filter, usize::MAX, &mut short)
+                .unwrap_err(),
+            store
+                .nearest_with(&queries, &identity(8), 3, &filter, &mut short)
+                .unwrap_err(),
+        ] {
+            let StoreError::Memory(L2dError::Refused { reason }) = &error else {
+                panic!("expected a memory refusal, got {error:?}");
+            };
+            for figure in [
+                MAX_TEXT_BYTES,
+                text_share,
+                index_share,
+                SEARCH_FIXED_BYTES,
+                left,
+                limit - 1,
+            ] {
+                assert!(
+                    reason.contains(&figure.to_string()),
+                    "{reason} lacks {figure}"
+                );
+            }
+            assert!(reason.contains("nothing was read"), "{reason}");
+        }
+        assert_eq!(short.left_bytes(), left);
+        let counted = store
+            .matching_with(&filter, usize::MAX, &mut fixed_budget(Some(limit), None))
+            .expect("the share itself is enough to count");
+        assert_eq!(counted.rows, 1);
+        drop(store);
+        assert_eq!(one.sqlite_used(), 0);
+    }
+    println!("the most SQLite took of what a phrase search held: {worst:.2}");
+    assert!(worst <= 1.0);
+}
+
+/// Searches over the 25,608 distinct logs of HTTP CSIC 2010 with synthetic
+/// 128-dimension vectors: time, memory against what was asked, and the nearest logs
+/// against a brute-force computation.
+#[test]
+#[ignore = "CSIC measurement; run in release mode on request"]
+fn csic_searches_measured() {
+    let one = alone();
+    let Some(logs) = csic("csic_searches_measured") else {
+        return;
+    };
+    const SOURCE: &str = "data/csic-2010/csic_database.csv";
+    const DIMENSION: u16 = 128;
+    const STORED: u64 = 25_608;
+    let width = usize::from(DIMENSION);
+    let scratch = Scratch::new(&one, "csic-search");
+    let paths = scratch.paths();
+    let mut store = Store::create(&paths, "csic", &identity(DIMENSION)).unwrap();
+    let mut budget =
+        MemoryBudget::observe(&MemorySettings::default()).expect("the host has free memory");
+    {
+        let rows = rows_of(&logs, SOURCE, DIMENSION);
+        store
+            .add_with(&rows, &identity(DIMENSION), &mut budget)
+            .expect("the logs are added");
+    }
+    let stored_vectors = vectors_of(&logs, DIMENSION);
+    let stored_texts: Vec<String> = logs.records().map(|record| record.text).collect();
+    drop(logs);
+    assert!(one.sqlite_used() <= IDLE_BYTES);
+    println!("CSIC 2010: {STORED} logs with {DIMENSION}-dimension vectors; {budget:?}");
+
+    // Brute force in double precision: the distances of the ten nearest, in order.
+    let reference = |query: &[f32], keep: &dyn Fn(&str) -> bool| -> Vec<f64> {
+        let mut all: Vec<f64> = stored_vectors
+            .chunks_exact(width)
+            .zip(&stored_texts)
+            .filter(|(_, text)| keep(text))
+            .map(|(vector, _)| {
+                vector
+                    .iter()
+                    .zip(query)
+                    .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+                    .sum()
+            })
+            .collect();
+        all.sort_by(f64::total_cmp);
+        all.truncate(10);
+        all
+    };
+    let check = |found: &Nearest, query_index: usize, expected: &[f64]| {
+        let distances: Vec<f32> = found
+            .hits
+            .column(DISTANCE)
+            .unwrap()
+            .f32()
+            .unwrap()
+            .iter()
+            .flatten()
+            .skip(query_index * 10)
+            .take(10)
+            .collect();
+        assert_eq!(distances.len(), expected.len());
+        for (got, want) in distances.iter().zip(expected) {
+            assert!(
+                (f64::from(*got) - want).abs() <= 1e-5,
+                "distance {got}, reference {want}"
+            );
+        }
+    };
+
+    // One query at a time: a stored log's own vector (found at the distance 0) and
+    // vectors of logs that are not stored.
+    let queries = query_vectors(100, DIMENSION);
+    let mut seconds = Vec::new();
+    let mut worst = (0u64, 0u64);
+    for index in 0..20 {
+        let query = if index == 0 {
+            &stored_vectors[7_000 * width..7_001 * width]
+        } else {
+            &queries[index * width..(index + 1) * width]
+        };
+        let started = Instant::now();
+        let (found, taken) = measure(&one, || {
+            store.nearest_with(
+                query,
+                &identity(DIMENSION),
+                10,
+                &Filter::default(),
+                &mut budget,
+            )
+        });
+        seconds.push(started.elapsed().as_secs_f64());
+        let found = found.expect("the nearest logs are found");
+        if index == 0 {
+            assert_nearest_within(
+                "  one query, 10 nearest",
+                &store,
+                &Filter::default(),
+                &found,
+                STORED,
+                &taken,
+            );
+            println!("  plan: {}", found.plan.as_ref().unwrap());
+            let first = found
+                .hits
+                .column(TEXT)
+                .unwrap()
+                .str()
+                .unwrap()
+                .get(0)
+                .unwrap();
+            assert_eq!(first, stored_texts[7_000]);
+        }
+        assert_eq!(found.candidates, STORED);
+        check(&found, 0, &reference(query, &|_| true));
+        let asked = asked_by(&found, STORED);
+        assert!(taken.sqlite_bytes <= SEARCH_FIXED_BYTES);
+        assert!(taken.rust_bytes <= asked - SEARCH_FIXED_BYTES);
+        worst = (
+            worst.0.max(taken.sqlite_bytes),
+            worst.1.max(taken.rust_bytes),
+        );
+        assert!(one.sqlite_used() <= IDLE_BYTES);
+    }
+    seconds.sort_by(f64::total_cmp);
+    println!(
+        "  one query per search, 20 searches: {:.1} ms at best, {:.1} ms median, {:.1} ms at \
+         worst; SQLite heap peak {:.2} MiB, Rust heap peak {:.2} MiB at most",
+        seconds[0] * 1e3,
+        seconds[10] * 1e3,
+        seconds[19] * 1e3,
+        worst.0 as f64 / MIB,
+        worst.1 as f64 / MIB
+    );
+
+    // A hundred queries in one pass over the store.
+    let started = Instant::now();
+    let (found, taken) = measure(&one, || {
+        store.nearest_with(
+            &queries,
+            &identity(DIMENSION),
+            10,
+            &Filter::default(),
+            &mut budget,
+        )
+    });
+    let elapsed = started.elapsed().as_secs_f64();
+    let found = found.expect("the nearest logs are found");
+    assert_eq!(found.hits.height(), 1_000);
+    assert_nearest_within(
+        "  100 queries in one search",
+        &store,
+        &Filter::default(),
+        &found,
+        STORED,
+        &taken,
+    );
+    println!(
+        "  100 queries in one search: {:.1} ms, {:.2} ms per query",
+        elapsed * 1e3,
+        elapsed * 10.0
+    );
+    for index in [0usize, 49, 99] {
+        let query = &queries[index * width..(index + 1) * width];
+        check(&found, index, &reference(query, &|_| true));
+    }
+    drop(found);
+
+    // Small batches give the same hits.
+    let mut small = MemoryBudget::observe(&MemorySettings {
+        max_batch_rows: Some(1_024),
+        ..MemorySettings::default()
+    })
+    .unwrap();
+    let query = &queries[..3 * width];
+    let whole = store
+        .nearest_with(
+            query,
+            &identity(DIMENSION),
+            10,
+            &Filter::default(),
+            &mut budget,
+        )
+        .unwrap();
+    let started = Instant::now();
+    let (batched, taken) = measure(&one, || {
+        store.nearest_with(
+            query,
+            &identity(DIMENSION),
+            10,
+            &Filter::default(),
+            &mut small,
+        )
+    });
+    let elapsed = started.elapsed().as_secs_f64();
+    let batched = batched.unwrap();
+    assert_nearest_within(
+        "  3 queries, batches of 1,024",
+        &store,
+        &Filter::default(),
+        &batched,
+        STORED,
+        &taken,
+    );
+    println!("  3 queries, batches of 1,024: {:.1} ms", elapsed * 1e3);
+    assert!(batched.hits.equals_missing(&whole.hits));
+    drop((whole, batched));
+
+    // Combined with a phrase and a label.
+    for (what, filter, keep) in [
+        (
+            "  nearest among the logs with a phrase",
+            phrase("anadir.jsp"),
+            (&|text: &str| text.to_ascii_lowercase().contains("anadir.jsp"))
+                as &dyn Fn(&str) -> bool,
+        ),
+        (
+            "  nearest among the logs with a case-exact phrase",
+            Filter {
+                case_exact: true,
+                ..phrase("B1=Entrar")
+            },
+            &|text: &str| text.contains("B1=Entrar"),
+        ),
+        (
+            "  nearest among the logs with a short phrase (scan)",
+            phrase("PW"),
+            &|text: &str| text.to_ascii_lowercase().contains("pw"),
+        ),
+    ] {
+        let query = &queries[..width];
+        let started = Instant::now();
+        let (found, taken) = measure(&one, || {
+            store.nearest_with(query, &identity(DIMENSION), 10, &filter, &mut budget)
+        });
+        let elapsed = started.elapsed().as_secs_f64();
+        let found = found.expect("the nearest logs are found");
+        assert_nearest_within(what, &store, &filter, &found, STORED, &taken);
+        println!("{what}: {:.1} ms", elapsed * 1e3);
+        let expected = stored_texts.iter().filter(|text| keep(text)).count();
+        assert!(expected > 0, "{what}: the dataset has no such log");
+        assert_eq!(found.candidates, expected as u64, "{what}");
+        check(&found, 0, &reference(query, keep));
+        assert!(one.sqlite_used() <= IDLE_BYTES);
+    }
+
+    // Text searches and exports.
+    let longest = stored_texts.iter().max_by_key(|text| text.len()).unwrap();
+    let bad = Filter {
+        label: Some(Label::Bad),
+        ..Filter::default()
+    };
+    let cases: Vec<(&str, Filter, Option<usize>, Keep<'_>)> = vec![
+        (
+            "  text search, a phrase through the index, first 100",
+            phrase("anadir.jsp"),
+            Some(100),
+            Box::new(|text| text.to_ascii_lowercase().contains("anadir.jsp")),
+        ),
+        (
+            "  text search, a phrase through the index, all",
+            phrase("anadir.jsp"),
+            Some(usize::MAX),
+            Box::new(|text| text.to_ascii_lowercase().contains("anadir.jsp")),
+        ),
+        (
+            "  text search, a rare phrase",
+            phrase("drop+table"),
+            Some(usize::MAX),
+            Box::new(|text| text.to_ascii_lowercase().contains("drop+table")),
+        ),
+        (
+            "  text search, case-exact",
+            Filter {
+                case_exact: true,
+                ..phrase("B1=Entrar")
+            },
+            Some(usize::MAX),
+            Box::new(|text| text.contains("B1=Entrar")),
+        ),
+        (
+            "  text search, a short phrase by a scan",
+            phrase("PW"),
+            Some(usize::MAX),
+            Box::new(|text| text.to_ascii_lowercase().contains("pw")),
+        ),
+        (
+            "  text search, a short phrase by a scan, first 10",
+            phrase("PW"),
+            Some(10),
+            Box::new(|text| text.to_ascii_lowercase().contains("pw")),
+        ),
+        (
+            "  text search, a phrase no log holds",
+            phrase("no log holds this"),
+            Some(usize::MAX),
+            Box::new(|_| false),
+        ),
+        (
+            "  text search, the exact text of the longest log",
+            Filter {
+                equals: Some(longest.clone()),
+                ..Filter::default()
+            },
+            Some(usize::MAX),
+            Box::new(|text| text == longest),
+        ),
+        (
+            "  export of all logs with their vectors",
+            Filter::default(),
+            None,
+            Box::new(|_| true),
+        ),
+    ];
+    for (what, filter, limit, keep) in &cases {
+        let started = Instant::now();
+        let frame = read_within(&one, what, &store, filter, *limit, &mut budget);
+        // Counting and reading: the time of both passes and of the count before them.
+        println!(
+            "{what}: {:.1} ms with the count that the test makes first",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        let started = Instant::now();
+        let again = match limit {
+            Some(limit) => store.text_search_with(filter, *limit, &mut budget),
+            None => store.vectors_with(filter, &mut budget),
+        }
+        .unwrap();
+        println!(
+            "{what}: {:.1} ms for the search alone",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        assert!(again.equals_missing(&frame));
+        let expected: Vec<&String> = stored_texts
+            .iter()
+            .filter(|text| keep(text))
+            .take(limit.unwrap_or(usize::MAX))
+            .collect();
+        let got: Vec<&str> = frame
+            .column(TEXT)
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .flatten()
+            .collect();
+        assert_eq!(got.len(), expected.len(), "{what}");
+        assert!(got.iter().zip(&expected).all(|(a, b)| a == b), "{what}");
+        assert!(one.sqlite_used() <= IDLE_BYTES);
+    }
+    let started = Instant::now();
+    let frame = read_within(
+        &one,
+        "  export of the bad logs",
+        &store,
+        &bad,
+        None,
+        &mut budget,
+    );
+    println!(
+        "  export of the bad logs: {:.1} ms with the count",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(frame.height(), 15_964);
+    drop(frame);
+    drop(store);
+    assert_eq!(one.sqlite_used(), 0);
+}
+
+/// What the text index takes for the phrases of a search: SQLite's heap by the bytes of
+/// one phrase, on a store filled by one add and on one filled by many (the index keeps
+/// one segment or more per add until it merges them, and a search opens a reader per
+/// trigram and segment). Since the remediation of task 1.9 the index is given short
+/// pieces of a phrase only, so the figures no longer grow with the phrase; those behind
+/// `PHRASE_BYTE_BYTES` were taken with this test when it was given whole phrases.
+#[test]
+#[ignore = "phrase-memory measurement; run in release mode on request"]
+fn phrase_memory_measured() {
+    let one = alone();
+    let Some(logs) = csic("phrase_memory_measured") else {
+        return;
+    };
+    const SOURCE: &str = "data/csic-2010/csic_database.csv";
+    let rows = rows_of(&logs, SOURCE, 8);
+    let longest = logs
+        .records()
+        .map(|record| record.text)
+        .max_by_key(|text| text.len())
+        .unwrap();
+    drop(logs);
+    let scratch = Scratch::new(&one, "phrase-memory");
+    let paths = scratch.paths();
+    let mut budget = roomy_budget();
+    let mut worst = 0.0f64;
+    for (name, adds) in [("one", 1usize), ("many", 16), ("more", 256)] {
+        let mut store = Store::create(&paths, name, &identity(8)).unwrap();
+        let step = rows.height().div_ceil(adds);
+        for start in (0..rows.height()).step_by(step) {
+            store
+                .add_with(&rows.slice(start as i64, step), &identity(8), &mut budget)
+                .unwrap();
+        }
+        assert_eq!(store.len().unwrap(), 25_608);
+        println!("store filled by {adds} adds:");
+        for bytes in [3usize, 8, 16, 32, 64, 128, 256, 512, 891] {
+            let filter = phrase(&longest[..bytes.min(longest.len())]);
+            let started = Instant::now();
+            let (frame, taken) = measure(&one, || {
+                store.text_search_with(&filter, usize::MAX, &mut budget)
+            });
+            let frame = frame.expect("the phrase is searched");
+            let held = store.explain(&filter).unwrap().held_bytes;
+            let share = taken.sqlite_bytes as f64 / held as f64;
+            println!(
+                "  phrase of {bytes:4} bytes: {:5} rows, SQLite heap peak {:6.2} MiB of {:6.2} \
+                 MiB held ({share:.2}), {:7.1} ms",
+                frame.height(),
+                taken.sqlite_bytes as f64 / MIB,
+                held as f64 / MIB,
+                started.elapsed().as_secs_f64() * 1e3
+            );
+            assert!(frame.height() >= 1);
+            worst = worst.max(share);
+            assert!(one.sqlite_used() <= IDLE_BYTES);
+        }
+    }
+    println!("the most SQLite took of what a search held for it: {worst:.2}");
+    assert!(worst <= 1.0);
+}
+
+// ---------------------------------------------------------------------------------------
+// What the text index takes by itself (remediation of task 1.9)
+// ---------------------------------------------------------------------------------------
+
+/// SQLite's heap peak for one `MATCH` of `pieces` on the store file `path`, through a
+/// plain connection: `(rows matched, peak bytes)`.
+fn raw_match(one: &Alone, path: &Path, pieces: &[&str]) -> (i64, u64) {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let query = pieces
+        .iter()
+        .map(|piece| format!("\"{}\"", piece.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let (rows, taken) = measure(one, || {
+        connection
+            .query_row(
+                "SELECT count(*) FROM logs_fts CROSS JOIN logs ON logs.seq = logs_fts.rowid \
+                 WHERE logs_fts MATCH ?1",
+                [&query],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    });
+    (rows, taken.sqlite_bytes)
+}
+
+/// The heap of the text index for the pieces of a phrase, by the length and kind of
+/// the longest stored text and by the characters given to the index: the figures
+/// behind `INDEX_TEXT_FACTOR`. First raw SQL, so that pieces of any length can be
+/// tried; then every kind and length through the store, in every way of searching,
+/// asserting that each search stays within what it held.
+#[test]
+#[ignore = "index-piece measurement; run in release mode on request"]
+fn index_piece_memory_measured() {
+    let one = alone();
+    type Make = Box<dyn Fn(usize) -> String>;
+    let kinds: [(&str, Make); 7] = [
+        ("one character", Box::new(|bytes| repeated("a", bytes))),
+        ("cycle of 2", Box::new(|bytes| repeated("ab", bytes))),
+        ("cycle of 3", Box::new(|bytes| repeated("abc", bytes))),
+        (
+            "cycle of 16",
+            Box::new(|bytes| repeated("0123456789abcdef", bytes)),
+        ),
+        (
+            "one two-byte character",
+            Box::new(|bytes| repeated("ä", bytes)),
+        ),
+        (
+            "log-like",
+            Box::new(|bytes| long_text(Kind::Realistic, bytes, 1)),
+        ),
+        (
+            "random ASCII",
+            Box::new(|bytes| long_text(Kind::Noisy, bytes, 1)),
+        ),
+    ];
+    let longest = usize::try_from(MAX_TEXT_BYTES).unwrap();
+    // Up to the longest text a store takes; just below it as well, because the
+    // buffers of the index double at a power of two.
+    let lengths = [64 << 10, 256 << 10, longest - 16, longest];
+    let mut worst_rate = 0.0f64;
+    let mut worst_share = 0.0f64;
+    println!(
+        "raw: heap peak in MiB (and what the long text adds, in bytes per byte of it and per \
+         character given to the index)"
+    );
+    for (kind, make) in &kinds {
+        for bytes in lengths {
+            let scratch = Scratch::new(&one, "piece-memory");
+            let text = make(bytes);
+            let store = store_with_long_text(&scratch, "s", &text);
+            let path = scratch.paths().store_path("s");
+            // What a match that does not touch the long text takes: the connection and
+            // its readers. The rates are of what the long text adds to that.
+            let (_, base) = raw_match(&one, &path, &["/short/"]);
+            let mut line = format!("{kind:24} {bytes:8} B:");
+            for chars in [3usize, 4, 6, 8, 12, 16, 32] {
+                let end = text
+                    .char_indices()
+                    .nth(chars)
+                    .map_or(text.len(), |(at, _)| at);
+                let (rows, peak) = raw_match(&one, &path, &[&text[..end]]);
+                assert!(rows >= 1);
+                let rate = peak.saturating_sub(base) as f64 / (bytes as f64 * chars as f64);
+                // The store gives the index no piece longer than this.
+                if chars <= l2d_store::INDEX_PIECE_CHARS {
+                    worst_rate = worst_rate.max(rate);
+                }
+                line.push_str(&format!(" {chars}: {:.1} ({rate:.2})", peak as f64 / MIB));
+            }
+            // Several pieces at once: two, three and four pieces of four characters.
+            let end = text.char_indices().nth(4).map_or(text.len(), |(at, _)| at);
+            let piece = &text[..end];
+            for count in [2usize, 3, 4] {
+                let (_, peak) = raw_match(&one, &path, &vec![piece; count]);
+                let rate = peak.saturating_sub(base) as f64 / (bytes as f64 * (4 * count) as f64);
+                worst_rate = worst_rate.max(rate);
+                line.push_str(&format!(" {count}x4: {:.1} ({rate:.2})", peak as f64 / MIB));
+            }
+            println!("{line}");
+
+            // Through the store: what a search holds covers it.
+            for (what, filter) in phrase_filters(&text) {
+                let what = format!("  {kind}, {bytes} B, {what}");
+                worst_share =
+                    worst_share.max(assert_phrase_search_within(&one, &what, &store, &filter));
+            }
+            drop(store);
+            assert_eq!(one.sqlite_used(), 0);
+        }
+    }
+    println!(
+        "raw, pieces as the store gives them (up to four characters, up to four pieces): the \
+         long text adds at most {worst_rate:.2} bytes per byte of it and per character given to \
+         the index (held: {INDEX_TEXT_FACTOR})"
+    );
+    println!("through the store: the most SQLite took of what a search held: {worst_share:.2}");
+    assert!(worst_rate <= INDEX_TEXT_FACTOR as f64);
+    assert!(worst_share <= 1.0);
+}
+
+/// How many logs a piece of a phrase leaves, by the length of the piece and by where in
+/// the phrase it is taken: phrases are 24-character cuts of CSIC logs.
+#[test]
+#[ignore = "piece-selectivity measurement; run in release mode on request"]
+fn index_piece_selectivity_measured() {
+    let one = alone();
+    let Some(logs) = csic("index_piece_selectivity_measured") else {
+        return;
+    };
+    let texts: Vec<String> = logs.records().map(|record| record.text).collect();
+    let scratch = Scratch::new(&one, "piece-selectivity");
+    let paths = scratch.paths();
+    let mut store = Store::create(&paths, "csic", &identity(8)).unwrap();
+    store
+        .add_with(
+            &rows_of(&logs, "data/csic-2010/csic_database.csv", 8),
+            &identity(8),
+            &mut roomy_budget(),
+        )
+        .unwrap();
+    drop(store);
+    drop(logs);
+    let path = paths.store_path("csic");
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let count = |piece: &str| -> (i64, f64) {
+        let started = Instant::now();
+        let rows = connection
+            .query_row(
+                "SELECT count(*) FROM logs_fts WHERE logs_fts MATCH ?1",
+                [format!("\"{}\"", piece.replace('"', "\"\""))],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        (rows, started.elapsed().as_secs_f64() * 1e3)
+    };
+    // 200 phrases: 24 characters from a fixed place of every 128th log that is ASCII and
+    // long enough; a third each from the start, the middle and the end of the log.
+    let mut phrases: Vec<&str> = Vec::new();
+    for (index, text) in texts.iter().enumerate().step_by(128) {
+        if !text.is_ascii() || text.len() < 80 {
+            continue;
+        }
+        let start = match index / 128 % 3 {
+            0 => 0,
+            1 => (text.len() - 24) / 2,
+            _ => text.len() - 24,
+        };
+        phrases.push(&text[start..start + 24]);
+    }
+    println!(
+        "{} phrases of 24 characters; logs that hold the whole phrase and logs that a piece leaves (median, mean, most), with the mean time of the index",
+        phrases.len()
+    );
+    let whole: Vec<i64> = phrases
+        .iter()
+        .map(|phrase| texts.iter().filter(|text| text.contains(*phrase)).count() as i64)
+        .collect();
+    let summary = |name: &str, counts: &mut Vec<i64>, ms: f64| {
+        counts.sort_unstable();
+        println!(
+            "  {name:28}: median {:6}, mean {:8.0}, most {:6}; {ms:.2} ms",
+            counts[counts.len() / 2],
+            counts.iter().sum::<i64>() as f64 / counts.len() as f64,
+            counts[counts.len() - 1],
+        );
+    };
+    summary("the whole phrase", &mut whole.clone(), 0.0);
+    // Two and three pieces at once: the ends, and the ends with the middle.
+    let count_all = |pieces: &[&str]| -> (i64, f64) {
+        let started = Instant::now();
+        let query = pieces
+            .iter()
+            .map(|piece| format!("\"{}\"", piece.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let rows = connection
+            .query_row(
+                "SELECT count(*) FROM logs_fts WHERE logs_fts MATCH ?1",
+                [query],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        (rows, started.elapsed().as_secs_f64() * 1e3)
+    };
+    for chars in [3usize, 4, 6, 8] {
+        for middle in [false, true] {
+            let mut counts = Vec::new();
+            let mut ms = 0.0;
+            for phrase in &phrases {
+                let mut pieces = vec![&phrase[..chars], &phrase[phrase.len() - chars..]];
+                if middle {
+                    let start = (phrase.len() - chars) / 2;
+                    pieces.push(&phrase[start..start + chars]);
+                }
+                let (rows, took) = count_all(&pieces);
+                counts.push(rows);
+                ms += took;
+            }
+            let name = if middle {
+                format!("first, middle, last {chars}")
+            } else {
+                format!("first and last {chars}")
+            };
+            summary(&name, &mut counts, ms / phrases.len() as f64);
+        }
+    }
+    for chars in [3usize, 4, 6, 8, 12, 16, 24] {
+        for (place, pick) in [("first", 0usize), ("last", 1), ("middle", 2)] {
+            let mut counts = Vec::new();
+            let mut ms = 0.0;
+            for phrase in &phrases {
+                let start = match pick {
+                    0 => 0,
+                    1 => phrase.len() - chars,
+                    _ => (phrase.len() - chars) / 2,
+                };
+                let (rows, took) = count(&phrase[start..start + chars]);
+                counts.push(rows);
+                ms += took;
+            }
+            let ms = ms / phrases.len() as f64;
+            summary(&format!("{place} {chars} characters"), &mut counts, ms);
+        }
+    }
 }
