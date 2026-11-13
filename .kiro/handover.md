@@ -237,7 +237,7 @@ Two lanes, one implementer and one reviewer at a time in each.
      The result is a dated document in `docs/` with the pictures. The Venn
      scorers start only after it.
   4. 2.8 neighbour scorer, 2.10 linear head, 2.11 outlier ranking
-  4. 2.9 command wiring for milestone 2
+  5. 2.9 command wiring for milestone 2
 - **Then** milestones 3 and 4: shift test, assessment, evaluation (3.7 and 3.9
   reuse `l2d-eval` and use the pooled gate figure), end-to-end and hardware
   tests.
