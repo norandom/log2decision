@@ -946,28 +946,34 @@ fn tracked_manifest(release: &str, kind: &str) -> RuntimeManifest {
     RuntimeManifest::parse(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// The release the tool is built for is one choice, and everything that names it agrees:
-/// the feature of this crate, the manifest compiled in, the API level of `ort`, and
-/// `runtime/README.md`.
+/// The release the tool is built for is AMD Ryzen AI 1.9.0, and everything that names it
+/// agrees: the feature of this crate, the manifests compiled in, the tracked manifests,
+/// the API level of `ort`, and `runtime/README.md`.
 #[test]
 fn the_built_release_is_one_choice_that_everything_agrees_on() {
     let expected = RuntimeManifest::expected();
-    let by_feature = if cfg!(feature = "ryzenai-1-9") {
-        "1.9.0"
-    } else {
-        "1.8.0"
-    };
-    assert_eq!(expected.release, by_feature);
+    // The feature `ryzenai-1-9` is on, or the crate would not have compiled.
+    assert_eq!(expected.release, "1.9.0");
     // The manifests a directory may match: one per source of the built release.
-    let built: Vec<RuntimeManifest> = if by_feature == "1.9.0" {
-        vec![
-            tracked_manifest("1.9.0", "wheel"),
-            tracked_manifest("1.9.0", "nuget"),
-        ]
-    } else {
-        vec![tracked_manifest("1.8.0", "nuget")]
-    };
+    let built = vec![
+        tracked_manifest("1.9.0", "wheel"),
+        tracked_manifest("1.9.0", "nuget"),
+    ];
     assert_eq!(RuntimeManifest::built(), built.as_slice());
+    // No manifest is tracked that the tool does not compile in.
+    let mut tracked: Vec<String> = std::fs::read_dir(workspace_root().join("runtime"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".manifest.json"))
+        .collect();
+    tracked.sort();
+    assert_eq!(
+        tracked,
+        [
+            "ryzenai-1.9.0.nuget.manifest.json",
+            "ryzenai-1.9.0.wheel.manifest.json"
+        ]
+    );
     assert_eq!(expected, &built[0]);
     // The sources of a release differ in the hashes only: same release, same names, same
     // sizes, same file versions (the builds are the same, signed separately).
@@ -990,7 +996,6 @@ fn the_built_release_is_one_choice_that_everything_agrees_on() {
     let mut distinct = kinds.clone();
     distinct.dedup();
     assert_eq!(kinds, distinct, "one manifest per source");
-    assert_eq!(RuntimeManifest::known().len(), 3);
 
     // `ort` asks the runtime for the API level of the release's ONNX Runtime (1.NN.x).
     let minor: u32 = expected
@@ -1035,7 +1040,6 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
     for (release, onnxruntime, kind, count, total) in [
         ("1.9.0", "1.30.0", "wheel", 5, 713_594_768u64),
         ("1.9.0", "1.30.0", "nuget", 5, 713_594_768u64),
-        ("1.8.0", "1.27.0", "nuget", 6, 451_655_648u64),
     ] {
         let manifest = tracked_manifest(release, kind);
         assert_eq!(manifest.release, release);
@@ -1086,69 +1090,85 @@ fn the_tracked_manifests_agree_with_the_tables_of_the_readme() {
     let wheel = tracked_manifest("1.9.0", "wheel");
     assert_eq!(wheel.source.package, "onnxruntime-vitisai");
     assert!(wheel.source.detail["index"].contains("/1.9.0/"));
-    for (release, bytes) in [("1.9.0", "289269284"), ("1.8.0", "274829591")] {
-        let nuget = tracked_manifest(release, "nuget");
-        assert_eq!(nuget.source.package, "RyzenAI_Deployment");
-        assert_eq!(nuget.source.version, release);
-        assert_eq!(
-            nuget.source.detail["nupkg"],
-            format!("RyzenAI_Deployment.{release}.nupkg")
-        );
-        assert_eq!(nuget.source.detail["nupkg_sha256"].len(), 64);
-        assert_eq!(nuget.source.detail["nupkg_bytes"], bytes);
-    }
-    // The two sources of 1.9.0 have no hash in common.
     let nuget = tracked_manifest("1.9.0", "nuget");
+    assert_eq!(nuget.source.package, "RyzenAI_Deployment");
+    assert_eq!(nuget.source.version, "1.9.0");
+    assert_eq!(
+        nuget.source.detail["nupkg"],
+        "RyzenAI_Deployment.1.9.0.nupkg"
+    );
+    assert_eq!(nuget.source.detail["nupkg_sha256"].len(), 64);
+    assert_eq!(nuget.source.detail["nupkg_bytes"], "289269284");
+    // The two sources of 1.9.0 have no hash in common.
     for (a, b) in wheel.files.iter().zip(&nuget.files) {
         assert_ne!(a.sha256, b.sha256, "{}", a.name);
     }
 }
 
-/// A runtime directory of the other release is refused, and both releases are named: by
-/// its record, and without a record by its files.
+/// A runtime directory of another release is refused by the real check. The tool has the
+/// manifests of its own release only, so what it can name depends on the directory:
+/// without a record, the built release and every file that is not that release's (its
+/// size against the expected one, or its hash, and each DLL the release does not have);
+/// with a record, both releases.
 #[test]
-fn a_directory_of_the_other_release_is_refused_naming_both() {
+fn a_directory_of_another_release_is_refused() {
     let built = RuntimeManifest::expected();
-    let other = if built.release == "1.9.0" {
-        tracked_manifest("1.8.0", "nuget")
-    } else {
-        tracked_manifest("1.9.0", "wheel")
-    };
-    // The files of the other release, by name and size, without a record. Their content
-    // does not matter: nothing of that size is read, except where the two releases have
-    // a file of the same size, and that one is then refused by its hash.
+    // The names and sizes of the six files of AMD Ryzen AI 1.8.0 (ONNX Runtime 1.27.0),
+    // as a directory provisioned for it holds them. Their content does not matter:
+    // nothing of a wrong size is read; the one file that has the size of the built
+    // release's is refused by its hash.
+    let other_files: [(&str, u64); 6] = [
+        ("onnxruntime.dll", 24_030_800),
+        ("onnxruntime_providers_shared.dll", 117_840),
+        ("onnxruntime_providers_vitisai.dll", 465_488),
+        ("onnxruntime_vitisai_ep.dll", 119_166_032),
+        ("dyn_dispatch_core.dll", 158_389_328),
+        ("aiecompiler_client.dll", 149_486_160),
+    ];
     let dir = scratch("other-release-files");
-    for file in &other.files {
-        let handle = std::fs::File::create(dir.join(&file.name)).unwrap();
-        handle.set_len(file.bytes).unwrap();
+    for (name, bytes) in other_files {
+        let handle = std::fs::File::create(dir.join(name)).unwrap();
+        handle.set_len(bytes).unwrap();
     }
     let reason = refusal(RuntimeFiles::check(&dir, CheckDepth::Fast));
-    // Both releases are named although no record says which one the directory holds.
-    for part in [
-        &built.release,
-        &built.onnxruntime,
-        &other.release,
-        &other.onnxruntime,
-    ] {
-        assert!(reason.contains(part.as_str()), "{part}: {reason}");
-    }
     assert!(
         reason.contains(&format!(
-            "{} of the {} files of AMD Ryzen AI {}",
-            other.files.len(),
-            other.files.len(),
-            other.release
+            "does not hold the files of AMD Ryzen AI {} (ONNX Runtime {})",
+            built.release, built.onnxruntime
         )),
         "{reason}"
     );
-    assert!(reason.contains("onnxruntime.dll"), "{reason}");
+    for file in &built.files {
+        let (_, found) = other_files
+            .iter()
+            .find(|(name, _)| *name == file.name)
+            .unwrap();
+        let stated = if *found == file.bytes {
+            format!("{} has SHA-256 ", dir.join(&file.name).display())
+        } else {
+            format!(
+                "{} has {found} bytes, the release has {} bytes",
+                dir.join(&file.name).display(),
+                file.bytes
+            )
+        };
+        assert!(reason.contains(&stated), "{stated}: {reason}");
+    }
+    assert!(
+        reason.contains(&format!(
+            "{} is not part of the release",
+            dir.join("aiecompiler_client.dll").display()
+        )),
+        "{reason}"
+    );
     assert!(!dir.join(RECEIPT_FILE).exists());
 
-    // With the record a check built for the other release wrote, or provisioning did.
+    // With the record a check built for that release wrote, or provisioning did: both
+    // releases are named.
     std::fs::write(
         dir.join(RECEIPT_FILE),
         serde_json::json!({
-            "format": 1, "release": other.release, "onnxruntime": other.onnxruntime,
+            "format": 1, "release": "1.8.0", "onnxruntime": "1.27.0",
             "written_by": "check", "files": [],
         })
         .to_string(),
@@ -1156,12 +1176,12 @@ fn a_directory_of_the_other_release_is_refused_naming_both() {
     .unwrap();
     let reason = refusal(RuntimeFiles::check(&dir, CheckDepth::Fast));
     for part in [
-        &built.release,
-        &built.onnxruntime,
-        &other.release,
-        &other.onnxruntime,
+        built.release.as_str(),
+        built.onnxruntime.as_str(),
+        "1.8.0",
+        "1.27.0",
     ] {
-        assert!(reason.contains(part.as_str()), "{part}: {reason}");
+        assert!(reason.contains(part), "{part}: {reason}");
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -13,12 +13,14 @@ not part of the repository and is not downloaded by the build.
 
 The tool is built for **AMD Ryzen AI 1.9.0** (ONNX Runtime 1.30.0).
 
-That is one choice, the default feature of `crates/l2d-encoder/Cargo.toml`
-(`ryzenai-1-9`, or `ryzenai-1-8`). It selects the manifests the tool has compiled in and
-the API level `ort` asks the runtime for. The line above and the tables below are held
-to the choice and to the manifests by tests. A directory that holds the files of the
-other release is refused, and the message names both releases, whether the directory
-has a record or not.
+That is the one release feature of `crates/l2d-encoder/Cargo.toml` (`ryzenai-1-9`, on
+by default). It stands for the manifests the tool has compiled in and sets the API
+level `ort` asks the runtime for. The line above and the tables below are held to it
+and to the manifests by tests. The tool has the manifests of this release only. A
+directory that holds another release is refused: when its record names that release,
+the message names both; without a record it names this release and every file that is
+not this release's, with the size or hash found and expected, the file version a DLL
+of another release reports, and each DLL this release does not have.
 
 A manifest is for one release from one source:
 `runtime/ryzenai-<release>.<source>.manifest.json`, the source being `wheel` (AMD's
@@ -29,11 +31,14 @@ other hashes. The tool accepts a directory that matches either manifest of its b
 release with all its files, and says which source it matched; a directory with some
 files of each is refused as a mix, naming which file is from which source.
 
-The two features exclude each other, so a build with `--all-features` (cargo, clippy or
-a tool that passes it) does not compile; neither does one of `l2d-encoder` with
-`--no-default-features` and no release feature. That is intended: there is no build for
-two releases, and the error says so. To build for 1.8.0:
-`--no-default-features --features ryzenai-1-8` on `l2d-encoder`, or change its default.
+A build of `l2d-encoder` with `--no-default-features` and without that feature does not
+compile, and the error says why: there is no build without a release. A build with
+`--all-features` compiles.
+
+Release 1.8.0 was tried on 2026-11-12 and is not pursued (owner, 2026-11-13: the tool
+stays on 1.9.0). Its build switch, manifest and table were removed; the trial's result
+and how to bring a release back are in the notes of tasks 2.3, 2.13 and 2.4 in
+`.kiro/specs/npu-log-decision/tasks.md`.
 
 The files are not in the repository: `runtime/ryzenai/` is ignored by git, and each
 user obtains them from AMD's package and places them here (section "Provisioning").
@@ -77,35 +82,6 @@ signature and the checksum field of the header left out, the wheel's and the pac
 file are byte for byte the same (compared on 2026-11-12; the signature block has the
 same place and size in both). The tool does not rely on that; it compares whole files
 with the manifest it matched.
-
-### AMD Ryzen AI 1.8.0, nuget (not the built release: it fails the hardware gate)
-
-`runtime/ryzenai-1.8.0.nuget.manifest.json`. As shipped in `RyzenAI_Deployment.1.8.0.nupkg` inside AMD's `ryzen_ai_nuget_1.8.0.zip`
-(directory `runtimes/win-x64/native/`). Six files: in this release the compiler is a
-file of its own, `aiecompiler_client.dll`, and with only the five names of 1.9.0 the
-process dies with an access violation while the provider is registered.
-
-| File | Bytes | File version | SHA-256 |
-| --- | ---: | --- | --- |
-| `onnxruntime.dll` | 24,030,800 | 1.27.0 | `ed7b4a54d327c258e836fdec647e3fbd2a68a7e8811c17ed54c24bb43763e4bb` |
-| `onnxruntime_providers_shared.dll` | 117,840 | 1.27.0 | `84f4c81c2fe4996ea22236f7c7d95eb0ea690d3d758af6b8dd25ba92e3de4580` |
-| `onnxruntime_providers_vitisai.dll` | 465,488 | 1.27.0 | `b1311df645b8509c5df36a3290547ebaad523f255ab58344ee997dced7227e97` |
-| `onnxruntime_vitisai_ep.dll` | 119,166,032 | 1.8.0 | `9a5409060c9637b91123462715419871779dd4846b5eb33eb31a3ff3a14e94c0` |
-| `dyn_dispatch_core.dll` | 158,389,328 | 1.8.0 | `14355332ba63c60c5cdfc84edc953eb565ec2e52407494224926673d3ca54d6e` |
-| `aiecompiler_client.dll` | 149,486,160 | 1.8.0 | `00a571e30d6e23a6f32cdbcdfc73ad21ddcb5e915e0208a88e90de9c5b4a0450` |
-
-Total: 451,655,648 bytes (430.7 MiB).
-
-Tried on 2026-11-12 on the reference host (the tool built with `ryzenai-1-8`, `ort` at
-API level 27, the same model and test as for 1.9.0, four runs, all alike): the model
-compiles, 36 of its 38 nodes are placed on the NPU, and it runs at 28,000 to 29,300 logs
-per second; but the output differs more from the CPU provider's than the tool allows:
-lowest cosine 0.9777 against the required 0.99 (1.9.0: 0.9958). The hardware gate
-therefore fails on 1.8.0 at that one assertion, and the tool is not built for it by
-default. Whether that assertion on this model can decide between the releases is the
-question of task 2.12; until it is answered the built release stays 1.9.0 and 1.8.0 is
-a feature switch. Release 1.8.0 can be provisioned today, from AMD's NuGet ZIP (section
-"Provisioning").
 
 ## What the files are for (1.9.0)
 
@@ -190,23 +166,23 @@ as on the wheel's files: 36 of 38 nodes on the NPU, cosine 0.9958 against the CP
 provider, and the NPU output and the CPU output of the same input are bit for bit the
 same from both directories (two runs each).
 
-### From AMD's NuGet ZIP (release 1.8.0; needs no index)
+### From a ZIP that holds AMD's NuGet package (needs no index)
 
-    uv run --no-project --python 3.12 python tools/runtime/provision.py --release 1.8.0 --nuget-zip "<path>\ryzen_ai_nuget_1.8.0.zip" [--target <directory>]
+    uv run --no-project --python 3.12 python tools/runtime/provision.py --nuget-zip "<path of the ZIP>" [--target <directory>]
 
-For release 1.8.0 AMD publishes the package inside a ZIP. The ZIP is read where it
-lies; the script opens `RyzenAI_Deployment.1.8.0.nupkg` inside it by that name and then
-does what it does for a package file (`--nupkg` with that package extracted works as
-well). The record names the ZIP (name, path, size, SHA-256) and the package inside it.
+AMD publishes release 1.9.0 as a bare package, so the command above is the usual one.
+Where the package lies inside a ZIP (AMD published earlier releases that way), the ZIP
+is read where it lies: the script opens `RyzenAI_Deployment.1.9.0.nupkg` at the top of
+the ZIP by that name, the name the manifest gives, and then does what it does for a
+package file, with the same checks of size, SHA-256, id and version. The record names
+the ZIP (name, path, size, SHA-256) and the package inside it. A ZIP that holds another
+package is refused, naming the package that was expected.
 
-Run on 2026-11-12 on the reference host from the ZIP of 272,356,050 bytes (SHA-256
-`055f1d428948329a8f4d156a69e2f70ae17cd8a6bb1935399bef6c6e423d96b4`) into a scratch
-directory: six files, 451,655,648 bytes, in 9 s; the full check of the tool built for
-1.8.0 passes on it.
-
-This provisions release 1.8.0, which is not the release the tool is built for by
-default (section "AMD Ryzen AI 1.8.0" above). A tool built for 1.9.0 refuses the
-directory and names both releases.
+This route was run for real on 2026-11-12 with AMD's ZIP of release 1.8.0, whose
+manifest has since been removed. With release 1.9.0 it is covered by the script's tests
+on small ZIPs made for them, and by one that runs the command line against the tracked
+1.9.0 manifest up to the refusal of a ZIP that does not hold AMD's package; it has not
+been run on a ZIP that holds AMD's real 1.9.0 package.
 
 ### From AMD's wheel (release 1.9.0, the built release; needs AMD's index)
 

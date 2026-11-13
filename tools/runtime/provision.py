@@ -21,7 +21,7 @@ Route `nuget` (AMD's NuGet package, as a file or inside the ZIP AMD publishes; n
 index and no environment, only the file on disk):
 
     uv run --no-project --python 3.12 python tools/runtime/provision.py --nupkg <path of the package>
-    uv run --no-project --python 3.12 python tools/runtime/provision.py --release 1.8.0 --nuget-zip <path of the ZIP>
+    uv run --no-project --python 3.12 python tools/runtime/provision.py --nuget-zip <path of a ZIP that holds the package>
 
 The file is read where it is. From a ZIP the package is opened by the name the manifest
 gives. The package's size is compared with the manifest's before it is read, its
@@ -795,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     chosen = parser.add_mutually_exclusive_group()
     chosen.add_argument(
         "--release",
-        help="release to provision, for example 1.8.0 (default: the release the tool is "
+        help="release to provision, for example 1.9.0 (default: the release the tool is "
         "built for). Its manifest is runtime/ryzenai-<release>.<source>.manifest.json, the "
         "source being 'nuget' when --nupkg or --nuget-zip is given and 'wheel' otherwise",
     )
@@ -817,8 +817,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--nuget-zip",
         type=Path,
         default=None,
-        help="AMD's NuGet ZIP that holds the package (for example ryzen_ai_nuget_1.8.0.zip), "
-        "read where it is",
+        help="a ZIP that holds AMD's NuGet package under the name the manifest gives (AMD "
+        "published earlier releases that way), read where it is",
     )
     parser.add_argument(
         "--site-packages",
