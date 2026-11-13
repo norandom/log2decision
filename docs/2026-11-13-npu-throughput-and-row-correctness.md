@@ -196,9 +196,12 @@ between 216 and 387 MiB.
 ### What each change gave
 
 - **Buffers.** The image buffer is lent to the runtime without a copy and
-  reused; the output is read in place. Binding input and output once (IO
-  binding) works with this provider and gives the same vectors, and no gain
-  (15,928 against 16,636). Handing over costs 0.5 %.
+  reused; the output is read in place. IO binding works with this provider
+  and gives the same vectors, and no gain (15,928 against 16,636). As
+  measured ("bound once" in the table): the input is a tensor the runtime
+  allocated once, written in place and bound again before each run (no copy);
+  the output tensor is allocated and bound once. Handing over costs 0.5 %
+  either way.
 - **Rows per image.** 1 row: 1,311 logs per second. 64 rows: 16,636. 256 rows:
   20,091. All nodes stay on the NPU at every size.
 - **The two CPU nodes.** A model without the input's `QuantizeLinear` is made
