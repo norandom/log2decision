@@ -86,6 +86,13 @@ pub const MAX_INPUT_BYTES: u32 = 65_536;
 pub const MAX_CHANNELS: u32 = 4_096;
 /// Largest accepted batch size.
 pub const MAX_BATCH: u32 = 4_096;
+/// Largest accepted size of one batch of inputs ([`InputArch::batch_bytes`]): 256 MiB.
+///
+/// The three maxima above bound each field alone; together they would allow a batch of
+/// 4 TiB. This ceiling bounds the buffer [`ByteCodec::new_batch`] allocates. It is 128
+/// times the 2 MiB of architecture v1, which leaves room for v1 batches up to
+/// [`MAX_BATCH`] texts (exactly 256 MiB) when larger batches are tried.
+pub const MAX_BATCH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Which part of a text the encoder reads (see the module documentation).
 ///
@@ -138,8 +145,14 @@ impl InputMode {
 ///
 /// The byte table belongs to it as a file of `256 x channels` values ([`ByteTable`]).
 /// Task 2.4 makes this description part of the encoder package and its revision.
+///
+/// A value read through serde is validated ([`InputArch::validate`]) and refuses unknown
+/// fields, so a description that comes out of a file is usable or an error. A value
+/// written as a struct literal is checked when a [`ByteTable`] or a [`ByteCodec`] is made
+/// from it. Because unknown fields are refused, it cannot be flattened into a larger
+/// structure with `#[serde(flatten)]`: nest it, or build it from the fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "InputArchFields")]
 pub struct InputArch {
     /// Bytes of a text the encoder reads; the last dimension of the model input.
     pub input_bytes: u32,
@@ -147,6 +160,29 @@ pub struct InputArch {
     pub channels: u32,
     /// Texts per inference; the model's batch dimension is fixed.
     pub batch: u32,
+}
+
+/// The serialized form of [`InputArch`], before validation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename = "InputArch")]
+struct InputArchFields {
+    input_bytes: u32,
+    channels: u32,
+    batch: u32,
+}
+
+impl TryFrom<InputArchFields> for InputArch {
+    type Error = L2dError;
+
+    fn try_from(fields: InputArchFields) -> Result<Self, L2dError> {
+        let arch = InputArch {
+            input_bytes: fields.input_bytes,
+            channels: fields.channels,
+            batch: fields.batch,
+        };
+        arch.validate()?;
+        Ok(arch)
+    }
 }
 
 impl InputArch {
@@ -158,7 +194,8 @@ impl InputArch {
     };
 
     /// Refuses a description with a zero or a value above the accepted maximum
-    /// ([`MAX_INPUT_BYTES`], [`MAX_CHANNELS`], [`MAX_BATCH`]), naming the field.
+    /// ([`MAX_INPUT_BYTES`], [`MAX_CHANNELS`], [`MAX_BATCH`]), naming the field, and one
+    /// whose batch of inputs would be larger than [`MAX_BATCH_BYTES`].
     pub fn validate(&self) -> Result<(), L2dError> {
         for (name, value, max) in [
             ("input_bytes", self.input_bytes, MAX_INPUT_BYTES),
@@ -173,6 +210,18 @@ impl InputArch {
                     ),
                 });
             }
+        }
+        // Each factor is at most 65,536, so the product fits in 64 bits.
+        let bytes =
+            u64::from(self.batch) * u64::from(self.channels) * u64::from(self.input_bytes) * 4;
+        if bytes > MAX_BATCH_BYTES {
+            return Err(L2dError::InvalidInput {
+                detail: format!(
+                    "encoder input architecture: a batch of {} x {} x {} 32-bit values is \
+                     {bytes} bytes, above the ceiling of {MAX_BATCH_BYTES} bytes (256 MiB)",
+                    self.batch, self.channels, self.input_bytes
+                ),
+            });
         }
         Ok(())
     }

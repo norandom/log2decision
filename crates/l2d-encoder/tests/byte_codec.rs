@@ -867,3 +867,83 @@ fn a_batch_of_another_architecture_is_a_programming_error() {
     let mut batch = other.new_batch();
     codec(InputMode::Whole).push(&mut batch, "abc");
 }
+
+#[test]
+fn an_architecture_whose_batch_is_too_large_is_refused_before_anything_is_allocated() {
+    use l2d_encoder::codec::{MAX_BATCH, MAX_BATCH_BYTES, MAX_CHANNELS, MAX_INPUT_BYTES};
+    assert_eq!(MAX_BATCH_BYTES, 268_435_456, "256 MiB");
+    // Every field at its own maximum: 4 TiB of input per batch.
+    let huge = InputArch {
+        input_bytes: MAX_INPUT_BYTES,
+        channels: MAX_CHANNELS,
+        batch: MAX_BATCH,
+    };
+    // One byte of input more than the largest v1-shaped batch.
+    let just_over = InputArch {
+        input_bytes: 257,
+        channels: 64,
+        batch: MAX_BATCH,
+    };
+    for bad in [huge, just_over] {
+        let error = bad.validate().unwrap_err();
+        assert!(
+            matches!(&error, L2dError::InvalidInput { detail }
+                if detail.contains("268435456") && detail.contains("256 MiB")
+                    && detail.contains(&format!("{} x {} x {}", bad.batch, bad.channels, bad.input_bytes))),
+            "{bad:?}: {error}"
+        );
+        // No construction path takes it: a table, a table file, a codec, a JSON value.
+        let bytes = vec![0u8; bad.table_file_bytes() as usize];
+        assert!(matches!(
+            ByteTable::from_le_bytes(&bytes, &bad),
+            Err(L2dError::InvalidInput { .. })
+        ));
+        assert!(matches!(
+            ByteTable::read(&fixture("science-2.1.table.bin"), &bad),
+            Err(L2dError::InvalidInput { .. })
+        ));
+        if bad.channels == 64 {
+            assert!(matches!(
+                ByteCodec::new(bad, science_table(), InputMode::Whole),
+                Err(L2dError::InvalidInput { .. })
+            ));
+        }
+        let json = serde_json::to_string(&bad).unwrap();
+        let error = serde_json::from_str::<InputArch>(&json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("268435456"), "{error}");
+    }
+    // A description read from JSON is validated field by field too.
+    for json in [
+        r#"{"input_bytes":0,"channels":64,"batch":32}"#,
+        r#"{"input_bytes":256,"channels":0,"batch":32}"#,
+        r#"{"input_bytes":256,"channels":64,"batch":5000}"#,
+    ] {
+        let error = serde_json::from_str::<InputArch>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside the range"), "{json}: {error}");
+    }
+    assert!(serde_json::from_str::<InputArch>(r#"{"input_bytes":256,"channels":64}"#).is_err());
+
+    // The ceiling leaves room for larger batches than 32: the v1 shape up to the largest
+    // batch size is exactly 256 MiB, and a batch of 1,024 can be made and filled.
+    let largest = InputArch {
+        batch: MAX_BATCH,
+        ..InputArch::V1
+    };
+    largest.validate().unwrap();
+    assert_eq!(largest.batch_bytes(), MAX_BATCH_BYTES);
+    let wide = InputArch {
+        batch: 1_024,
+        ..InputArch::V1
+    };
+    let json = serde_json::to_string(&wide).unwrap();
+    assert_eq!(serde_json::from_str::<InputArch>(&json).unwrap(), wide);
+    let codec = ByteCodec::new(wide, science_table(), InputMode::Whole).unwrap();
+    let mut batch = codec.new_batch();
+    assert_eq!(batch.held_bytes(), 64 * 1024 * 1024 + 1_024 * 32);
+    assert_eq!(fill(&codec, &mut batch, &["abc"; 1_500]), 1_024);
+    assert_eq!(batch.dims(), [1_024, 64, 1, 256]);
+}
