@@ -227,7 +227,16 @@ Two lanes, one implementer and one reviewer at a time in each.
 - **Second lane, in a worktree:**
   1. finish 2.6 (see above)
   2. 2.7 encode and store, with the runtime release in the store
-  3. 2.8 neighbour scorer, 2.10 linear head, 2.11 outlier ranking
+  3. **Qualify the embeddings before the Venn part** (owner, 2026-11-13; to
+     be added to tasks.md as a new task when 1.16 lands, since tasks.md holds
+     1.16's uncommitted notes). A one-time documentation task, not a tool
+     feature: small Python scripts run with `uv` that read the vectors the
+     NPU produced and write PNG diagrams (PCA and the like, clustering, by
+     label and by endpoint), after log2ml's ideas. The question it answers:
+     are the embeddings suitable, and do distinct features remain present.
+     The result is a dated document in `docs/` with the pictures. The Venn
+     scorers start only after it.
+  4. 2.8 neighbour scorer, 2.10 linear head, 2.11 outlier ranking
   4. 2.9 command wiring for milestone 2
 - **Then** milestones 3 and 4: shift test, assessment, evaluation (3.7 and 3.9
   reuse `l2d-eval` and use the pooled gate figure), end-to-end and hardware
