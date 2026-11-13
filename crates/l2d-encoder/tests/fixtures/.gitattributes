@@ -1,2 +1,4 @@
 # The spike's model is compared by hash: no line-ending conversion.
 *.onnx binary
+# The byte table is compared by hash.
+*.bin binary

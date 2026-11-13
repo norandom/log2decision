@@ -157,7 +157,7 @@ crates/
 │   ├── lib.rs
 │   ├── arch.rs                    # EncoderArch: layer definitions, input length, dimension
 │   ├── package.rs                 # EncoderPackage: artifact files, identity verification, revision hash
-│   ├── bytes.rs                   # Text to fixed-length byte ids, truncation flag, table lookup
+│   ├── codec.rs                   # ByteCodec: text to fixed-length byte ids, truncation and empty flags, table lookup into the batch buffer
 │   ├── runtime.rs                 # RuntimeFiles check against the compiled-in manifest, the record, file versions
 │   ├── npu.rs                     # NPU device and driver query
 │   └── session.rs                 # EncoderSession: NPU or CPU execution via ort, placement evidence
@@ -637,7 +637,7 @@ impl BaselineScorer {
 - `OnnxWriter` emits opset 17 with Conv, Relu, GlobalAveragePool, Flatten and Gemm.
 - `Quantizer` emits the QDQ form: uint8 activations and int8 symmetric weights, per tensor, float scales; bias int32 with scale `input_scale × weight_scale`.
 - Calibration ranges are the minimum and maximum of each activation over a calibration sample, supplied by the trainer.
-- Package directory `models/encoders/<name>-<rev12>/` contains `encoder.json` (identity, architecture, quantization ranges), `table.bin`, `model.f32.onnx`, `model.int8.onnx`, `training-record.json`.
+- Package directory `models/encoders/<name>-<rev12>/` contains `encoder.json` (identity, architecture, the input mode `whole` or `payload`, quantization ranges), `table.bin`, `model.f32.onnx`, `model.int8.onnx`, `training-record.json`.
 - Revision: SHA-256 over `model.int8.onnx`, `table.bin` and the architecture description, first 40 hex characters.
 - A package is written to a temporary sibling directory and renamed into place.
 
@@ -677,7 +677,7 @@ impl EncoderPackage {
 - The runtime is loaded with `ort` `load-dynamic` from that directory. The Vitis AI provider is registered with `error_on_failure`, cache directory `runtime/cache/`, cache key equal to the encoder revision, cache kept on disk.
 - The environment variable for the provider's placement report is set in-process before the session is created; `Placement` is read from that report.
 - NPU presence and driver version are read through a Windows device query.
-- Texts are deduplicated by the caller; the session pads the last batch to 32 and drops padded outputs.
+- Texts are deduplicated by the caller. The batch buffer of `ByteCodec` pads the last batch with all-zero inputs and knows how many rows are texts; the session drops the outputs of the padded rows.
 - Output vectors are L2-normalized on the CPU.
 - The CPU path runs the same `model.int8.onnx` through the CPU provider of the same runtime.
 
@@ -705,10 +705,19 @@ impl EncoderSession {
     pub fn finish(self) -> RunRecord;      // identity, device, driver, logs per second, placement
 }
 
+// As built by task 2.5 (`codec.rs`). The codec is a value made from the architecture, the byte table and the input mode.
+pub struct InputArch { pub input_bytes: u32, pub channels: u32, pub batch: u32 }   // V1 = 256 / 64 / 32; validated, also when read from JSON; a batch may take at most 256 MiB
+pub enum InputMode { Whole, Payload }   // no default; `payload` reads the part after the routing (method, host, path), as the baseline's strip mode
+pub struct TextInput { pub part_bytes: u64, pub read_bytes: u32, pub nul_bytes: u32, pub truncated: bool, pub empty: bool }
+
 impl ByteCodec {
-    pub fn encode_text(text: &str) -> ([u8; 256], bool);   // bytes, truncated flag
+    pub fn new(arch: InputArch, table: ByteTable, mode: InputMode) -> Result<Self, L2dError>;
+    pub fn new_batch(&self) -> InputBatch;                                            // [batch, channels, 1, input_bytes] float32, one contiguous buffer, reused
+    pub fn fill(&self, batch: &mut InputBatch, texts: &mut impl Iterator<Item = &str>) -> usize;
+    pub fn push(&self, batch: &mut InputBatch, text: &str) -> Option<TextInput>;
 }
 ```
+- `ByteCodec` (task 2.5): the first `input_bytes` UTF-8 bytes of the part the mode selects, cut at the raw byte, padded with byte 0; `x[n, c, 0, t] = table[byte[n, t]][c]`. The mapping is bit-identical to the Python mapping the model was trained with. `truncated` is true when that part has more than `input_bytes` bytes; `empty` when no byte other than padding reaches the model (the baseline's "no features" case). The table is 256 rows of `channels` little-endian float32 with row 0 all zeros. The codec makes no allocation per text or per batch and runs at about 200,000 to 340,000 logs per second on one thread, several times the NPU's rate. The input mode is part of the encoder identity (task 2.4); which mode ships is decided with the science gate.
 - Preconditions: package revision verified; runtime files present.
 - Postconditions: `encode` returns one entry per input text in input order, each of the identity's dimension, and the same vector for a text whatever its place in a batch (requirement 4.6).
 - NPU only (owner decision of 2026-11-13): there is no CPU fallback. Every mention of `allow_cpu`, `--allow-cpu`, a CPU provider as fallback or a CPU run in this document is superseded; `open` takes no such flag and returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed. The baseline scorer is the path for a host without an NPU. Agreement between NPU and CPU vectors is not a requirement any more. The aim for the encoder path is end-to-end throughput on the NPU (task 2.12).

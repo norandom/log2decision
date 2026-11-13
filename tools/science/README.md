@@ -52,6 +52,10 @@ uv run python report.py $out --variant bce-norm-unit
 # Describe an ONNX model (interface, operators, quantization parameters)
 uv run python inspect_onnx.py D:\BuildArtifacts\log2decision\npu-cnn-spike\enc_b32_int8.onnx
 
+# Expected values for the tests of the Rust ByteCodec (task 2.5). The table fixture next to them is a copy of
+# models\science-2.1\split17-f0-s0-strip-bce-norm-unit.table.bin named science-2.1.table.bin
+uv run python codec_fixture.py D:\Source\log2decision\models\science-2.1 ..\..\crates\l2d-encoder\tests\fixtures
+
 # Copy one run's models into models\science-2.1 with a record and hashes
 uv run python publish.py $out D:\Source\log2decision\models\science-2.1 --run split17-f0-s0-strip-bce-norm-unit
 ```
@@ -70,6 +74,7 @@ machine does. A run whose record exists in `$out` is skipped by `run_all.ps1`.
 | `inspect_onnx.py` | Interface and operators of an ONNX model; used for the comparison with the spike model |
 | `describe_data.py` | Dataset figures and folds |
 | `publish.py` | Copies a run's models to `models/science-2.1/` and writes `record.json` |
+| `codec_fixture.py` | Expected values for the Rust `ByteCodec` (task 2.5): byte ids, truncation flags and hashes of the model input for a set of texts, made with `byte_ids` and `table_input`; writes `crates/l2d-encoder/tests/fixtures/byte-codec-expected.json` |
 
 ## Leakage rules the code keeps
 
