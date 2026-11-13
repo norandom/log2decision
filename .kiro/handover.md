@@ -81,8 +81,13 @@ waiting for the owner".
    - Padding with byte 0.
    - PyTorch for the spike, where the design names Burn.
    - The baseline's default penalty.
-3. **AMD release 1.8.0 or 1.9.0.** The tool is built for 1.9.0. The choice
-   waits for task 2.12 on a trained model.
+3. **AMD release: decided, 1.9.0.** The owner on 2026-11-13: "always
+   forward". Release 1.8.0 is not pursued.
+
+Owner on 2026-11-13 about point 1: the gate is decided on measured metrics,
+not estimates. That means the baseline as task 1.12 measures it in Rust, and
+the trained model run on the NPU in task 2.12, with quality and throughput as
+measured. The gate stays open until both exist.
 
 ## Order of the remaining work
 
