@@ -127,6 +127,7 @@ overturned something, the document says so at the top.
 
 | Date | Document | What it settles |
 | --- | --- | --- |
+| 2026-11-13 | [The trained encoder on the NPU: are all rows right, how fast is it, how good are the vectors](docs/2026-11-13-npu-throughput-and-row-correctness.md) | In the exported batch layout only the first text of a batch is computed right on the NPU; with the texts as rows of one image every row is bit-identical to the text alone. End to end 16,600 logs per second with one session (37,600 with four), ready in 4.9 s cold and 1.0 s warm. The NPU's vectors give the quality the science gate recorded: linear head 0.958, neighbour ratio 0.899 |
 | 2026-11-12 | [Science gate: does a trained byte-level encoder earn its place on the NPU?](docs/2026-11-12-science-gate-encoder.md) | A linear head on the 8-bit vectors reaches cross-endpoint ROC AUC 0.959 on five grouped folds and clears the 0.90 bar; the neighbour ratio (0.893) and the design's training objective do not. The review found the lead over the simple scorer does not hold: about level at best, behind on endpoints of a form it has not seen |
 | 2026-11-11 | [Embedding speed and separability on CSIC 2010](docs/2026-11-11-embedding-speed-benchmark.md) | General embeddings are too slow on the NPU and worse than character features; a small encoder of our own runs fast there |
 | 2026-11-11 | [Embedding model choice](docs/2026-11-11-embedding-model-choice.md) | Which embedding models were considered and why the default was dropped |
