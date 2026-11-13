@@ -1643,6 +1643,71 @@ fn a_model_file_with_two_graphs_is_refused() {
 }
 
 #[test]
+fn a_scale_or_zero_point_defined_twice_and_a_tensor_without_a_name_are_refused() {
+    use common::{Storage, byte_scalar, float_scalar};
+    let reference = l2d_encoder::ModelInterface::from_onnx(&Model::tiny().bytes()).unwrap();
+    // Each of the four scalars a second time, with another value: not read as either.
+    for (name, again) in [
+        ("x_scale", float_scalar("x_scale", 0.5, Storage::Raw)),
+        (
+            "x_zero_point",
+            byte_scalar("x_zero_point", common::UINT8, 1, Storage::Raw),
+        ),
+        ("e_scale", float_scalar("e_scale", 0.5, Storage::Raw)),
+        (
+            "e_zero_point",
+            byte_scalar("e_zero_point", common::UINT8, 1, Storage::Raw),
+        ),
+    ] {
+        let model = Model {
+            extra_initializers: vec![again],
+            ..Model::tiny()
+        };
+        let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(&format!("`{name}`")), "{message}");
+        assert!(message.contains("defined more than once"), "{message}");
+        // And so a package is not written from it.
+        let parts = Parts {
+            model_int8: model.bytes(),
+            ..Parts::tiny()
+        };
+        assert!(matches!(write_error(&parts), L2dError::Refused { .. }));
+    }
+    // Another initializer twice is not the reader's concern, and an initializer without
+    // a name is passed over by every pass.
+    let model = Model {
+        extra_initializers: vec![
+            common::float_weights("w", 4, 1),
+            float_scalar("", 0.5, Storage::Raw),
+            float_scalar("", 0.25, Storage::Raw),
+        ],
+        ..Model::tiny()
+    };
+    assert_eq!(
+        l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap(),
+        reference
+    );
+    // A graph input or output without a name is refused, with or without an unnamed
+    // initializer beside it.
+    for extra in [vec![], vec![float_scalar("", 0.5, Storage::Raw)]] {
+        let model = Model {
+            input_name: String::new(),
+            extra_initializers: extra,
+            ..Model::tiny()
+        };
+        let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+        assert!(error.to_string().contains("inputs has no name"), "{error}");
+    }
+    let model = Model {
+        output_name: String::new(),
+        ..Model::tiny()
+    };
+    let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+    assert!(error.to_string().contains("outputs has no name"), "{error}");
+}
+
+#[test]
 fn a_float_model_that_is_not_the_8_bit_models_is_refused_when_written() {
     let float = |change: fn(&mut Model)| {
         let mut model = Model {
@@ -1655,6 +1720,12 @@ fn a_float_model_that_is_not_the_8_bit_models_is_refused_when_written() {
     let whole = float(|_| {});
     let cases: Vec<(&str, Vec<u8>, &str)> = vec![
         ("empty", Vec::new(), "no graph"),
+        // The 8-bit model a second time: the right input and output, but quantized.
+        (
+            "the 8-bit model itself",
+            Model::tiny().bytes(),
+            "read by a QuantizeLinear node: this is a quantized model",
+        ),
         (
             "not a model",
             b"float model to follow".to_vec(),

@@ -240,6 +240,8 @@ pub struct Model {
     pub extra_read_input: bool,
     /// How many times the `graph` field is written into the model (a model has one).
     pub graphs: usize,
+    /// Initializers (`TensorProto` bytes) written after the model's own.
+    pub extra_initializers: Vec<Vec<u8>>,
 }
 
 impl Model {
@@ -263,6 +265,7 @@ impl Model {
             extra_nodes: 0,
             extra_read_input: false,
             graphs: 1,
+            extra_initializers: Vec::new(),
         }
     }
 
@@ -321,7 +324,7 @@ impl Model {
             ),
             float_weights("w", self.weights, self.seed),
         ];
-        for one in &initializers {
+        for one in initializers.iter().chain(&self.extra_initializers) {
             bytes_field(&mut graph, 5, one);
         }
         bytes_field(

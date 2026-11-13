@@ -119,4 +119,50 @@ fn the_reader_allocates_no_more_for_a_file_of_very_many_tiny_nodes() {
     read.unwrap_err();
     println!("255 inputs of 8 dimensions: peak heap {peak} bytes");
     assert!(peak < CEILING, "{peak} bytes at the ceiling");
+
+    // A million initializers beside 255 listed inputs and the encoder's own: the pass
+    // over the initializers looks each name up once, so it is linear in the file. With
+    // one comparison per initializer and listed input (255 million of them) this took
+    // 4.5 s in a debug build; the bound leaves room for a busy machine.
+    let mut graph = Vec::new();
+    for at in 0..255 {
+        let name = format!("weight-{at}");
+        common::bytes_field(
+            &mut graph,
+            11,
+            &common::value_info(&name, common::FLOAT, &[1]),
+        );
+        common::bytes_field(&mut graph, 5, &common::float_weights(&name, 0, 0));
+    }
+    common::bytes_field(
+        &mut graph,
+        11,
+        &common::value_info("x", common::FLOAT, &[2, 3, 1, 8]),
+    );
+    common::bytes_field(
+        &mut graph,
+        12,
+        &common::value_info("e", common::FLOAT, &[2, 4]),
+    );
+    let mut other = Vec::new();
+    common::bytes_field(&mut other, 8, b"v");
+    for _ in 0..1_000_000 {
+        common::bytes_field(&mut graph, 5, &other);
+    }
+    let mut million = Vec::new();
+    common::bytes_field(&mut million, 7, &graph);
+    let started = std::time::Instant::now();
+    let (read, peak) = peak_of(|| ModelInterface::from_onnx(&million));
+    let took = started.elapsed();
+    // The one real input is found among the 256; nothing reads it, which is the refusal.
+    let message = read.unwrap_err().to_string();
+    assert!(message.contains("the input `x` must be read"), "{message}");
+    println!(
+        "file {} bytes, 1,000,255 initializers, 256 listed inputs: {took:?}, peak heap {peak} \
+         bytes",
+        million.len()
+    );
+    assert!(peak < CEILING, "{peak} bytes");
+    // Measured 0.9 s in a debug build on the reference host.
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
 }

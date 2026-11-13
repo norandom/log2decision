@@ -739,7 +739,7 @@ impl EncoderPackage {
         if let Some(float) = parts.model_f32 {
             // The float model is the source of the 8-bit one: the same input and output.
             let (input, output) =
-                crate::onnx::tensors(float).map_err(|reason| L2dError::Refused {
+                crate::onnx::float_tensors(float).map_err(|reason| L2dError::Refused {
                     reason: format!(
                         "{MODEL_F32_FILE} is not usable as the float model of the encoder: \
                          {reason}"
@@ -865,6 +865,25 @@ impl EncoderPackage {
                 });
             }
         };
+        // The directory name holds the first twelve characters of the revision only: two
+        // encoders can meet in one name (the same files read in another mode or shape
+        // would even have the same file list). The whole revision decides.
+        if found.identity.revision != wanted.identity.revision
+            || found.identity.name != wanted.identity.name
+        {
+            return Err(L2dError::Refused {
+                reason: format!(
+                    "{} already holds the encoder `{}` of revision {}, not revision {} of the \
+                     encoder `{}` that was to be written; the two share the first twelve \
+                     characters. It was left unchanged; give the new encoder another name",
+                    dir.display(),
+                    found.identity.name,
+                    found.identity.revision,
+                    wanted.identity.revision,
+                    wanted.identity.name
+                ),
+            });
+        }
         let wanted_files = wanted.files.list();
         if found.files == wanted_files {
             return Ok(WrittenPackage {
@@ -1571,6 +1590,53 @@ mod tests {
         // The count went on, so the next write is past the leftovers.
         let made = create_temporary(&encoders, "enc-0123456789ab", &counter).unwrap();
         assert_eq!(made, name(4 + u64::from(TEMPORARY_TRIES)));
+    }
+
+    /// The place holds a verified package whose whole revision is another than the one
+    /// to be written (they share the first twelve characters): not `Unchanged`.
+    #[test]
+    fn a_package_of_another_whole_revision_in_the_place_is_refused_naming_both() {
+        let project = Project::new("collision");
+        let paths = ProjectPaths::new(&project.root);
+        let (model, table) = (
+            fixture("spike-enc-b32-int8.onnx"),
+            fixture("science-2.1.table.bin"),
+        );
+        let first = EncoderPackage::write(
+            &paths,
+            &PackageParts {
+                name: "first",
+                arch: EncoderArch::V1,
+                input_mode: InputMode::Whole,
+                model_int8: &model,
+                table: &table,
+                training_record: b"{}",
+                model_f32: None,
+            },
+        )
+        .unwrap()
+        .package;
+        let before = snapshot(first.dir());
+        let stored = fs::read(first.dir().join(ENCODER_JSON)).unwrap();
+        let wanted: Manifest = serde_json::from_slice(&stored).unwrap();
+        // The very same description is the same package.
+        let same = EncoderPackage::existing(&paths, first.dir(), &wanted).unwrap();
+        assert_eq!(same.outcome, WriteOutcome::Unchanged);
+
+        // Another revision with the same first twelve characters and the same files.
+        let mut other = wanted.clone();
+        let found = wanted.identity.revision.clone();
+        let last = if found.ends_with('0') { "1" } else { "0" };
+        other.identity.revision = format!("{}{last}", &found[..39]);
+        match EncoderPackage::existing(&paths, first.dir(), &other) {
+            Err(L2dError::Refused { reason }) => {
+                assert!(reason.contains(&found), "{reason}");
+                assert!(reason.contains(&other.identity.revision), "{reason}");
+                assert!(reason.contains("left unchanged"), "{reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(snapshot(first.dir()), before);
     }
 
     /// Makes `link` a directory link to `target`: a symbolic link, or on Windows, where

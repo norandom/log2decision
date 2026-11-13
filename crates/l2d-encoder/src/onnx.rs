@@ -39,6 +39,8 @@
 //! size of the file or the number of its nodes, and a refusal names at most
 //! [`LISTED_NAMES`] of whatever it counts.
 
+use std::collections::HashSet;
+
 use l2d_core::L2dError;
 use serde::{Deserialize, Serialize};
 
@@ -172,11 +174,23 @@ impl ModelInterface {
         for field in fields(graph, "the graph") {
             if let (5, Wire::Bytes(tensor)) = field? {
                 let (name, initializer) = Initializer::parse(tensor)?;
+                // An initializer without a name cannot be meant by a node (an absent
+                // node input is the empty name); it is passed over here as in the pass
+                // over the graph inputs.
                 if name.is_empty() {
                     continue;
                 }
                 for (slot, wanted) in found.iter_mut().zip(wanted) {
                     if wanted == name {
+                        // Protobuf would let the last of two win; which one a runtime
+                        // takes is not ours to guess.
+                        if slot.is_some() {
+                            return Err(format!(
+                                "the initializer `{}`, a scale or zero point of the input or \
+                                 the output, is defined more than once",
+                                clipped(name)
+                            ));
+                        }
                         *slot = Some(initializer.clone());
                     }
                 }
@@ -204,10 +218,32 @@ impl ModelInterface {
     }
 }
 
-/// The one input and the one output of a model file, 8-bit or float: what
-/// [`ModelInterface`] reads first. Used to hold a float model to its 8-bit model.
-pub(crate) fn tensors(bytes: &[u8]) -> Result<(TensorSpec, TensorSpec), String> {
-    let (input, output) = graph_tensors(graph_of(bytes)?)?;
+/// The one input and the one output of a float model file, to hold it to its 8-bit
+/// model. What tells a float model from an 8-bit one here: no `QuantizeLinear` node
+/// reads its input and no `DequantizeLinear` node produces its output. A file where one
+/// does (the 8-bit model given a second time, for example) is refused.
+pub(crate) fn float_tensors(bytes: &[u8]) -> Result<(TensorSpec, TensorSpec), String> {
+    let graph = graph_of(bytes)?;
+    let (input, output) = graph_tensors(graph)?;
+    for field in fields(graph, "the graph") {
+        if let (1, Wire::Bytes(node)) = field? {
+            let node = Node::parse(node, input.name, output.name)?;
+            if node.reads && node.op == "QuantizeLinear" {
+                return Err(format!(
+                    "its input `{}` is read by a QuantizeLinear node: this is a quantized \
+                     model, not a float model",
+                    clipped(input.name)
+                ));
+            }
+            if node.writes && node.op == "DequantizeLinear" {
+                return Err(format!(
+                    "its output `{}` is produced by a DequantizeLinear node: this is a \
+                     quantized model, not a float model",
+                    clipped(output.name)
+                ));
+            }
+        }
+    }
     Ok((input.spec()?, output.spec()?))
 }
 
@@ -472,22 +508,30 @@ fn graph_tensors(graph: &[u8]) -> Result<(ValueInfo<'_>, ValueInfo<'_>), String>
                 "the graph lists more than {MAX_GRAPH_TENSORS} {role}; an encoder has one"
             ));
         }
-        list.push(ValueInfo::parse(info)?);
+        let info = ValueInfo::parse(info)?;
+        // A tensor without a name cannot be fed, read or told from an absent node
+        // input; it is refused, so that no pass has to give the empty name a meaning.
+        if info.name.is_empty() {
+            return Err(format!("one of the graph's {role} has no name"));
+        }
+        list.push(info);
     }
-    // Old exporters list initializers among the inputs: those are not inputs.
-    let mut is_initializer = vec![false; inputs.len()];
+    // Old exporters list initializers among the inputs: those are not inputs. One
+    // look-up per initializer, so the pass is linear in the file whatever the number of
+    // initializers and of listed inputs.
+    let listed_inputs: HashSet<&str> = inputs.iter().map(|input| input.name).collect();
+    let mut initialized: HashSet<&str> = HashSet::new();
     for field in fields(graph, "the graph") {
         if let (5, Wire::Bytes(tensor)) = field? {
             let name = Initializer::name(tensor)?;
-            for (input, flag) in inputs.iter().zip(&mut is_initializer) {
-                *flag |= input.name == name;
+            if listed_inputs.contains(name) {
+                initialized.insert(name);
             }
         }
     }
     let mut real = inputs
         .into_iter()
-        .zip(is_initializer)
-        .filter_map(|(input, is_initializer)| (!is_initializer).then_some(input));
+        .filter(|input| !initialized.contains(input.name));
     let (Some(input), None) = (real.next(), real.next()) else {
         let (names, count) = graph_tensor_names(graph, 11)?;
         return Err(format!(
