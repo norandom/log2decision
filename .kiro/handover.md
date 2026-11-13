@@ -236,6 +236,16 @@ Two lanes, one implementer and one reviewer at a time in each.
      are the embeddings suitable, and do distinct features remain present.
      The result is a dated document in `docs/` with the pictures. The Venn
      scorers start only after it.
+     It is a gate, in the owner's words: if all vectors turn out to be
+     garbage or noise whatever strings go in, everything built on them is
+     blocked from being a proper ML implementation. So the document must
+     answer, with pictures and a few plain numbers: do different strings give
+     different vectors (not one collapsed point, as the random-weight spike
+     model gave); do similar strings land near each other and unrelated ones
+     apart; do good and bad logs, and the endpoints, show structure; how many
+     dimensions carry the variance. If the answer is noise, stop and bring it
+     to the owner before 2.8. It needs only vectors from the session, so it
+     can run straight after 2.6 and need not wait for 2.7.
   4. 2.8 neighbour scorer, 2.10 linear head, 2.11 outlier ranking
   5. 2.9 command wiring for milestone 2
 - **Then** milestones 3 and 4: shift test, assessment, evaluation (3.7 and 3.9
