@@ -14,10 +14,18 @@
 //!   verification ([`EncoderPackage`], [`EncoderArch`]);
 //! - [`onnx`]: what a model file says about its own input and output
 //!   ([`ModelInterface`]).
+//!
+//! And (task 2.12) what the measurements on the NPU needed:
+//! - [`encode`]: the quantization rule of the model's ends, the normalisation after the
+//!   graph and the provider's cache key, for the session of task 2.6;
+//! - [`onnx_edit`]: the same model file for another batch size, with its quantized bytes
+//!   as input or output, or cut at an inner tensor.
 
 pub mod codec;
+pub mod encode;
 pub mod npu;
 pub mod onnx;
+pub mod onnx_edit;
 pub mod package;
 pub mod runtime;
 

@@ -1001,6 +1001,7 @@ dependencies = [
 name = "l2d-encoder"
 version = "0.1.0"
 dependencies = [
+ "l2d-baseline",
  "l2d-core",
  "ort",
  "serde",

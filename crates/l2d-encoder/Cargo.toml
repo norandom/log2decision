@@ -32,3 +32,11 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices
 
 [dev-dependencies]
 ort.workspace = true
+# The quality test of task 2.12 (`tests/npu_quality.rs`) fits the linear head with the
+# baseline's deterministic logistic regression (its dense path). A dev-dependency only:
+# the library does not import from `l2d-baseline`.
+l2d-baseline.workspace = true
+
+# Process CPU time and memory, for the throughput measurements of task 2.12.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Threading", "Win32_System_ProcessStatus"] }

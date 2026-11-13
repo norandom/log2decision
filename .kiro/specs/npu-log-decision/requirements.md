@@ -60,7 +60,7 @@ features on HTTP CSIC 2010.
 2. When the analyst supplies a labelled dataset, the Log Triage Tool shall read each record's label as good or bad together with its text.
 3. When the same log text occurs more than once in an input, the Log Triage Tool shall process the text once and keep the number of occurrences.
 4. If a record cannot be read, then the Log Triage Tool shall skip it, continue with the next record, and report the count and positions of skipped records.
-5. If a log text is longer than the encoder's input length, then the Log Triage Tool shall mark the record as truncated in its output.
+5. If a log text is longer than the encoder's input length, then the Log Triage Tool shall mark the record as truncated in its output. Where the encoder reads only a part of the log text, the Log Triage Tool shall mark separately whether that part was cut and whether the whole log text is longer than the encoder's input length.
 6. The Log Triage Tool shall record for each loaded input its source path, record count, distinct text count, and a content hash.
 
 ### Requirement 2: Baseline ratio from character-level features
