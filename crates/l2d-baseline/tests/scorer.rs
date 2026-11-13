@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use l2d_baseline::scorer::{
-    ESTIMATE_SAMPLE_ROWS, MANIFEST_FILE, SCORER_KIND, SCORES_ABSTAINED, SCORES_NO_FEATURES,
-    SCORES_RATIO, SCORES_SCORER, SCORES_TEXT, WEIGHTS_FILE,
+    ESTIMATE_SAMPLE_ROWS, FITTED_TEXTS_FILE, MANIFEST_FILE, SCORER_KIND, SCORES_ABSTAINED,
+    SCORES_NO_FEATURES, SCORES_RATIO, SCORES_SCORER, SCORES_TEXT, WEIGHTS_FILE,
 };
 use l2d_baseline::{
     BaselineScorer, BaselineSettings, CharHasher, FitError, RoutingMode, Termination,
@@ -909,7 +909,8 @@ fn the_memory_estimate_is_exact_in_its_entries_for_a_small_set() {
         + report.rows
         + 48 * 65_537 * 8
         + 6 * report.rows * 8
-        + longest * 3 * 40;
+        + longest * 3 * 40
+        + report.rows * 16;
     assert_eq!(report.estimated_bytes, expected);
 }
 
@@ -1039,7 +1040,8 @@ fn the_saved_files_have_the_documented_layout() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
-    assert_eq!(files, [MANIFEST_FILE, WEIGHTS_FILE]);
+    // Task 1.11 added the hashes of the fitted texts (`tests/scorer_fitted_texts.rs`).
+    assert_eq!(files, [MANIFEST_FILE, FITTED_TEXTS_FILE, WEIGHTS_FILE]);
     assert_eq!(
         (MANIFEST_FILE, WEIGHTS_FILE),
         ("baseline.json", "weights.bin")
@@ -1055,7 +1057,7 @@ fn the_saved_files_have_the_documented_layout() {
     // baseline.json: readable values beside exact bit patterns.
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
-    assert_eq!(manifest["format"], 1);
+    assert_eq!(manifest["format"], 2);
     assert_eq!(manifest["kind"], "baseline");
     assert_eq!(manifest["revision"], scorer.revision());
     assert_eq!(manifest["tool_version"], env!("CARGO_PKG_VERSION"));
@@ -1478,7 +1480,10 @@ fn saving_the_same_model_fitted_on_another_input_adds_that_input() {
             .unwrap(),
         weights_written
     );
-    assert_eq!(files_of(&dir), [MANIFEST_FILE, WEIGHTS_FILE]);
+    assert_eq!(
+        files_of(&dir),
+        [MANIFEST_FILE, FITTED_TEXTS_FILE, WEIGHTS_FILE]
+    );
     assert_eq!(files_of(&paths.baselines_dir()).len(), 1);
 
     // Saving either scorer again adds nothing: the file stays byte for byte.

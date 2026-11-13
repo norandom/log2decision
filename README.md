@@ -11,9 +11,10 @@ It is built for a security analyst with a laptop and too many logs. Nothing is
 sent anywhere, and the tool is designed to stay out of the way of whatever else
 the machine is doing.
 
-Status, 2026-11-12: under construction. The reading, scoring, calibration,
-store, search and triage parts exist as tested library code. The commands that tie them together are not wired
-yet, so you cannot triage a file from the command line today. See
+Status, 2026-11-13: under construction. You can read, score, calibrate and
+triage a file of logs from the command line with the simple scorer. The store,
+the search and the encoder on the NPU exist as tested library code and are not
+wired to commands yet. See
 [what works today](#what-works-today).
 
 ## What you will get
@@ -66,7 +67,8 @@ it is allowed in.
 | Search in a store: by phrase (with or without case), by label and source, and by nearest vectors | Library done and tested, not yet wired to a command. On CSIC's 25,608 logs a nearest-vector search takes about 36 ms and the first 100 phrase matches about 1.5 ms. A search that does not fit the memory limit is refused |
 | Triage: ranking, review budget, and with a calibration the split into review, scored down, uncertain and unlike | Library done and tested, not yet wired to a command. Triage of CSIC's 25,608 logs takes under a second |
 | Evaluation | Specified, not built |
-| Commands (`ingest`, `baseline`, `triage`, ...) | Present as stubs that say "not implemented yet" |
+| Commands `ingest`, `baseline fit`, `baseline score`, `calibrate`, `triage` | Work from the command line, with text and `--json` output. On CSIC: fit in about 2 s, triage of 8,644 logs in under half a second, each within the memory limit it reports |
+| Other commands (`store`, `encoder`, `shift`, `assess`, `eval`, `runtime`) | Present as stubs that say "not implemented yet" |
 | Encoder on the NPU | Hardware gate passed: an 8-bit model with random weights runs on the AMD NPU from Rust, 36 of 38 nodes on the NPU, at 22,000 to 36,000 logs per second. Open: on the NPU a row's output depends on its position in the batch, which the test model could not reveal; this is settled before the encoder is built. The runtime files are checked against a manifest before anything is loaded. Whether a trained encoder beats the simple scorer is being measured; the encoder itself is not built |
 
 A measured example: HTTP CSIC 2010 (61,065 requests, 28 MB) is read and
@@ -84,21 +86,38 @@ cargo test --workspace
 cargo run --release -p l2d-cli -- --help
 ```
 
-The help lists every command and the two options that apply to all of them:
+The help lists every command and the options that apply to all of them:
 
 | Option | Effect |
 | --- | --- |
+| `--project DIR` | The project directory, where models are kept under `models/`. Default: the current directory |
+| `--json` | Machine-readable output |
 | `--memory-limit 2GB` | Cap the memory the tool may use. Default: half of what is free |
+| `--memory-share 0.5`, `--reserve-share 0.25` | The same as shares of the free memory: how much to use, and how much to keep free |
 | `--batch-rows 10000` | Cap the batch size. Default: 65,536 rows, fewer when memory is short |
 
-To see the reader and the memory limit at work on your own file:
+A first run on a labelled file, here a CSV with the columns `text`, `label`
+and `group`, cut into three parts so that nothing is judged on logs the scorer
+has already seen:
 
 ```
-cargo run --release -p l2d-core --example read_batched -- lines path\to\your.log --memory-limit 512MB
+l2d ingest --input all.csv --group-column group
+l2d baseline fit --input fit.csv --group-column group --name demo
+l2d calibrate --input cal.csv --group-column group --baseline demo --name demo-cal
+l2d triage --input new.csv --group-column group --baseline demo --calibration demo-cal --budget 50
 ```
 
-For the CSIC dataset, download it as described in [data/README.md](data/README.md)
-and replace `lines` with `csic`.
+`triage` prints the logs to review, the logs it scored down and the logs it
+will not call either way. `calibrate` leaves out any log whose text the scorer
+was fitted on and says how many. For the CSIC dataset, download it as
+described in [data/README.md](data/README.md) and use `--adapter csic2010`;
+`l2d ingest --help` lists the adapters and their options. `l2d` is the binary
+that `cargo build --release` puts in the build folder; `cargo run --release -p
+l2d-cli --` in front of the arguments does the same.
+
+Exit codes: 0 success, 2 a mistake in the options, 3 something missing (the
+message says where it was expected), 4 a refusal such as too little memory,
+5 an input or output failure.
 
 ## Documents
 

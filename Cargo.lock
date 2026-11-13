@@ -952,6 +952,7 @@ dependencies = [
  "ndarray 0.16.1",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -961,9 +962,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "l2d-assess",
+ "l2d-baseline",
  "l2d-core",
  "l2d-decide",
  "l2d-eval",
+ "serde",
  "serde_json",
 ]
 

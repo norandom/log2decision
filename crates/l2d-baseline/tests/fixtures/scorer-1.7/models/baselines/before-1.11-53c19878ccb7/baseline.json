@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "kind": "baseline",
+  "revision": "53c19878ccb777b54e64170818dec20fee792a77",
+  "tool_version": "0.1.0",
+  "settings": {
+    "buckets": 512,
+    "ngram_max": 3,
+    "routing": "keep",
+    "l2": {
+      "value": 1.0,
+      "bits": "3ff0000000000000"
+    },
+    "max_iter": 1000,
+    "tolerance": {
+      "value": 0.001,
+      "bits": "3f50624dd2f1a9fc"
+    }
+  },
+  "model": {
+    "dimension": 512,
+    "bias": {
+      "value": 0.514876329421876,
+      "bits": "3fe079ddec8b3f53"
+    }
+  },
+  "fit": {
+    "termination": "converged",
+    "iterations": 10,
+    "objective": {
+      "value": 96.72011579732116,
+      "bits": "40582e166091b4f3"
+    },
+    "gradient_norm": {
+      "value": 0.00016303387250369216,
+      "bits": "3f255e824d140cb4"
+    },
+    "rows": 168,
+    "good": 96,
+    "bad": 72,
+    "unknown_ignored": 1,
+    "no_feature_rows": 0,
+    "stored_entries": 28913,
+    "estimated_bytes": 577532
+  },
+  "fitting_inputs": [
+    {
+      "source_path": "tests/fixtures/mini-labelled.csv",
+      "content_sha256": "25156ef523229c5933659f205ec3ffe3c12c28e9500071bfd0ec32efcef8f0a6",
+      "records": 200,
+      "distinct_texts": 169
+    }
+  ]
+}

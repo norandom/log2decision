@@ -582,7 +582,7 @@ impl MemoryBudget {
 **Responsibilities & Constraints**
 - Features: character 1-, 2- and 3-grams over the text's bytes, signed FNV-1a hashing into 65,536 buckets, L2-normalized sparse rows.
 - Model: logistic regression with L2 penalty, fitted by full-batch L-BFGS with a fixed iteration cap and fixed row order. No randomness.
-- Saved under `models/baselines/<name>-<rev12>/` as `weights.bin` (little-endian f64) and `baseline.json` (settings, bias, fit report, fitting inputs). The revision is the first 40 hex characters of SHA-256 over settings, weights and bias; `load` recomputes it and refuses a mismatch. Saving is atomic.
+- Saved under `models/baselines/<name>-<rev12>/` as `weights.bin` (little-endian f64), `baseline.json` (settings, bias, fit report, fitting inputs) and, from task 1.11 on, `fitted-texts.bin` (sorted 16-byte hashes of the fitted texts, outside the revision). Loading reads the weights in pieces straight into their final form, so a load takes the weights once (`load_bytes`). The revision is the first 40 hex characters of SHA-256 over settings, weights and bias; `load` recomputes it and refuses a mismatch. Saving is atomic.
 - A saved scorer records the content hash of every input it was fitted on. Saving the same revision again merges the inputs; it never drops one. A scorer with no recorded inputs has unknown provenance.
 - A text with no features (for example strip mode on a request without query or body) scores the constant sigmoid of the bias and is flagged `no_features` in the Scores frame.
 - Fitting needs all rows at once: the memory estimate is taken from a sample of hashed rows and checked with `require_whole` before the matrix is allocated.
@@ -1092,12 +1092,12 @@ pub struct EvaluationReport {
 
 | Command | Purpose | Main options | Output |
 |---------|---------|--------------|--------|
-| `l2d ingest` | Read and summarize an input | `--input`, `--adapter` | `InputSummary` |
-| `l2d baseline fit` / `score` | Fit or apply the baseline | `--input`, `--name` | identity or ratios |
+| `l2d ingest` | Read and summarize an input | `--input`, `--adapter`, the column options, `--limit` | `InputSummary` |
+| `l2d baseline fit` / `score` | Fit or apply the baseline | fit: `--input`, `--name`, `--routing`, `--buckets`, `--ngram-max`, `--l2`, `--max-iter`, `--tolerance`; score: `--input`, `--baseline`, `--limit` | identity or ratios |
 | `l2d encoder train` / `encode` / `info` | Train, encode, show identity | `--seed`, `--allow-cpu` | identity, `RunRecord` |
 | `l2d store add` / `search` | Fill and query a store | `--store`, `--text`, `--like`, `--label`, `--source`, `--k` | counts or hits |
-| `l2d triage` | Rank logs | `--store`, `--baseline`, `--budget`, `--primary`, `--calibration`, `--error-rate` | the triage frame and its counts |
-| `l2d calibrate` | Calibrate a fitted scorer on held-out labelled logs | `--input`, `--baseline` or `--store`, `--name`, `--min-per-group` | calibration identity, counts per stratum |
+| `l2d triage` | Rank logs | `--input`, `--baseline`, `--budget`, `--primary`, `--calibration`, `--error-rate`, `--limit` (`--store` and `--primary neighbour` are declared and refused until the encoder tasks) | the triage frame and its counts |
+| `l2d calibrate` | Calibrate a fitted scorer on held-out labelled logs | `--input`, `--baseline`, `--name`, `--min-per-group`, `--error-rate` (`--store` declared and refused) | calibration identity, counts per stratum, the held-out report |
 | `l2d shift` | Compare two groups | `--a`, `--b`, `--permutations`, `--seed` | `ShiftResult` |
 | `l2d assess` | Vector-set measurements | `--store`, `--kind`, `--reference`, `--out` | reports |
 | `l2d eval` | Evaluation report | `--folds`, `--budget`, `--scorers` | `EvaluationReport` |
@@ -1105,6 +1105,15 @@ pub struct EvaluationReport {
 
 - Every command accepts `--json`; JSON goes to standard output, diagnostics to standard error.
 - Errors print one line naming what failed and exit with the code from the error mapping.
+- As built by task 1.11 (`ingest`, `baseline fit`, `baseline score`, `calibrate`, `triage`; the other commands are stubs):
+  - Global options: `--json`, `--project <DIR>` (the project root, default the current directory), `--batch-rows`, `--memory-limit`, `--memory-share` (share of free memory used as the limit, default 0.5) and `--reserve-share` (share kept free, default 0.25). A share must lie in (0, 1). When one share is typed and the sum with the other's default exceeds 1, the other is lowered to what is left of 1 and the output says so; both typed above 1 is a usage error. A share cannot be combined with `--memory-limit`.
+  - Exit codes: 0 success; 2 usage and option values; 3 something missing, with where it was expected; 4 a refusal (too few labels, an input the scorer was fitted on, too few calibration logs, a calibration for another scorer, every memory refusal, stubs); 5 input/output, including a closed output pipe.
+  - `--input` is the path as given, else the same relative path below `<project>/data/`. A model is named by its name or its directory name; two revisions under one name are a usage error that lists them.
+  - JSON is one document per run, written as it is produced. A consumer checks the exit code: when a run fails after output has begun, the error envelope follows on a line of its own, so the last line of standard output is always one whole document. Large outputs are streamed; `--limit` bounds the rows per list.
+  - Text output escapes control characters and invisible or direction-changing characters in log text and cuts it at 120 characters; JSON keeps the text as it is.
+  - Every command that loads a dataset observes the memory budget first and reports the free memory, the limit, the reserve and the batches planned; loading a scorer and a calibration is asked of the budget before it happens.
+  - Held-out check per log: a fit saves the first 16 bytes of the SHA-256 of each text it was fitted on (`fitted-texts.bin`, saved-form `format` 2; the scorer's revision does not change, so calibrations stay valid). `l2d calibrate` drops calibration logs with those texts and reports how many. A scorer saved without hashes falls back to the whole-file check, and a scorer whose hash set is incomplete (hashes merged into a directory saved without them) gives a partial check; both are said in the output. The text is hashed as read, before routing, so a trailing space defeats the check by design.
+  - An optional cargo feature `heap-report` of `l2d-cli`, off by default, makes the binary print its heap peak for measurements.
 - The human output of `l2d shift` states that the p-value is a test result and not the probability that a shift occurred.
 
 ## Data Models

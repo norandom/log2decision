@@ -535,6 +535,148 @@ pub fn require_held_out(
     }
 }
 
+/// Memory per calibration log that [`held_out_logs`] asks the budget for: the yes or no
+/// per log and the rows of the logs frame that are kept (three text columns at 16
+/// bytes a row, the position, the occurrences, and what Polars rounds up). The texts
+/// themselves are shared with the frame given, not copied.
+pub const HELD_OUT_ROW_BYTES: u64 = 96;
+
+/// What a held-out report says when the scorer does not know the texts it was fitted
+/// on (a scorer saved before task 1.11).
+pub const WHOLE_FILE_NOTE: &str = "The scorer was saved without the hashes of the texts it \
+     was fitted on, so only a calibration input that is identical, byte for byte, to an \
+     input the scorer was fitted on is detected; the same logs in another file (reordered, \
+     re-exported, a subset) are not. Fit the scorer again to get the check per log.";
+
+/// What a held-out report says when the scorer's hashes cover only part of what it was
+/// fitted on: a scorer saved before task 1.11 that was saved again after a new fit of
+/// the same model on another input.
+pub const PARTIAL_NOTE: &str = "The scorer's hashes of fitted texts cover only part of what \
+     it was fitted on: they were added to a scorer saved without them, whose earlier fitting \
+     inputs are known by their whole-file hash alone. Logs of those earlier inputs are \
+     detected only when the calibration input is identical, byte for byte, to one of them. \
+     Save the scorer under a new name after fitting it again to get the complete check.";
+
+/// How the calibration logs were held to "not used to fit the scorer" (requirement
+/// 11.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldOutCheck {
+    /// The whole-input check, and every log whose text the scorer was fitted on left
+    /// out.
+    PerLog,
+    /// As [`HeldOutCheck::PerLog`], but the scorer's hashes cover only part of its
+    /// fitting inputs ([`BaselineScorer::fitted_text_hashes_complete`] is false): logs
+    /// of the other inputs are caught by the whole-input check alone.
+    PerLogPartial,
+    /// The whole-input check alone: the scorer does not know its fitted texts.
+    WholeFile,
+}
+
+/// What [`held_out_logs`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HeldOut {
+    pub check: HeldOutCheck,
+    /// The calibration logs given.
+    pub logs: u64,
+    /// Those left out because the scorer was fitted on a log with the same text;
+    /// always 0 with [`HeldOutCheck::WholeFile`].
+    pub dropped: u64,
+    /// Those that remain: `logs - dropped`.
+    pub kept: u64,
+}
+
+impl HeldOut {
+    /// What has to be said beside the result: [`WHOLE_FILE_NOTE`] when only an
+    /// identical file is detected, [`PARTIAL_NOTE`] when the check per log covers only
+    /// part of what the scorer was fitted on, nothing otherwise.
+    pub fn note(&self) -> Option<&'static str> {
+        match self.check {
+            HeldOutCheck::PerLog => None,
+            HeldOutCheck::PerLogPartial => Some(PARTIAL_NOTE),
+            HeldOutCheck::WholeFile => Some(WHOLE_FILE_NOTE),
+        }
+    }
+}
+
+/// The calibration logs the baseline scorer was not fitted on (requirement 11.1; owner
+/// decision of 2026-11-12, task 1.11).
+///
+/// First the whole-input check of [`require_held_out`], unchanged: an input that is a
+/// fitting input, a scorer that names no fitting inputs, and logs without an input
+/// summary are refused. Then, when the scorer knows the texts it was fitted on
+/// ([`BaselineScorer::has_fitted_text_hashes`]), every log whose text is among them is
+/// left out, whatever its label here; the rest is returned in its order with the
+/// counts. A scorer that does not know them (saved before task 1.11) gets the logs back
+/// as given, and the report says that only an identical file is detected
+/// ([`HeldOut::note`]).
+///
+/// Nothing is refused for the number of logs left: the calibration refuses when no
+/// good or no bad log remains, and [`ConformalCalibrator::require_error_rate`] when
+/// they are too few for an error rate.
+///
+/// The budget is asked for [`HELD_OUT_ROW_BYTES`] per log before a row is copied; a
+/// refusal is [`CalibrationError::Memory`]. The returned frame shares the texts of
+/// `logs`; when nothing is left out it is `logs` itself.
+pub fn held_out_logs(
+    scorer: &BaselineScorer,
+    logs: &LogsFrame,
+    inputs: &[InputSummary],
+    budget: &MemoryBudget,
+) -> Result<(LogsFrame, HeldOut), CalibrationError> {
+    require_held_out(scorer, inputs)?;
+    let rows = logs.len() as u64;
+    let unchanged = |check| {
+        let report = HeldOut {
+            check,
+            logs: rows,
+            dropped: 0,
+            kept: rows,
+        };
+        (logs.clone(), report)
+    };
+    let per_log = match scorer.fitted_text_hashes_complete() {
+        None => return Ok(unchanged(HeldOutCheck::WholeFile)),
+        Some(true) => HeldOutCheck::PerLog,
+        Some(false) => HeldOutCheck::PerLogPartial,
+    };
+    budget
+        .require_whole(
+            rows.saturating_mul(HELD_OUT_ROW_BYTES),
+            "checking the calibration logs against the texts the scorer was fitted on",
+        )
+        .map_err(CalibrationError::Memory)?;
+    let polars =
+        |error: PolarsError| internal("leaving out the logs the scorer was fitted on", error);
+    let texts = logs
+        .frame()
+        .column(LogsFrame::TEXT)
+        .and_then(Column::str)
+        .map_err(polars)?;
+    let keep: Vec<bool> = texts
+        .iter()
+        .map(|text| !text.is_some_and(|text| scorer.was_fitted_on_text(text) == Some(true)))
+        .collect();
+    let kept = keep.iter().filter(|keep| **keep).count() as u64;
+    if kept == rows {
+        return Ok(unchanged(per_log));
+    }
+    let mask = Column::new("keep".into(), keep);
+    let frame = mask
+        .bool()
+        .and_then(|mask| logs.frame().filter(mask))
+        .map_err(polars)?;
+    let frame =
+        LogsFrame::new(frame).map_err(|error| internal("keeping the held-out logs", error))?;
+    let report = HeldOut {
+        check: per_log,
+        logs: rows,
+        dropped: rows - kept,
+        kept,
+    };
+    Ok((frame, report))
+}
+
 /// The nonconformity of a log with this ratio for the label good (`bad == false`) or
 /// bad. Adding zero turns a negative zero into zero, so equal ratios give equal bits.
 fn nonconformity(ratio: f32, bad: bool) -> f64 {
@@ -1001,9 +1143,12 @@ impl ConformalCalibrator {
     }
 
     /// Calibrates the baseline scorer on `logs`: checks that the scorer was not fitted
-    /// on them ([`require_held_out`] with `inputs`, the summaries of the sources `logs`
-    /// was read from), scores the rows and calibrates on those labelled good or bad.
-    /// See [`ConformalCalibrator::fit_with`].
+    /// on them ([`held_out_logs`] with `inputs`, the summaries of the sources `logs`
+    /// was read from: the whole-input check, and since task 1.11 every log whose text
+    /// the scorer was fitted on is left out), scores the rest and calibrates on those
+    /// labelled good or bad. See [`ConformalCalibrator::fit_with`]. A caller that
+    /// reports how many logs were left out calls [`held_out_logs`] itself and then
+    /// [`ConformalCalibrator::fit_scorer`], as `l2d calibrate` does.
     pub fn fit_baseline(
         scorer: &BaselineScorer,
         logs: &LogsFrame,
@@ -1011,14 +1156,14 @@ impl ConformalCalibrator {
         settings: &CalibrationSettings,
         budget: &MemoryBudget,
     ) -> Result<Self, CalibrationError> {
-        require_held_out(scorer, inputs)?;
+        let (logs, _) = held_out_logs(scorer, logs, inputs, budget)?;
         let scoring_bytes = (logs.len() as u64).saturating_mul(SCORING_BYTES_PER_ROW);
         Self::fit_scored(
             ScorerKind::Baseline,
             scorer.revision(),
             |logs| scorer.score(logs),
             scoring_bytes,
-            logs,
+            &logs,
             settings,
             budget,
         )

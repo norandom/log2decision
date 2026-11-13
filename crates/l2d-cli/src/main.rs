@@ -1,8 +1,11 @@
 //! The `l2d` command-line binary: argument parsing, dispatch, exit code.
 
 mod cmd;
+#[cfg(feature = "heap-report")]
+mod heap;
 mod output;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
@@ -31,8 +34,32 @@ struct Cli {
     #[arg(long, global = true, value_name = "SIZE", value_parser = memory_size)]
     memory_limit: Option<u64>,
 
+    /// Share of the free memory used as the memory limit when --memory-limit is not
+    /// given: above 0, below 1 [default: 0.5]
+    #[arg(long, global = true, value_name = "SHARE", value_parser = share)]
+    memory_share: Option<f32>,
+
+    /// Share of the free memory kept as the reserve: batches are halved while less than
+    /// this is free; above 0, below 1 [default: 0.25]
+    #[arg(long, global = true, value_name = "SHARE", value_parser = share)]
+    reserve_share: Option<f32>,
+
+    /// The project directory: models are read and written below its models/, datasets
+    /// are looked for below its data/
+    #[arg(long, global = true, value_name = "DIR", default_value = ".")]
+    project: PathBuf,
+
     #[command(subcommand)]
     command: Command,
+}
+
+/// Reads the value of `--memory-share` and `--reserve-share`: a number above 0 and
+/// below 1 (owner decision of 2026-11-12, task 1.11).
+fn share(text: &str) -> Result<f32, String> {
+    match text.trim().parse::<f32>() {
+        Ok(share) if share > 0.0 && share < 1.0 => Ok(share),
+        _ => Err("a share is a number above 0 and below 1, for example 0.5".into()),
+    }
 }
 
 /// Reads the value of `--memory-limit`.
@@ -44,13 +71,26 @@ fn memory_size(text: &str) -> Result<u64, String> {
 }
 
 impl Cli {
-    /// The analyst's batch size and memory limit (requirement 12.2); what is not given
-    /// is left to the tool.
+    /// The analyst's batch size, memory limit and memory shares (requirement 12.2);
+    /// what is not given is left to the tool.
     fn memory_settings(&self) -> MemorySettings {
+        let defaults = MemorySettings::default();
         MemorySettings {
             memory_limit_bytes: self.memory_limit,
             max_batch_rows: self.batch_rows,
-            ..MemorySettings::default()
+            free_share: self.memory_share.unwrap_or(defaults.free_share),
+            reserve_share: self.reserve_share.unwrap_or(defaults.reserve_share),
+        }
+    }
+
+    /// What every command gets beside its own options.
+    fn context(&self) -> cmd::common::Context {
+        cmd::common::Context {
+            json: self.json,
+            project: self.project.clone(),
+            memory: self.memory_settings(),
+            memory_share_given: self.memory_share.is_some(),
+            reserve_share_given: self.reserve_share.is_some(),
         }
     }
 }
@@ -58,7 +98,7 @@ impl Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Read and summarize an input
-    Ingest,
+    Ingest(cmd::ingest::IngestArgs),
     /// Fit or apply the baseline scorer
     #[command(subcommand)]
     Baseline(cmd::baseline::BaselineCommand),
@@ -68,8 +108,10 @@ enum Command {
     /// Fill and query a store
     #[command(subcommand)]
     Store(cmd::store::StoreCommand),
-    /// Rank logs for review
-    Triage,
+    /// Rank logs for review, score down the rest, list what cannot be decided
+    Triage(cmd::triage::TriageArgs),
+    /// Calibrate a fitted scorer on held-out labelled logs
+    Calibrate(cmd::calibrate::CalibrateArgs),
     /// Compare two groups of logs for a population shift
     Shift,
     /// Measure a vector set
@@ -81,16 +123,17 @@ enum Command {
     Runtime(cmd::runtime::RuntimeCommand),
 }
 
-/// Runs one operation. `_memory` is what the analyst set for batch size and memory
-/// limit; every operation that loads a dataset observes its memory budget from it. No
-/// operation is wired yet, so nothing reads it.
-fn dispatch(command: &Command, _memory: &MemorySettings) -> Result<(), L2dError> {
+/// Runs one operation. `context` carries what the analyst set for the project, the
+/// output form and the memory; every operation that loads a dataset observes its memory
+/// budget from it before it reads anything.
+fn dispatch(command: &Command, context: &cmd::common::Context) -> Result<(), L2dError> {
     match command {
-        Command::Ingest => cmd::ingest::run(),
-        Command::Baseline(sub) => cmd::baseline::run(sub),
+        Command::Ingest(args) => cmd::ingest::run(context, args),
+        Command::Baseline(sub) => cmd::baseline::run(context, sub),
         Command::Encoder(sub) => cmd::encoder::run(sub),
         Command::Store(sub) => cmd::store::run(sub),
-        Command::Triage => cmd::triage::run(),
+        Command::Triage(args) => cmd::triage::run(context, args),
+        Command::Calibrate(args) => cmd::calibrate::run(context, args),
         Command::Shift => cmd::shift::run(),
         Command::Assess => cmd::assess::run(),
         Command::Eval => cmd::eval::run(),
@@ -136,10 +179,13 @@ fn main() -> ExitCode {
             _ => return fail(&usage_error(&error), json_requested(&args)),
         },
     };
-    match dispatch(&cli.command, &cli.memory_settings()) {
+    let code = match dispatch(&cli.command, &cli.context()) {
         Ok(()) => ExitCode::from(l2d_core::EXIT_SUCCESS),
         Err(error) => fail(&error, cli.json),
-    }
+    };
+    #[cfg(feature = "heap-report")]
+    heap::report();
+    code
 }
 
 #[cfg(test)]
@@ -206,5 +252,64 @@ mod tests {
             assert_eq!(error.kind(), ErrorKind::ValueValidation, "{args:?}");
             assert_eq!(usage_error(&error).exit_code(), 2);
         }
+    }
+
+    #[test]
+    fn the_memory_shares_become_memory_settings() {
+        let cli = Cli::try_parse_from([
+            "l2d",
+            "--memory-share",
+            "0.3",
+            "triage",
+            "--reserve-share=0.1",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.memory_settings(),
+            MemorySettings {
+                free_share: 0.3,
+                reserve_share: 0.1,
+                ..MemorySettings::default()
+            }
+        );
+        let context = cli.context();
+        assert!(context.memory_share_given && context.reserve_share_given);
+        let context = Cli::try_parse_from(["l2d", "ingest"]).unwrap().context();
+        assert!(!context.memory_share_given && !context.reserve_share_given);
+        assert_eq!(context.project, PathBuf::from("."));
+    }
+
+    #[test]
+    fn a_share_lies_strictly_between_zero_and_one() {
+        for text in ["0.5", "0.000001", "0.999", " 0.25 "] {
+            assert!(share(text).is_ok(), "{text}");
+        }
+        for text in [
+            "0", "1", "1.0", "-0.5", "2", "NaN", "inf", "-inf", "half", "", "50%",
+        ] {
+            assert!(share(text).is_err(), "{text}");
+            for option in ["--memory-share", "--reserve-share"] {
+                let error = Cli::try_parse_from(["l2d", option, text, "ingest"])
+                    .expect_err("must be refused");
+                assert_eq!(usage_error(&error).exit_code(), 2, "{option} {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_share_together_with_a_limit_is_refused_before_anything_is_read() {
+        let context = Cli::try_parse_from([
+            "l2d",
+            "--memory-share",
+            "0.3",
+            "--memory-limit",
+            "1GB",
+            "ingest",
+        ])
+        .unwrap()
+        .context();
+        let error = context.budget().unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("--memory-share"), "{error}");
     }
 }

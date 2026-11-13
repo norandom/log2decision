@@ -52,6 +52,7 @@
 //!                                        of ten pairs, line search, kept evaluations)
 //! + 6 * rows * 8                         per-row vectors of the solver
 //! + longest_text_bytes * ngram_max * 40  hashing one text
+//! + rows * 16                            the hashes of the fitted texts (below)
 //! ```
 //!
 //! `entries` comes from hashing a sample of up to [`ESTIMATE_SAMPLE_ROWS`] labelled rows
@@ -62,6 +63,21 @@
 //! the rows turn out to need more (a sample that is not typical of the frame), the rest
 //! is counted exactly and the budget is asked again before the matrix grows.
 //!
+//! Hashing a row takes memory too, and the sample hashes rows. So the budget is asked
+//! twice before the matrix exists: first, before any row is hashed, for every term but
+//! the entries (with the longest labelled text, found by a scan that allocates
+//! nothing); then for the whole estimate. A fit whose longest text alone cannot be
+//! hashed within the limit is refused by the first question, with nothing allocated;
+//! the sample hashes one row at a time and so stays within the hashing term.
+//! `tests/scorer_memory.rs` counts the heap of such a refusal (a few hundred bytes for
+//! a text of 2 MiB, where the sample used to take 64 MiB first).
+//!
+//! A load takes the files once: the weights are read in pieces of 64 KiB straight into
+//! their final form and the revision is hashed over the pieces as they pass, so the
+//! weights are never in memory twice ([`BaselineScorer::load_bytes`]; the same test
+//! file holds the heap of a load to that figure). Saving and the revision of a fit go
+//! over the weights in the same pieces.
+//!
 //! Measured on HTTP CSIC 2010 (25,608 rows, release build): keep is estimated at
 //! 161.6 MiB, the heap grows by 154.0 MiB at its peak and the working set of the process
 //! by 128 MiB; isolate is estimated at 193.6 MiB against 179.5 MiB of heap and 152 MiB
@@ -70,15 +86,20 @@
 //!
 //! # Saved form
 //!
-//! [`BaselineScorer::save`] writes `models/baselines/<name>-<rev12>/` with two files:
+//! [`BaselineScorer::save`] writes `models/baselines/<name>-<rev12>/` with three files
+//! (two for a scorer that does not know the texts it was fitted on, see below):
 //!
 //! - `weights.bin`: the weights as IEEE 754 doubles, little-endian, 8 bytes each, in
 //!   column order; `dimension * 8` bytes, where the dimension is
 //!   [`CharHasher::dimension`] (`buckets`, or `2 * buckets` with
 //!   [`RoutingMode::Isolate`]).
+//! - `fitted-texts.bin`: one hash per distinct text the scorer was fitted on, 16 bytes
+//!   each, sorted ascending as byte strings, each once (see "Fitted texts").
 //! - `baseline.json`: format number, kind, revision, tool version, the settings, the
-//!   dimension and the bias, the fit report, and the fitting inputs (source path, content
-//!   SHA-256, record and distinct-text counts). Every floating-point number is written
+//!   dimension and the bias, the fit report, the fitting inputs (source path, content
+//!   SHA-256, record and distinct-text counts), and under `fitted_texts` the name of
+//!   the hash file, the hash rule, the number of hashes and the SHA-256 of the file.
+//!   Every floating-point number is written
 //!   as `{"value": 1.0, "bits": "3ff0000000000000"}`; `bits` is the exact bit pattern in
 //!   hexadecimal and is what is read back, `value` is for the reader.
 //!
@@ -93,6 +114,68 @@
 //! through a temporary file in the same directory. The stored fit report is kept. A
 //! saved scorer therefore always names every input any saved copy of it was fitted on
 //! (requirement 11.1).
+//!
+//! ## Fitted texts
+//!
+//! The whole-input hashes above tell an identical file apart and nothing else: the same
+//! logs reordered, re-exported or cut into a subset have other bytes. So a fit also
+//! keeps a hash of every text it was fitted on (the rows labelled good or bad; rows
+//! labelled unknown are not fitted on), and calibration leaves out every calibration
+//! log whose text is among them (requirement 11.1, owner decision of 2026-11-12,
+//! task 1.11). The hash of a text is the first 16 bytes of the SHA-256 of its bytes
+//! ([`text_hash`], rule name `sha256-128`); a text is compared as its bytes, nothing is
+//! trimmed or folded. Two different texts share a hash with a probability of about
+//! `n^2 / 2^129` for `n` texts, which no dataset reaches; the effect would be one
+//! calibration log left out without need.
+//!
+//! The hashes are not part of the revision, like the fitting inputs: they describe
+//! what the model was fitted on, not the model. The revision of a model is the same
+//! with and without them, so calibrations made for a scorer stay valid when it gains
+//! its hashes. `baseline.json` carries the SHA-256 of `fitted-texts.bin`, and a load
+//! refuses a hash file that does not match it, has another length than its count, or
+//! is not sorted; `baseline.json` itself is not covered by the revision, as before.
+//!
+//! **Format numbers.** Format 1 (tasks 1.7 to 1.10) has no `fitted_texts` entry and no
+//! hash file. Format 2 (task 1.11 on) is format 1 plus the optional entry. Both load;
+//! a scorer of format 1 has [`BaselineScorer::has_fitted_text_hashes`] false and
+//! [`BaselineScorer::was_fitted_on_text`] `None`, and calibration falls back to the
+//! whole-input check for it. Everything is written as format 2. A scorer without
+//! hashes that is saved again stays without them (format 2 without the entry).
+//!
+//! On a save over a directory of the same revision the hashes are merged like the
+//! fitting inputs: a directory without hashes gains those of the scorer being saved
+//! (equal revisions mean bit-equal weights from equal settings, which this module
+//! already takes to mean the same fit), and two sets become their union. The hash file
+//! is replaced first and `baseline.json` second, each through a temporary file; when
+//! the process dies between the two after a union changed an existing hash file, the
+//! directory no longer loads (the file does not match the stated SHA-256) and the
+//! scorer has to be fitted again. A scorer without hashes saved over a directory that
+//! has them changes nothing, unless it names a fitting input the directory did not
+//! have.
+//!
+//! **Complete and incomplete sets.** The entry carries `complete`. A set is complete
+//! while it covers every fitting input the scorer names, and a fit's own set always
+//! is. It becomes incomplete, for good, when hashes join fitting inputs that were saved
+//! without hashes: a directory of format 1 gains the hashes of a new fit, but the
+//! texts of its earlier inputs are not known, unless the new fit was fitted on every
+//! one of those inputs (the same content hash means the same texts) and the directory
+//! names at least one. The same holds the other way round, when a scorer without
+//! hashes adds a fitting input to a directory that has them, and a union is complete
+//! only when both sets are. [`BaselineScorer::fitted_text_hashes_complete`] says
+//! which; for an incomplete set [`BaselineScorer::was_fitted_on_text`] still finds the
+//! texts it has, but its no is not a proof, and calibration reports the check per log
+//! as partial. Saving the refitted scorer under a new name gives a complete set.
+//!
+//! **What the check per log does and does not catch.** The text is hashed as the
+//! adapter read it, before any routing rule, so the hash is the same under keep, strip
+//! and isolate. A text that differs in one byte (a trailing space, another case,
+//! another encoding of the same request) is another text, by design. Under strip a
+//! calibration log with the same payload on another path is not left out, although the
+//! model sees the two alike. A text that occurred with both labels is unlabelled, is
+//! not fitted on and is not hashed.
+//!
+//! A loaded scorer keeps the hashes for as long as it lives, 16 bytes per fitted text
+//! ([`BaselineScorer::held_bytes`]); a fit counts them in its estimate.
 //!
 //! ## Revision
 //!
@@ -121,10 +204,11 @@
 //!
 //! Log text is hashed as bytes only. The scorer name is the only caller-supplied part of
 //! a path and is restricted to letters, digits, `.`, `_` and `-`. A stored source path
-//! is information for the reader and is never opened.
+//! is information for the reader and is never opened. The file name under
+//! `fitted_texts` must be `fitted-texts.bin`; any other name is refused and not opened.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -135,6 +219,7 @@ use l2d_core::{
     InputSummary, L2dError, Label, LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::hashing::{CharHasher, HashingSettings, RoutingMode};
 use crate::logreg::{LogReg, LogRegError, LogRegSettings, SparseMatrix, Termination};
@@ -194,6 +279,15 @@ pub const SCORES_NO_FEATURES: &str = "no_features";
 pub const MANIFEST_FILE: &str = "baseline.json";
 /// Name of the weights file in a scorer directory.
 pub const WEIGHTS_FILE: &str = "weights.bin";
+/// Name of the file with the hashes of the fitted texts in a scorer directory.
+pub const FITTED_TEXTS_FILE: &str = "fitted-texts.bin";
+/// Memory of a load beside the files: the piece of the weights being read (64 KiB) and
+/// what the description of the scorer takes. See [`BaselineScorer::load_bytes`].
+pub const LOAD_FIXED_BYTES: u64 = 128 * 1024;
+/// Bytes of the hash of one fitted text.
+pub const TEXT_HASH_BYTES: usize = 16;
+/// Name of the hash rule in `baseline.json`: the first 128 bits of the SHA-256.
+pub const TEXT_HASH_NAME: &str = "sha256-128";
 
 /// Longest accepted scorer name, in bytes.
 pub const MAX_NAME_BYTES: usize = 64;
@@ -202,8 +296,11 @@ pub const MAX_NAME_BYTES: usize = 64;
 const REVISION_CHARS: usize = 40;
 /// First bytes of the hashed content; changes when the hashed layout changes.
 const REVISION_DOMAIN: &[u8] = b"l2d-baseline-scorer/1\n";
-/// Format number of `baseline.json`.
-const FORMAT: u32 = 1;
+/// Format number of `baseline.json` as it is written: format 1 and the optional entry
+/// `fitted_texts`.
+const FORMAT: u32 = 2;
+/// The format of tasks 1.7 to 1.10, which is still read: no `fitted_texts`.
+const FORMAT_WITHOUT_TEXT_HASHES: u32 = 1;
 
 const ENTRY_BYTES: u64 = 12;
 const SOLVER_VECTORS: u64 = 48;
@@ -380,6 +477,81 @@ impl From<&InputSummary> for FittingInput {
     }
 }
 
+/// The hash of a text for the held-out check per log: the first [`TEXT_HASH_BYTES`]
+/// bytes of the SHA-256 of its bytes (see "Fitted texts" in the module documentation).
+pub fn text_hash(text: &str) -> [u8; TEXT_HASH_BYTES] {
+    let digest = Sha256::digest(text.as_bytes());
+    let mut hash = [0_u8; TEXT_HASH_BYTES];
+    hash.copy_from_slice(&digest[..TEXT_HASH_BYTES]);
+    hash
+}
+
+/// The hashes of the texts a scorer was fitted on: [`TEXT_HASH_BYTES`] bytes each, end
+/// to end, sorted ascending, each once. This is also the content of
+/// [`FITTED_TEXTS_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FittedTexts {
+    bytes: Vec<u8>,
+    /// Whether the hashes cover every fitting input the scorer names. `false` after
+    /// hashes were merged into a directory whose earlier fitting inputs came without
+    /// hashes (module documentation, "Fitted texts").
+    complete: bool,
+}
+
+impl FittedTexts {
+    fn from_hashes(mut hashes: Vec<[u8; TEXT_HASH_BYTES]>, complete: bool) -> Self {
+        hashes.sort_unstable();
+        hashes.dedup();
+        Self {
+            bytes: hashes.into_flattened(),
+            complete,
+        }
+    }
+
+    /// The hashes of a file, or what is wrong with it.
+    fn from_file_bytes(bytes: Vec<u8>, complete: bool) -> Result<Self, String> {
+        let (hashes, rest) = bytes.as_chunks::<TEXT_HASH_BYTES>();
+        if !rest.is_empty() {
+            return Err(format!(
+                "its {} bytes are not a whole number of {TEXT_HASH_BYTES}-byte hashes",
+                bytes.len()
+            ));
+        }
+        if !hashes.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err("its hashes are not sorted, or one occurs twice".into());
+        }
+        Ok(Self { bytes, complete })
+    }
+
+    fn hashes(&self) -> &[[u8; TEXT_HASH_BYTES]] {
+        self.bytes.as_chunks::<TEXT_HASH_BYTES>().0
+    }
+
+    fn len(&self) -> u64 {
+        self.hashes().len() as u64
+    }
+
+    fn contains(&self, hash: &[u8; TEXT_HASH_BYTES]) -> bool {
+        self.hashes().binary_search(hash).is_ok()
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        let mut hashes = self.hashes().to_vec();
+        hashes.extend_from_slice(other.hashes());
+        Self::from_hashes(hashes, self.complete && other.complete)
+    }
+
+    fn file(&self) -> FittedTextsFile {
+        FittedTextsFile {
+            file: FITTED_TEXTS_FILE.into(),
+            hash: TEXT_HASH_NAME.into(),
+            count: self.len(),
+            sha256: content_sha256(&self.bytes),
+            complete: self.complete,
+        }
+    }
+}
+
 /// A fitted baseline scorer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaselineScorer {
@@ -389,6 +561,9 @@ pub struct BaselineScorer {
     revision: String,
     report: BaselineFitReport,
     fitting_inputs: Vec<FittingInput>,
+    /// `None` for a scorer saved before task 1.11 (module documentation, "Fitted
+    /// texts").
+    fitted_texts: Option<FittedTexts>,
 }
 
 /// The labelled rows of a logs frame in frame order: the text, and whether it is bad.
@@ -450,6 +625,7 @@ impl FitEstimate {
             .saturating_add(rows)
             .saturating_add(solver)
             .saturating_add(hashing)
+            .saturating_add(rows.saturating_mul(TEXT_HASH_BYTES as u64))
     }
 
     /// Estimates the fit of the `rows` labelled rows of `logs` from a sample of them.
@@ -505,24 +681,71 @@ impl FitEstimate {
     }
 }
 
-/// The revision of a model: see "Revision" in the module documentation.
-fn revision_of(settings: &BaselineSettings, weight_bytes: &[u8], bias: f64) -> String {
-    let mut bytes = Vec::with_capacity(REVISION_DOMAIN.len() + 40 + weight_bytes.len());
-    bytes.extend_from_slice(REVISION_DOMAIN);
-    bytes.extend_from_slice(&settings.buckets.to_le_bytes());
-    bytes.push(settings.ngram_max);
-    bytes.push(routing_code(settings.routing));
-    bytes.extend_from_slice(&settings.l2.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&settings.max_iter.to_le_bytes());
-    bytes.extend_from_slice(&settings.tolerance.to_bits().to_le_bytes());
-    bytes.extend_from_slice(&((weight_bytes.len() / 8) as u64).to_le_bytes());
-    bytes.extend_from_slice(weight_bytes);
-    bytes.extend_from_slice(&bias.to_bits().to_le_bytes());
-    let mut revision = content_sha256(&bytes);
-    revision.truncate(REVISION_CHARS);
-    revision
+/// Computes the revision of a model piece by piece, so that the weights never have to
+/// exist a second time as bytes: see "Revision" in the module documentation.
+struct RevisionHasher(Sha256);
+
+impl RevisionHasher {
+    /// Starts with everything that comes before the weights.
+    fn new(settings: &BaselineSettings, dimension: u64) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(REVISION_DOMAIN);
+        hash.update(settings.buckets.to_le_bytes());
+        hash.update([settings.ngram_max, routing_code(settings.routing)]);
+        hash.update(settings.l2.to_bits().to_le_bytes());
+        hash.update(settings.max_iter.to_le_bytes());
+        hash.update(settings.tolerance.to_bits().to_le_bytes());
+        hash.update(dimension.to_le_bytes());
+        Self(hash)
+    }
+
+    /// The next bytes of the weights, as they are in `weights.bin`.
+    fn weight_bytes(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// Ends with the bias and returns the revision.
+    fn finish(mut self, bias: f64) -> String {
+        self.0.update(bias.to_bits().to_le_bytes());
+        let mut revision: String = self
+            .0
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        revision.truncate(REVISION_CHARS);
+        revision
+    }
 }
 
+/// How many weights are turned into bytes, or read, at a time: 64 KiB.
+const WEIGHTS_AT_A_TIME: usize = 8 * 1024;
+
+/// Hands the bytes of `weights` (little-endian doubles, as in `weights.bin`) to `take`
+/// in pieces of at most [`WEIGHTS_AT_A_TIME`] weights.
+fn weight_pieces<E>(
+    weights: &[f64],
+    mut take: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut piece = [0_u8; WEIGHTS_AT_A_TIME * 8];
+    for weights in weights.chunks(WEIGHTS_AT_A_TIME) {
+        for (bytes, weight) in piece.as_chunks_mut::<8>().0.iter_mut().zip(weights) {
+            *bytes = weight.to_bits().to_le_bytes();
+        }
+        take(&piece[..weights.len() * 8])?;
+    }
+    Ok(())
+}
+
+/// The revision of a model.
+fn revision_of(settings: &BaselineSettings, weights: &[f64], bias: f64) -> String {
+    let mut hash = RevisionHasher::new(settings, weights.len() as u64);
+    let _ = weight_pieces(weights, |bytes| {
+        hash.weight_bytes(bytes);
+        Ok::<(), std::convert::Infallible>(())
+    });
+    hash.finish(bias)
+}
 fn routing_code(routing: RoutingMode) -> u8 {
     match routing {
         RoutingMode::Keep => 0,
@@ -565,12 +788,65 @@ fn termination_from_name(name: &str) -> Option<Termination> {
     }
 }
 
-fn weight_bytes(weights: &[f64]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(weights.len() * 8);
-    for weight in weights {
-        bytes.extend_from_slice(&weight.to_bits().to_le_bytes());
+/// Writes `weights.bin`: the weights piece by piece, never as a second copy in memory.
+fn write_weights(path: &Path, weights: &[f64]) -> Result<(), L2dError> {
+    let failed = |error: std::io::Error| io_failure("writing", path, &error);
+    let mut file = fs::File::create(path).map_err(failed)?;
+    weight_pieces(weights, |bytes| file.write_all(bytes)).map_err(failed)?;
+    file.sync_all().map_err(failed)
+}
+
+/// Reads `weights.bin` of `dimension` weights straight into their final form, in
+/// pieces of [`WEIGHTS_AT_A_TIME`] weights that are also handed to `hash`. A file of
+/// another length is refused.
+fn read_weights(
+    dir: &Path,
+    dimension: usize,
+    hash: &mut RevisionHasher,
+) -> Result<Vec<f64>, L2dError> {
+    let path = dir.join(WEIGHTS_FILE);
+    let mut file = fs::File::open(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            L2dError::Missing {
+                item: format!("baseline scorer file {WEIGHTS_FILE}"),
+                expected_at: path.clone(),
+            }
+        } else {
+            io_failure("reading", &path, &error)
+        }
+    })?;
+    let wrong_length = || {
+        not_a_scorer(
+            dir,
+            format!(
+                "{WEIGHTS_FILE} does not hold exactly the {} bytes of dimension {dimension}",
+                dimension * 8
+            ),
+        )
+    };
+    let failed = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::UnexpectedEof => wrong_length(),
+        _ => io_failure("reading", &path, &error),
+    };
+    let mut weights = Vec::with_capacity(dimension);
+    let mut piece = [0_u8; WEIGHTS_AT_A_TIME * 8];
+    while weights.len() < dimension {
+        let bytes = &mut piece[..(dimension - weights.len()).min(WEIGHTS_AT_A_TIME) * 8];
+        file.read_exact(bytes).map_err(failed)?;
+        hash.weight_bytes(bytes);
+        weights.extend(
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|bits| f64::from_bits(u64::from_le_bytes(*bits))),
+        );
     }
-    bytes
+    match file.read(&mut piece[..1]) {
+        Ok(0) => Ok(weights),
+        Ok(_) => Err(wrong_length()),
+        Err(error) => Err(io_failure("reading", &path, &error)),
+    }
 }
 
 /// A floating-point number in `baseline.json`: readable, and exact.
@@ -640,12 +916,36 @@ struct Manifest {
     model: ModelFile,
     fit: FitFile,
     fitting_inputs: Vec<FittingInput>,
+    /// Absent in format 1 and for a scorer that does not know its fitted texts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fitted_texts: Option<FittedTextsFile>,
+}
+
+/// The entry `fitted_texts` of `baseline.json`.
+#[derive(Debug, Serialize, Deserialize)]
+struct FittedTextsFile {
+    /// Always [`FITTED_TEXTS_FILE`]; any other name is refused, never opened.
+    file: String,
+    /// Always [`TEXT_HASH_NAME`].
+    hash: String,
+    /// The number of hashes in the file.
+    count: u64,
+    /// SHA-256 of the file's bytes.
+    sha256: String,
+    /// Whether the hashes cover every fitting input named in `fitting_inputs`; absent
+    /// means yes.
+    #[serde(default = "complete_by_default")]
+    complete: bool,
+}
+
+fn complete_by_default() -> bool {
+    true
 }
 
 /// Checks a scorer name: 1 to [`MAX_NAME_BYTES`] characters out of letters, digits, `.`,
 /// `_` and `-`, not starting with a dot. That excludes path separators, `..`, drive
 /// prefixes and anything a shell or the file system treats specially.
-fn validate_name(name: &str) -> Result<(), L2dError> {
+pub fn validate_name(name: &str) -> Result<(), L2dError> {
     let usable = !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && !name.starts_with('.')
@@ -742,6 +1042,22 @@ impl BaselineScorer {
         }
         let rows = (good + bad) as usize;
 
+        // Before a row is hashed: what the fit needs whatever its rows hash to (hashing
+        // the longest text, the solver's vectors, the per-row vectors, the hashes of
+        // the texts). A fit that cannot have even that is refused here, with nothing
+        // allocated (requirement 12.5). The sample below hashes one row at a time, so
+        // it stays within the hashing term that was just asked for.
+        let longest_text = labelled_rows(logs)
+            .map(|(text, _)| text.len() as u64)
+            .max()
+            .unwrap_or(0);
+        budget
+            .require_whole(
+                FitEstimate::bytes_for(0, rows as u64, &hasher, longest_text),
+                OPERATION,
+            )
+            .map_err(FitError::Memory)?;
+
         let mut estimate = FitEstimate::sample(logs, &hasher, rows);
         budget
             .require_whole(estimate.bytes, OPERATION)
@@ -750,8 +1066,10 @@ impl BaselineScorer {
         let mut matrix =
             SparseMatrix::with_capacity(hasher.dimension(), rows, estimate.entries as usize);
         let mut labels = Vec::with_capacity(rows);
+        let mut text_hashes = Vec::with_capacity(rows);
         let mut no_feature_rows = 0;
         for (index, (text, bad)) in labelled_rows(logs).enumerate() {
+            text_hashes.push(text_hash(text));
             let row = hasher.row(text);
             if (matrix.stored() + row.len()) as u64 > estimate.entries {
                 // The sample was not typical. Count the rest exactly and ask again.
@@ -792,7 +1110,7 @@ impl BaselineScorer {
             stored_entries,
             estimated_bytes: estimate.bytes,
         };
-        let revision = revision_of(settings, &weight_bytes(model.weights()), model.bias());
+        let revision = revision_of(settings, model.weights(), model.bias());
         Ok(Self {
             settings: *settings,
             hasher,
@@ -800,6 +1118,7 @@ impl BaselineScorer {
             revision,
             report,
             fitting_inputs: inputs.iter().map(FittingInput::from).collect(),
+            fitted_texts: Some(FittedTexts::from_hashes(text_hashes, true)),
         })
     }
 
@@ -844,6 +1163,75 @@ impl BaselineScorer {
         self.fitting_inputs
             .iter()
             .any(|input| input.content_sha256.eq_ignore_ascii_case(content_sha256))
+    }
+
+    /// Whether the scorer knows the texts it was fitted on (module documentation,
+    /// "Fitted texts"). `false` for a scorer saved before task 1.11: for it only the
+    /// whole-input check of [`BaselineScorer::was_fitted_on`] exists.
+    pub fn has_fitted_text_hashes(&self) -> bool {
+        self.fitted_texts.is_some()
+    }
+
+    /// How many distinct texts the scorer knows it was fitted on; `None` when it does
+    /// not know them.
+    pub fn fitted_text_hashes(&self) -> Option<u64> {
+        self.fitted_texts.as_ref().map(FittedTexts::len)
+    }
+
+    /// Whether the hashes cover every fitting input the scorer names: `Some(false)`
+    /// after hashes were merged into a saved scorer whose earlier fitting inputs came
+    /// without them, so that [`BaselineScorer::was_fitted_on_text`] can say yes for a
+    /// text but its no is not a proof; `None` when the scorer has no hashes.
+    pub fn fitted_text_hashes_complete(&self) -> Option<bool> {
+        self.fitted_texts.as_ref().map(|texts| texts.complete)
+    }
+
+    /// Whether the scorer was fitted on a log with exactly this text (requirement
+    /// 11.1, per log); `None` when the scorer does not know the texts it was fitted on.
+    pub fn was_fitted_on_text(&self, text: &str) -> Option<bool> {
+        self.fitted_texts
+            .as_ref()
+            .map(|texts| texts.contains(&text_hash(text)))
+    }
+
+    /// The memory the scorer keeps for as long as it lives, fitted or loaded, in bytes
+    /// (requirement 12.9): the weights (8 bytes per column), the hashes of the fitted
+    /// texts ([`TEXT_HASH_BYTES`] each), and the description of its fitting inputs.
+    pub fn held_bytes(&self) -> u64 {
+        let inputs: usize = self
+            .fitting_inputs
+            .iter()
+            .map(|input| {
+                size_of::<FittingInput>() + input.source_path.len() + input.content_sha256.len()
+            })
+            .sum();
+        let texts = self
+            .fitted_texts
+            .as_ref()
+            .map_or(0, |texts| texts.bytes.capacity());
+        (size_of::<Self>()
+            + size_of_val(self.model.weights())
+            + texts
+            + inputs
+            + self.revision.len()) as u64
+    }
+
+    /// The memory [`BaselineScorer::load`] of `dir` takes at its peak, in bytes, from
+    /// the sizes of the files and without reading them: the weights once (they are
+    /// read in pieces of 64 KiB straight into their final form and hashed as they
+    /// pass), the hash file once, `baseline.json` eight times (the text and what is
+    /// parsed from it), and [`LOAD_FIXED_BYTES`] for the piece being read and the
+    /// rest. 0 when no file is there; the load itself reports that.
+    /// `tests/scorer_memory.rs` holds the heap of a load to this figure.
+    pub fn load_bytes(dir: &Path) -> u64 {
+        let size = |file: &str| fs::metadata(dir.join(file)).map_or(0, |found| found.len());
+        let files = size(WEIGHTS_FILE)
+            .saturating_add(size(FITTED_TEXTS_FILE))
+            .saturating_add(size(MANIFEST_FILE).saturating_mul(8));
+        match files {
+            0 => 0,
+            files => files.saturating_add(LOAD_FIXED_BYTES),
+        }
     }
 
     /// The fitted weights, one per column of the feature space.
@@ -954,6 +1342,7 @@ impl BaselineScorer {
                 estimated_bytes: self.report.estimated_bytes,
             },
             fitting_inputs: self.fitting_inputs.clone(),
+            fitted_texts: self.fitted_texts.as_ref().map(FittedTexts::file),
         }
     }
 
@@ -1000,12 +1389,48 @@ impl BaselineScorer {
                     // The same model: only the fitting inputs can differ. Stored
                     // inputs keep their place; inputs not yet stored follow.
                     let known = stored.fitting_inputs.len();
+                    // Whether this scorer was fitted on every input the directory
+                    // names (and it names one): then this scorer's hashes cover them.
+                    let covers_stored = known > 0
+                        && stored
+                            .fitting_inputs
+                            .iter()
+                            .all(|input| self.was_fitted_on(&input.content_sha256));
                     for input in &self.fitting_inputs {
                         if !stored.was_fitted_on(&input.content_sha256) {
                             stored.fitting_inputs.push(input.clone());
                         }
                     }
-                    if stored.fitting_inputs.len() != known {
+                    // The hashes of the fitted texts likewise: a directory without
+                    // them gains this scorer's, two sets become their union.
+                    // A set is complete only while it covers every input named: hashes
+                    // that join inputs saved without hashes, or inputs that join
+                    // without hashes, leave it incomplete.
+                    let adds_inputs = stored.fitting_inputs.len() != known;
+                    let texts = match (&stored.fitted_texts, &self.fitted_texts) {
+                        (None, Some(own)) => Some(FittedTexts {
+                            bytes: own.bytes.clone(),
+                            complete: own.complete && covers_stored,
+                        }),
+                        (Some(have), Some(own)) => Some(have.union(own)).filter(|all| all != have),
+                        (Some(have), None) if adds_inputs && have.complete => Some(FittedTexts {
+                            bytes: have.bytes.clone(),
+                            complete: false,
+                        }),
+                        (_, None) => None,
+                    };
+                    let texts_changed = texts.is_some();
+                    if let Some(texts) = texts {
+                        let same_file = stored
+                            .fitted_texts
+                            .as_ref()
+                            .is_some_and(|have| have.bytes == texts.bytes);
+                        if !same_file {
+                            replace_file(&dir, FITTED_TEXTS_FILE, &texts.bytes)?;
+                        }
+                        stored.fitted_texts = Some(texts);
+                    }
+                    if stored.fitting_inputs.len() != known || texts_changed {
                         stored.replace_manifest(&dir)?;
                     }
                     Ok(dir)
@@ -1046,7 +1471,10 @@ impl BaselineScorer {
     }
 
     fn write_files(&self, dir: &Path) -> Result<(), L2dError> {
-        write_file(&dir.join(WEIGHTS_FILE), &weight_bytes(self.model.weights()))?;
+        write_weights(&dir.join(WEIGHTS_FILE), self.model.weights())?;
+        if let Some(texts) = &self.fitted_texts {
+            write_file(&dir.join(FITTED_TEXTS_FILE), &texts.bytes)?;
+        }
         write_file(&dir.join(MANIFEST_FILE), self.manifest_json()?.as_bytes())
     }
 
@@ -1054,21 +1482,7 @@ impl BaselineScorer {
     /// scorer's: written under a temporary name in `dir`, then renamed over the old
     /// file, so the directory holds the old file or the new one, never a partial one.
     fn replace_manifest(&self, dir: &Path) -> Result<(), L2dError> {
-        let target = dir.join(MANIFEST_FILE);
-        let temporary = dir.join(format!(
-            ".{MANIFEST_FILE}.saving-{}-{}",
-            std::process::id(),
-            SAVES.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = write_file(&temporary, self.manifest_json()?.as_bytes()).and_then(|()| {
-            fs::rename(&temporary, &target)
-                .map_err(|error| io_failure("replacing", &target, &error))
-        });
-        if written.is_err() {
-            // Best effort: the failure itself is what the caller has to see.
-            let _ = fs::remove_file(&temporary);
-        }
-        written
+        replace_file(dir, MANIFEST_FILE, self.manifest_json()?.as_bytes())
     }
 
     /// Loads a scorer directory after checking that `dir` lies below the project's
@@ -1106,13 +1520,24 @@ impl BaselineScorer {
         let manifest: Manifest = serde_json::from_slice(&manifest).map_err(|error| {
             not_a_scorer(dir, format!("{MANIFEST_FILE} is not readable: {error}"))
         })?;
-        if manifest.format != FORMAT || manifest.kind != SCORER_KIND {
+        let known_format =
+            manifest.format == FORMAT || manifest.format == FORMAT_WITHOUT_TEXT_HASHES;
+        if !known_format || manifest.kind != SCORER_KIND {
             return Err(not_a_scorer(
                 dir,
                 format!(
-                    "{MANIFEST_FILE} has format {} and kind '{}', expected {FORMAT} and \
-                     '{SCORER_KIND}'",
+                    "{MANIFEST_FILE} has format {} and kind '{}', expected format \
+                     {FORMAT_WITHOUT_TEXT_HASHES} or {FORMAT} and kind '{SCORER_KIND}'",
                     manifest.format, manifest.kind
+                ),
+            ));
+        }
+        if manifest.format == FORMAT_WITHOUT_TEXT_HASHES && manifest.fitted_texts.is_some() {
+            return Err(not_a_scorer(
+                dir,
+                format!(
+                    "{MANIFEST_FILE} has format {FORMAT_WITHOUT_TEXT_HASHES}, which has no \
+                     entry fitted_texts, and yet has one"
                 ),
             ));
         }
@@ -1180,23 +1605,21 @@ impl BaselineScorer {
             }
             Err(_) => {}
         }
-        let bytes = read_scorer_file(dir, WEIGHTS_FILE)?;
-        if bytes.len() as u64 != expected_bytes
-            || manifest.model.dimension != u64::from(hasher.dimension())
-        {
+        if manifest.model.dimension != u64::from(hasher.dimension()) {
             return Err(not_a_scorer(
                 dir,
                 format!(
-                    "{WEIGHTS_FILE} has {} bytes and {MANIFEST_FILE} states dimension {}, but \
-                     the settings give dimension {}",
-                    bytes.len(),
+                    "{MANIFEST_FILE} states dimension {}, but the settings give dimension {}",
                     manifest.model.dimension,
                     hasher.dimension()
                 ),
             ));
         }
-
-        let revision = revision_of(&settings, &bytes, bias);
+        // The weights are read once, straight into their final form, and hashed as
+        // they pass: the load never holds them twice (module documentation, "Memory").
+        let mut hash = RevisionHasher::new(&settings, u64::from(hasher.dimension()));
+        let weights = read_weights(dir, hasher.dimension() as usize, &mut hash)?;
+        let revision = hash.finish(bias);
         if revision != manifest.revision {
             return Err(L2dError::Refused {
                 reason: format!(
@@ -1222,13 +1645,12 @@ impl BaselineScorer {
             });
         }
 
-        let weights = bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|bits| f64::from_bits(u64::from_le_bytes(*bits)))
-            .collect();
         let model = LogReg::from_parts(weights, bias).map_err(|error| not_a_scorer(dir, error))?;
+        let fitted_texts = manifest
+            .fitted_texts
+            .as_ref()
+            .map(|stated| read_fitted_texts(dir, stated))
+            .transpose()?;
         Ok(Self {
             settings,
             hasher,
@@ -1236,6 +1658,66 @@ impl BaselineScorer {
             revision,
             report,
             fitting_inputs: manifest.fitting_inputs,
+            fitted_texts,
         })
     }
+}
+
+/// Reads and verifies the hash file `baseline.json` describes under `fitted_texts`.
+fn read_fitted_texts(dir: &Path, stated: &FittedTextsFile) -> Result<FittedTexts, L2dError> {
+    let unusable = |why: String| {
+        not_a_scorer(
+            dir,
+            format!("the entry fitted_texts of {MANIFEST_FILE} is not usable: {why}"),
+        )
+    };
+    // The name is compared, never used: only the one file of this directory is opened.
+    if stated.file != FITTED_TEXTS_FILE {
+        return Err(unusable(format!(
+            "it names a file other than {FITTED_TEXTS_FILE}"
+        )));
+    }
+    if stated.hash != TEXT_HASH_NAME {
+        return Err(unusable(format!(
+            "it states the hash rule '{}', expected '{TEXT_HASH_NAME}'",
+            stated.hash
+        )));
+    }
+    let bytes = read_scorer_file(dir, FITTED_TEXTS_FILE)?;
+    let found_sha256 = content_sha256(&bytes);
+    let texts = FittedTexts::from_file_bytes(bytes, stated.complete)
+        .map_err(|why| unusable(format!("{FITTED_TEXTS_FILE} does not verify: {why}")))?;
+    if texts.len() != stated.count {
+        return Err(unusable(format!(
+            "it states {} fitted texts, but {FITTED_TEXTS_FILE} holds {}",
+            stated.count,
+            texts.len()
+        )));
+    }
+    if !found_sha256.eq_ignore_ascii_case(&stated.sha256) {
+        return Err(unusable(format!(
+            "{FITTED_TEXTS_FILE} does not have the SHA-256 it states"
+        )));
+    }
+    Ok(texts)
+}
+
+/// Replaces `file` of the existing scorer directory `dir`: written under a temporary
+/// name in `dir`, then renamed over the old file, so the directory holds the old file
+/// or the new one, never a partial one.
+fn replace_file(dir: &Path, file: &str, bytes: &[u8]) -> Result<(), L2dError> {
+    let target = dir.join(file);
+    let temporary = dir.join(format!(
+        ".{file}.saving-{}-{}",
+        std::process::id(),
+        SAVES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = write_file(&temporary, bytes).and_then(|()| {
+        fs::rename(&temporary, &target).map_err(|error| io_failure("replacing", &target, &error))
+    });
+    if written.is_err() {
+        // Best effort: the failure itself is what the caller has to see.
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }

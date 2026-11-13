@@ -488,6 +488,14 @@ impl TriageResult {
         self.list(TriageList::Abstained)
     }
 
+    /// The rows of one list as row numbers of the triage frame, in the list's reading
+    /// order. Reading a list through these takes no memory beyond the result itself,
+    /// where [`TriageResult::list`] makes a second frame (task 1.11: the command prints
+    /// row by row).
+    pub fn rows(&self, list: TriageList) -> &[IdxSize] {
+        &self.order[list as usize]
+    }
+
     /// The rows of one list, in its reading order.
     pub fn list(&self, list: TriageList) -> Result<DataFrame, L2dError> {
         let rows = &self.order[list as usize];

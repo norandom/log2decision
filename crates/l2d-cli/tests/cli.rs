@@ -2,6 +2,8 @@
 //!
 //! Every operation of the design's command table is reachable, accepts `--json`, and, until
 //! its task wires it, fails with a non-zero exit code and one line stating what failed.
+//! The operations task 1.11 wired (`ingest`, `baseline fit`, `baseline score`,
+//! `calibrate`, `triage`) are tested in `tests/commands.rs`.
 
 use std::process::{Command, Output};
 
@@ -16,6 +18,20 @@ const OPERATIONS: &[&[&str]] = &[
     &["store", "add"],
     &["store", "search"],
     &["triage"],
+    &["calibrate"],
+    &["shift"],
+    &["assess"],
+    &["eval"],
+    &["runtime", "check"],
+];
+
+/// The operations that no task has wired yet.
+const STUBS: &[&[&str]] = &[
+    &["encoder", "train"],
+    &["encoder", "encode"],
+    &["encoder", "info"],
+    &["store", "add"],
+    &["store", "search"],
     &["shift"],
     &["assess"],
     &["eval"],
@@ -58,7 +74,16 @@ fn help_lists_every_top_level_subcommand_and_the_json_flag() {
     assert_eq!(output.status.code(), Some(0));
     let help = stdout(&output);
     for name in [
-        "ingest", "baseline", "encoder", "store", "triage", "shift", "assess", "eval", "runtime",
+        "ingest",
+        "baseline",
+        "encoder",
+        "store",
+        "triage",
+        "calibrate",
+        "shift",
+        "assess",
+        "eval",
+        "runtime",
     ] {
         assert!(
             lists_subcommand(&help, name),
@@ -107,7 +132,7 @@ fn every_operation_accepts_the_json_flag_in_its_own_help() {
 
 #[test]
 fn every_stub_exits_non_zero_with_one_line_on_stderr() {
-    for operation in OPERATIONS {
+    for operation in STUBS {
         let name = operation.join(" ");
         let output = l2d(operation);
         assert_eq!(output.status.code(), Some(4), "exit code of l2d {name}");
@@ -127,8 +152,8 @@ fn every_stub_exits_non_zero_with_one_line_on_stderr() {
 fn json_flag_puts_a_machine_readable_error_on_stdout() {
     // The flag is global: it is accepted before and after the subcommand.
     for args in [
-        &["--json", "ingest"][..],
-        &["ingest", "--json"][..],
+        &["--json", "shift"][..],
+        &["shift", "--json"][..],
         &["store", "search", "--json"][..],
         &["store", "--json", "search"][..],
     ] {
@@ -174,10 +199,10 @@ fn every_help_shows_the_batch_size_and_memory_limit_options() {
 #[test]
 fn batch_size_and_memory_limit_are_accepted_before_and_after_the_operation() {
     for args in [
-        &["--batch-rows", "10000", "ingest"][..],
-        &["ingest", "--batch-rows", "10000"][..],
-        &["--memory-limit", "2GB", "ingest"][..],
-        &["ingest", "--memory-limit", "536870912"][..],
+        &["--batch-rows", "10000", "shift"][..],
+        &["shift", "--batch-rows", "10000"][..],
+        &["--memory-limit", "2GB", "shift"][..],
+        &["shift", "--memory-limit", "536870912"][..],
         &["--memory-limit=512MB", "--batch-rows=1024", "store", "add"][..],
         &["store", "--batch-rows", "1", "add", "--memory-limit", "64k"][..],
         &[
