@@ -4,7 +4,10 @@
 //!
 //! - In the model's own layout, a batch along the first dimension, only the first text
 //!   of a batch is computed right. The other rows are wrong from the first convolution
-//!   on, by as much as different texts differ, and depend on the other texts.
+//!   on, by as much as different texts differ. A row's vector changed when all other
+//!   rows changed (seen once, in an exploration that is not committed), while row 1
+//!   keeps its vector when only rows 2 to 31 are exchanged (printed here): which rows
+//!   a row depends on was not worked out.
 //!   `in_the_batch_layout_only_the_first_row_is_right` records this and fails when it
 //!   stops being true, so that a runtime release that repairs it is noticed.
 //! - With the texts laid along the height of one image

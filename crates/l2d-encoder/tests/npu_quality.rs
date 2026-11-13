@@ -356,6 +356,15 @@ fn the_vectors_from_the_npu_are_scored_as_the_science_gate_scored() {
         line(format!("seed {seed} ({} folds)", rows.len()), rows);
     }
     line(format!("all {} runs", all.len()), &all);
+    // The linear head is the stable figure (the neighbour ratio at k = 11 moves with the
+    // rule for equally near vectors): over the runs scored, its mean ROC AUC from the
+    // NPU's vectors must be the recorded one within 0.01.
+    let (head_npu, head_recorded) = mean(&all, 0);
+    assert!(
+        (head_npu - head_recorded).abs() <= 0.01,
+        "the linear head's mean cross-endpoint ROC AUC from the NPU's vectors is \
+         {head_npu:.4}, the science gate recorded {head_recorded:.4} for the same runs"
+    );
     let largest = (0..5)
         .map(|metric| {
             all.iter()

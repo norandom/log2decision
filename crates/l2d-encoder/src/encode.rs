@@ -190,19 +190,26 @@ pub fn read_rows(output: &[f32], rows: usize, used: usize, vectors: &mut [f32]) 
 }
 
 /// The name of the provider's cache folder for one compiled model: the first twelve
-/// characters of the encoder revision, the runtime release, and eight hexadecimal
-/// characters of a digest over everything else that decides what the provider compiles
-/// (`compile_inputs`: names with their values, in the order given; task 2.12 found that
-/// they must include a digest of the model file that is actually handed to the
-/// provider, its layout and rows, and every provider option). Two sessions may share a
-/// compiled model only when all three parts agree.
+/// characters of the encoder revision, the runtime release, and sixteen hexadecimal
+/// characters of a digest over what the provider compiles: `model`, the bytes of the
+/// model file that is actually handed to the provider (after any rewrite: they carry
+/// the layout and the rows), and `options`, every provider option with its value, in
+/// the order given.
+///
+/// The provider looks at nothing but this name (task 2.12): under a name that is
+/// reused it runs the old compile, without an error, and for another model of the
+/// same shape that gives wrong vectors. Two sessions may share a compiled model only
+/// when all three parts agree.
 pub fn provider_cache_key(
     revision: &str,
     release: &str,
-    compile_inputs: &[(&str, &str)],
+    model: &[u8],
+    options: &[(&str, &str)],
 ) -> String {
     let mut digest = Sha256::new();
-    for (name, value) in compile_inputs {
+    digest.update((model.len() as u64).to_le_bytes());
+    digest.update(Sha256::digest(model));
+    for (name, value) in options {
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
         digest.update((value.len() as u64).to_le_bytes());
@@ -211,7 +218,7 @@ pub fn provider_cache_key(
     let digest: String = digest
         .finalize()
         .iter()
-        .take(4)
+        .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let revision: String = revision.chars().take(12).collect();
@@ -381,26 +388,45 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_key_names_revision_release_and_compile_inputs() {
+    fn the_cache_key_names_revision_release_model_and_options() {
         let revision = "099570ec739ce4d0548c2d15629e857cf516664f";
-        let inputs = [("layout", "rows-as-height"), ("rows", "64")];
-        let key = provider_cache_key(revision, "1.9.0", &inputs);
+        let model = b"the bytes handed to the provider";
+        let options = [("opt_level", "0"), ("target", "X2")];
+        let key = provider_cache_key(revision, "1.9.0", model, &options);
         assert!(key.starts_with("099570ec739c-1.9.0-"), "{key}");
-        assert_eq!(key.len(), 12 + 1 + 5 + 1 + 8);
-        assert_eq!(key, provider_cache_key(revision, "1.9.0", &inputs));
+        assert_eq!(key.len(), 12 + 1 + 5 + 1 + 16);
+        assert!(key[19..].chars().all(|c| c.is_ascii_hexdigit()), "{key}");
+        assert_eq!(key, provider_cache_key(revision, "1.9.0", model, &options));
         for other in [
-            provider_cache_key("199570ec739ce4d0548c2d15629e857cf516664f", "1.9.0", &inputs),
-            provider_cache_key(revision, "1.10.0", &inputs),
             provider_cache_key(
-                revision,
+                "199570ec739ce4d0548c2d15629e857cf516664f",
                 "1.9.0",
-                &[("layout", "rows-as-height"), ("rows", "32")],
+                model,
+                &options,
             ),
-            provider_cache_key(revision, "1.9.0", &[]),
+            provider_cache_key(revision, "1.10.0", model, &options),
+            // One byte of the model, its length, an option's value, an option less, and
+            // a byte moved between a name and its value.
             provider_cache_key(
                 revision,
                 "1.9.0",
-                &[("layoutrows", "-as-height"), ("rows", "64")],
+                b"The bytes handed to the provider",
+                &options,
+            ),
+            provider_cache_key(revision, "1.9.0", &model[..31], &options),
+            provider_cache_key(
+                revision,
+                "1.9.0",
+                model,
+                &[("opt_level", "3"), ("target", "X2")],
+            ),
+            provider_cache_key(revision, "1.9.0", model, &options[..1]),
+            provider_cache_key(revision, "1.9.0", model, &[]),
+            provider_cache_key(
+                revision,
+                "1.9.0",
+                model,
+                &[("opt_leve", "l0"), ("target", "X2")],
             ),
         ] {
             assert_ne!(key, other);

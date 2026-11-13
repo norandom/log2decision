@@ -686,9 +686,20 @@ fn ends_edit(model: &[u8], open: QuantizedEnds) -> Result<Vec<u8>, String> {
 /// The arithmetic of each text is that of the original graph. Whoever feeds the model
 /// writes `x[0, c, n, t]` for text `n`, and reads `e[0, d, n, 0]`.
 ///
-/// Refused unless the graph is the encoder's: operators of [`BATCH_FREE_OPERATORS`], one
-/// `GlobalAveragePool` whose input length the file records, `Flatten` at axis 1, and a
-/// `Gemm` with `transB = 1` and no scaling.
+/// Refused unless the rewrite is known to compute the same for every text:
+///
+/// - only operators of [`BATCH_FREE_OPERATORS`];
+/// - every `Conv` keeps the rows of an image apart: its stored weight is
+///   `[out, in, 1, width]`, and along the height it has no padding, stride 1 and
+///   dilation 1, with `auto_pad` absent or `NOTSET`;
+/// - a quantize node on the path of the texts has one scale, or one per channel;
+/// - one `GlobalAveragePool` whose input `[batch, channels, 1, length]` the file
+///   records, one `Flatten` at axis 1 that reads the pool's output (directly or through
+///   a quantize pair), one `Gemm` that reads the flattened tensor;
+/// - a quantize pair behind `Flatten` has the scale and zero point of the pair before
+///   it (it is removed with `Flatten`);
+/// - the `Gemm` is `y = x W^T + b` (`transB = 1`, `transA = 0`, `alpha = beta = 1`)
+///   with a stored weight `[out, in]` and a stored bias `[out]`.
 pub fn with_rows_as_height(model: &[u8], rows: u32) -> Result<Vec<u8>, L2dError> {
     height_edit(model, rows).map_err(refused)
 }
@@ -760,6 +771,133 @@ fn with_dims(tensor: &[u8], dims: &[i64]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The `AttributeProto` named `name` of a node, when it has one.
+fn attribute<'a>(node: &'a [u8], name: &str) -> Result<Option<&'a [u8]>, String> {
+    for field in split(node, "a node")? {
+        if field.number != 5 || field.wire != 2 {
+            continue;
+        }
+        for part in split(field.payload, "an attribute")? {
+            if part.number == 1 && part.wire == 2 && part.payload == name.as_bytes() {
+                return Ok(Some(field.payload));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The list of integers an attribute holds (`ints`, one per field or packed).
+fn ints_of(attribute: &[u8]) -> Result<Vec<i64>, String> {
+    let mut values = Vec::new();
+    for part in split(attribute, "an attribute")? {
+        match (part.number, part.wire) {
+            (8, 0) => values.push(part.value as i64),
+            (8, 2) => {
+                let mut at = 0usize;
+                while at < part.payload.len() {
+                    let value = read_varint(part.payload, &mut at)
+                        .ok_or("an attribute's integers are cut short")?;
+                    values.push(value as i64);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(values)
+}
+
+/// The integers of the attribute `name` of a node, when it has that attribute.
+fn ints_attribute_of(node: &[u8], name: &str) -> Result<Option<Vec<i64>>, String> {
+    attribute(node, name)?.map(ints_of).transpose()
+}
+
+/// The text of the string attribute `name` of a node, when it has that attribute.
+fn string_attribute(node: &[u8], name: &str) -> Result<Option<String>, String> {
+    let Some(attribute) = attribute(node, name)? else {
+        return Ok(None);
+    };
+    for part in split(attribute, "an attribute")? {
+        if part.number == 4 && part.wire == 2 {
+            return text(part.payload, "a string attribute").map(Some);
+        }
+    }
+    Ok(Some(String::new()))
+}
+
+/// The integers of the attribute `attribute` of the node named `node` (for example the
+/// `kernel_shape` of a pool), `None` when the node has no such attribute. Refused when
+/// the file holds no node of that name.
+pub fn node_ints_attribute(
+    model: &[u8],
+    node: &str,
+    attribute: &str,
+) -> Result<Option<Vec<i64>>, L2dError> {
+    let find = || -> Result<Option<Vec<i64>>, String> {
+        for field in split(graph_of(model)?, "the graph")? {
+            if field.number == GRAPH_NODE
+                && field.wire == 2
+                && parse_node(field.payload)?.name == node
+            {
+                return ints_attribute_of(field.payload, attribute);
+            }
+        }
+        Err(format!("the graph holds no node named `{node}`"))
+    };
+    find().map_err(refused)
+}
+
+/// What a stored tensor holds besides its name: type, dimensions and values, as bytes.
+fn stored_value(tensor: &[u8]) -> Result<Vec<u8>, String> {
+    let mut value = Vec::new();
+    for field in split(tensor, "a stored tensor")? {
+        // 8 is the name, 12 the documentation string.
+        if field.number != 8 && field.number != 12 {
+            value.extend_from_slice(field.raw);
+        }
+    }
+    Ok(value)
+}
+
+/// Why a convolution would not keep the rows of an image apart, if it would not: its
+/// kernel must have height 1, with no padding, stride or dilation along the height.
+fn conv_mixes_rows(node: &[u8], weight_dims: Option<&[i64]>) -> Result<Option<String>, String> {
+    match weight_dims {
+        Some([_, _, 1, _]) => {}
+        other => {
+            return Ok(Some(format!(
+                "its stored weight has the dimensions {other:?}, not [out, in, 1, width]"
+            )));
+        }
+    }
+    let list = |name: &str| ints_attribute_of(node, name);
+    if let Some(kernel) = list("kernel_shape")?
+        && kernel.first() != Some(&1)
+    {
+        return Ok(Some(format!("its kernel_shape is {kernel:?}")));
+    }
+    if let Some(pads) = list("pads")?
+        && (pads.len() != 4 || pads[0] != 0 || pads[2] != 0)
+    {
+        return Ok(Some(format!("its pads are {pads:?}")));
+    }
+    if let Some(strides) = list("strides")?
+        && (strides.len() != 2 || strides[0] != 1)
+    {
+        return Ok(Some(format!("its strides are {strides:?}")));
+    }
+    if let Some(dilations) = list("dilations")?
+        && (dilations.len() != 2 || dilations[0] != 1)
+    {
+        return Ok(Some(format!("its dilations are {dilations:?}")));
+    }
+    if let Some(auto_pad) = string_attribute(node, "auto_pad")?
+        && auto_pad != "NOTSET"
+    {
+        return Ok(Some(format!("its auto_pad is `{auto_pad}`")));
+    }
+    Ok(None)
+}
+
 fn height_edit(model: &[u8], rows: u32) -> Result<Vec<u8>, String> {
     if rows == 0 {
         return Err("an image holds at least one text".into());
@@ -774,6 +912,44 @@ fn height_edit(model: &[u8], rows: u32) -> Result<Vec<u8>, String> {
             input.shape, output.shape
         ));
     }
+    let fields = split(graph, "the graph")?;
+    // The stored tensors by name: their dimensions and their values.
+    let mut stored: HashMap<String, (Vec<i64>, &[u8])> = HashMap::new();
+    for field in &fields {
+        if field.number == GRAPH_INITIALIZER && field.wire == 2 {
+            let tensor = parse_initializer(field.payload)?;
+            stored.insert(tensor.name, (tensor.shape, field.payload));
+        }
+    }
+    // The stored tensor behind a node input: the input itself, or what the
+    // DequantizeLinear that produces it reads.
+    let stored_behind = |name: &str, what: &str| -> Result<String, String> {
+        let source = match info.producer(name) {
+            Some(node) if node.op == "DequantizeLinear" => {
+                node.inputs.first().cloned().unwrap_or_default()
+            }
+            Some(node) => return Err(format!("{what} is produced by a {} node", node.op)),
+            None => name.to_string(),
+        };
+        if stored.contains_key(&source) {
+            Ok(source)
+        } else {
+            Err(format!("{what} `{source}` is not stored in the file"))
+        }
+    };
+    // Whether two stored tensors hold the same type, dimensions and values.
+    let same_stored = |a: Option<&String>, b: Option<&String>| -> Result<bool, String> {
+        let (Some(a), Some(b)) = (a, b) else {
+            return Ok(false);
+        };
+        if a == b {
+            return Ok(true);
+        }
+        match (stored.get(a), stored.get(b)) {
+            (Some((_, a)), Some((_, b))) => Ok(stored_value(a)? == stored_value(b)?),
+            _ => Ok(false),
+        }
+    };
     let only = |op: &str| -> Result<&NodeInfo, String> {
         let found: Vec<&NodeInfo> = info.nodes.iter().filter(|node| node.op == op).collect();
         match found.as_slice() {
@@ -784,70 +960,118 @@ fn height_edit(model: &[u8], rows: u32) -> Result<Vec<u8>, String> {
             )),
         }
     };
+    let first = |names: &'_ [String], what: &str| -> Result<String, String> {
+        names.first().cloned().ok_or(format!("{what} is missing"))
+    };
     let pool = only("GlobalAveragePool")?;
     let flatten = only("Flatten")?;
     let gemm = only("Gemm")?;
+    let pool_input = first(&pool.inputs, "the pool's input")?;
+    let pool_output = first(&pool.outputs, "the pool's output")?;
+    let flatten_input = first(&flatten.inputs, "the Flatten node's input")?;
+    let flatten_output = first(&flatten.outputs, "the Flatten node's output")?;
 
     // The length the pool averages over: the recorded shape of the nearest tensor
-    // before it (the quantize pair in between keeps the shape).
-    let mut at = pool.inputs.first().cloned().unwrap_or_default();
-    let pooled_length = loop {
+    // before it (a quantize pair in between keeps the shape). The walk goes through
+    // quantize nodes only and ends after as many steps as the graph has nodes.
+    let mut at = pool_input;
+    let mut pooled_length = None;
+    for _ in 0..=info.nodes.len() {
         if let Some(known) = info.value_info.iter().find(|tensor| tensor.name == at) {
             match known.shape.as_slice() {
-                [_, _, 1, length] if *length > 0 => break *length,
+                [_, _, 1, length] if *length > 0 => pooled_length = Some(*length),
                 other => return Err(format!("the pool's input has the shape {other:?}")),
             }
+            break;
         }
-        at = info
+        match info
             .producer(&at)
             .filter(|node| matches!(node.op.as_str(), "QuantizeLinear" | "DequantizeLinear"))
-            .and_then(|node| node.inputs.first().cloned())
-            .ok_or("the file records no shape for the pool's input")?;
-    };
+            .and_then(|node| node.inputs.first())
+        {
+            Some(before) => at = before.clone(),
+            None => break,
+        }
+    }
+    let pooled_length = pooled_length.ok_or("the file records no shape for the pool's input")?;
 
-    // Flatten goes, with the quantize pair behind it when there is one.
+    // Flatten must read the pool's output, directly or through a quantize pair: then
+    // what it flattens is `[batch, channels, 1, 1]`, and removing it changes nothing.
+    let mut at = flatten_input.clone();
+    let mut before_flatten: Vec<&NodeInfo> = Vec::new();
+    while at != pool_output {
+        let producer = info
+            .producer(&at)
+            .filter(|node| matches!(node.op.as_str(), "QuantizeLinear" | "DequantizeLinear"))
+            .filter(|_| before_flatten.len() < 2)
+            .ok_or("the Flatten node does not read the pool's output")?;
+        before_flatten.push(producer);
+        at = first(&producer.inputs, "a quantize node's input")?;
+    }
+
+    // Flatten goes, with the quantize pair behind it when there is one. That pair
+    // requantizes what the pair before Flatten already quantized; it may only be
+    // removed when it does so with the same scale and zero point.
     let mut removed: Vec<&NodeInfo> = vec![flatten];
-    let mut renamed = (flatten.outputs[0].clone(), flatten.inputs[0].clone());
-    if let [quantize] = info.readers(&flatten.outputs[0]).as_slice()
+    let mut renamed = (flatten_output.clone(), flatten_input);
+    if let [quantize] = info.readers(&flatten_output).as_slice()
         && quantize.op == "QuantizeLinear"
-        && let [dequantize] = info.readers(&quantize.outputs[0]).as_slice()
+        && let Some(quantized) = quantize.outputs.first()
+        && let [dequantize] = info.readers(quantized).as_slice()
         && dequantize.op == "DequantizeLinear"
     {
+        let before = before_flatten
+            .first()
+            .filter(|node| node.op == "DequantizeLinear")
+            .ok_or(
+                "a quantize pair follows the Flatten node and none precedes it: removing it \
+                 would change the arithmetic",
+            )?;
+        for at in 1..=2 {
+            let (was, behind, back) = (
+                before.inputs.get(at),
+                quantize.inputs.get(at),
+                dequantize.inputs.get(at),
+            );
+            if !same_stored(was, behind)? || !same_stored(behind, back)? {
+                return Err(format!(
+                    "the quantize pair behind the Flatten node has another {} than the pair \
+                     before it ({was:?}, {behind:?}, {back:?}): removing it would change the \
+                     arithmetic",
+                    if at == 1 { "scale" } else { "zero point" }
+                ));
+            }
+        }
         removed.extend([*quantize, *dequantize]);
-        renamed.0 = dequantize.outputs[0].clone();
+        renamed.0 = first(&dequantize.outputs, "a DequantizeLinear node's output")?;
     }
     if gemm.inputs.first() != Some(&renamed.0) || gemm.inputs.len() != 3 {
         return Err(
             "the Gemm node does not read the flattened tensor with a weight and a bias".into(),
         );
     }
-    // The stored tensor behind the Gemm's weight.
-    let weight = match info.producer(&gemm.inputs[1]) {
-        Some(node) if node.op == "DequantizeLinear" => node.inputs[0].clone(),
-        Some(node) => {
-            return Err(format!(
-                "the Gemm's weight is produced by a {} node",
-                node.op
-            ));
-        }
-        None => gemm.inputs[1].clone(),
-    };
-    let weight_dims = info
-        .initializers
-        .iter()
-        .find(|tensor| tensor.name == weight)
-        .map(|tensor| tensor.shape.clone())
-        .ok_or(format!(
-            "the Gemm's weight `{weight}` is not stored in the file"
-        ))?;
+    let weight = stored_behind(&gemm.inputs[1], "the Gemm's weight")?;
+    let weight_dims = stored[&weight].0.clone();
     let [out_features, in_features] = weight_dims.as_slice() else {
         return Err(format!(
             "the Gemm's weight has the dimensions {weight_dims:?}"
         ));
     };
+    // A convolution's bias is one value per output channel.
+    let bias = stored_behind(&gemm.inputs[2], "the Gemm's bias")?;
+    if stored[&bias].0 != [*out_features] {
+        return Err(format!(
+            "the Gemm's bias has the dimensions {:?}, not [{out_features}]: it cannot be the \
+             bias of a convolution",
+            stored[&bias].0
+        ));
+    }
+    // The tensors that carry the texts: a quantize node on that path must not have one
+    // scale per text.
+    let carrying = batch_tensors(&info, &input.name);
 
     let mut out = Vec::with_capacity(graph.len());
-    for field in split(graph, "the graph")? {
+    for field in &fields {
         if field.wire != 2 {
             out.extend_from_slice(field.raw);
             continue;
@@ -865,6 +1089,38 @@ fn height_edit(model: &[u8], rows: u32) -> Result<Vec<u8>, String> {
                         return Err("the Flatten node is not at axis 1".into());
                     }
                     continue;
+                }
+                if node.op == "Conv" {
+                    let dims = node
+                        .inputs
+                        .get(1)
+                        .and_then(|weight| stored_behind(weight, "a weight").ok())
+                        .map(|weight| stored[&weight].0.as_slice());
+                    if let Some(why) = conv_mixes_rows(field.payload, dims)? {
+                        return Err(format!(
+                            "the Conv node `{}` would not keep the rows of an image apart: {why}",
+                            node.name
+                        ));
+                    }
+                }
+                if matches!(node.op.as_str(), "QuantizeLinear" | "DequantizeLinear")
+                    && node
+                        .inputs
+                        .first()
+                        .is_some_and(|data| carrying.contains(data))
+                {
+                    let scalar = node
+                        .inputs
+                        .get(1)
+                        .and_then(|scale| stored.get(scale))
+                        .is_some_and(|(dims, _)| dims.iter().product::<i64>() == 1);
+                    if !scalar && int_attribute(field.payload, "axis")?.unwrap_or(1) != 1 {
+                        return Err(format!(
+                            "the {} node `{}` has one scale per entry of an axis other than \
+                             the channels",
+                            node.op, node.name
+                        ));
+                    }
                 }
                 if node == *pool {
                     let pooled = NodeInfo {

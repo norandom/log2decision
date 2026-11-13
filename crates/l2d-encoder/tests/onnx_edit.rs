@@ -8,8 +8,8 @@ mod common;
 use l2d_core::L2dError;
 use l2d_encoder::ModelInterface;
 use l2d_encoder::onnx_edit::{
-    ELEMENT_FLOAT32, ELEMENT_UINT8, GraphInfo, QuantizedEnds, TensorInfo, graph_info, with_batch,
-    with_output_at, with_quantized_ends, with_rows_as_height,
+    ELEMENT_FLOAT32, ELEMENT_UINT8, GraphInfo, QuantizedEnds, TensorInfo, graph_info,
+    node_ints_attribute, with_batch, with_output_at, with_quantized_ends, with_rows_as_height,
 };
 
 /// The spike's 8-bit model, node for node the trained model's graph (2.1 notes).
@@ -501,4 +501,465 @@ fn the_graph_is_cut_at_an_inner_tensor() {
     };
     let error = reason(with_output_at(&model, "nowhere", Some(&nowhere)).unwrap_err());
     assert!(error.contains("no node produces"), "{error}");
+}
+
+// ---------------------------------------------------------------------------------------
+// A small encoder written by hand, to hold `with_rows_as_height` to what it promises.
+
+fn int_attribute(name: &str, value: i64) -> Vec<u8> {
+    let mut attribute = Vec::new();
+    common::bytes_field(&mut attribute, 1, name.as_bytes());
+    common::varint_field(&mut attribute, 3, value as u64);
+    common::varint_field(&mut attribute, 20, 2);
+    attribute
+}
+
+fn float_attribute(name: &str, value: f32) -> Vec<u8> {
+    let mut attribute = Vec::new();
+    common::bytes_field(&mut attribute, 1, name.as_bytes());
+    common::varint(&mut attribute, 2 << 3 | 5);
+    attribute.extend_from_slice(&value.to_le_bytes());
+    common::varint_field(&mut attribute, 20, 1);
+    attribute
+}
+
+fn ints_attribute(name: &str, values: &[i64]) -> Vec<u8> {
+    let mut attribute = Vec::new();
+    common::bytes_field(&mut attribute, 1, name.as_bytes());
+    for value in values {
+        common::varint_field(&mut attribute, 8, *value as u64);
+    }
+    common::varint_field(&mut attribute, 20, 7);
+    attribute
+}
+
+fn string_attribute(name: &str, value: &str) -> Vec<u8> {
+    let mut attribute = Vec::new();
+    common::bytes_field(&mut attribute, 1, name.as_bytes());
+    common::bytes_field(&mut attribute, 4, value.as_bytes());
+    common::varint_field(&mut attribute, 20, 3);
+    attribute
+}
+
+fn named_node(
+    op: &str,
+    name: &str,
+    inputs: &[&str],
+    outputs: &[&str],
+    attributes: &[Vec<u8>],
+) -> Vec<u8> {
+    let mut node = common::node(op, inputs, outputs);
+    common::bytes_field(&mut node, 3, name.as_bytes());
+    for attribute in attributes {
+        common::bytes_field(&mut node, 5, attribute);
+    }
+    node
+}
+
+/// A stored float tensor of the given dimensions, all zeros.
+fn stored(name: &str, dims: &[i64]) -> Vec<u8> {
+    let mut tensor = Vec::new();
+    for dim in dims {
+        common::varint_field(&mut tensor, 1, *dim as u64);
+    }
+    common::varint_field(&mut tensor, 2, common::FLOAT);
+    common::bytes_field(&mut tensor, 8, name.as_bytes());
+    let values: i64 = dims.iter().product();
+    common::bytes_field(&mut tensor, 9, &vec![0u8; values as usize * 4]);
+    tensor
+}
+
+/// Input `[2, 3, 1, length]`, one convolution (4 channels), pool, Flatten, a projection
+/// to 5 values, with a quantize pair at each end. Every field is something a test turns.
+#[derive(Clone)]
+struct Encoder {
+    length: i64,
+    conv_weight: Vec<i64>,
+    conv_attributes: Vec<Vec<u8>>,
+    flatten_attributes: Vec<Vec<u8>>,
+    gemm_attributes: Vec<Vec<u8>>,
+    gemm_bias: Vec<i64>,
+    /// A quantize pair between the pool and Flatten (scale 0.5, zero point 3).
+    pair_before: bool,
+    /// A quantize pair between Flatten and the projection: its scale and zero point,
+    /// stored under names of their own.
+    pair_behind: Option<(f32, i32)>,
+}
+
+impl Encoder {
+    fn new(length: i64) -> Self {
+        Self {
+            length,
+            conv_weight: vec![4, 3, 1, 3],
+            conv_attributes: vec![ints_attribute("pads", &[0, 1, 0, 1])],
+            flatten_attributes: Vec::new(),
+            gemm_attributes: vec![int_attribute("transB", 1)],
+            gemm_bias: vec![5],
+            pair_before: false,
+            pair_behind: None,
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        use common::Storage::Raw;
+        let mut nodes = vec![
+            named_node("QuantizeLinear", "x_q", &["x", "x_s", "x_z"], &["xq"], &[]),
+            named_node(
+                "DequantizeLinear",
+                "x_dq",
+                &["xq", "x_s", "x_z"],
+                &["xdq"],
+                &[],
+            ),
+            named_node("Conv", "conv", &["xdq", "w"], &["h"], &self.conv_attributes),
+            named_node("GlobalAveragePool", "pool", &["h"], &["p"], &[]),
+        ];
+        let mut at = "p";
+        if self.pair_before {
+            nodes.push(named_node(
+                "QuantizeLinear",
+                "p_q",
+                &["p", "p_s", "p_z"],
+                &["pq"],
+                &[],
+            ));
+            nodes.push(named_node(
+                "DequantizeLinear",
+                "p_dq",
+                &["pq", "p_s", "p_z"],
+                &["pdq"],
+                &[],
+            ));
+            at = "pdq";
+        }
+        nodes.push(named_node(
+            "Flatten",
+            "flatten",
+            &[at],
+            &["f"],
+            &self.flatten_attributes,
+        ));
+        at = "f";
+        if self.pair_behind.is_some() {
+            nodes.push(named_node(
+                "QuantizeLinear",
+                "f_q",
+                &["f", "f_s", "f_z"],
+                &["fq"],
+                &[],
+            ));
+            nodes.push(named_node(
+                "DequantizeLinear",
+                "f_dq",
+                &["fq", "f_s", "f_z"],
+                &["fdq"],
+                &[],
+            ));
+            at = "fdq";
+        }
+        nodes.push(named_node(
+            "Gemm",
+            "head",
+            &[at, "gw", "gb"],
+            &["g"],
+            &self.gemm_attributes,
+        ));
+        nodes.push(named_node(
+            "QuantizeLinear",
+            "e_q",
+            &["g", "e_s", "e_z"],
+            &["eq"],
+            &[],
+        ));
+        nodes.push(named_node(
+            "DequantizeLinear",
+            "e_dq",
+            &["eq", "e_s", "e_z"],
+            &["e"],
+            &[],
+        ));
+
+        let mut tensors = vec![
+            common::float_scalar("x_s", 0.25, Raw),
+            common::byte_scalar("x_z", common::UINT8, 100, Raw),
+            common::float_scalar("e_s", 0.125, Raw),
+            common::byte_scalar("e_z", common::UINT8, 90, Raw),
+            common::float_scalar("p_s", 0.5, Raw),
+            common::byte_scalar("p_z", common::UINT8, 3, Raw),
+            stored("w", &self.conv_weight),
+            stored("gw", &[5, 4]),
+            stored("gb", &self.gemm_bias),
+        ];
+        if let Some((scale, zero)) = self.pair_behind {
+            tensors.push(common::float_scalar("f_s", scale, Raw));
+            tensors.push(common::byte_scalar("f_z", common::UINT8, zero, Raw));
+        }
+        let mut graph = Vec::new();
+        for node in &nodes {
+            common::bytes_field(&mut graph, 1, node);
+        }
+        for tensor in &tensors {
+            common::bytes_field(&mut graph, 5, tensor);
+        }
+        let input = common::value_info("x", common::FLOAT, &[2, 3, 1, self.length]);
+        let output = common::value_info("e", common::FLOAT, &[2, 5]);
+        let inner = common::value_info("h", common::FLOAT, &[2, 4, 1, self.length]);
+        common::bytes_field(&mut graph, 11, &input);
+        common::bytes_field(&mut graph, 12, &output);
+        common::bytes_field(&mut graph, 13, &inner);
+        let mut model = Vec::new();
+        common::bytes_field(&mut model, 7, &graph);
+        model
+    }
+}
+
+#[test]
+fn the_pool_of_an_image_averages_over_the_models_own_length() {
+    // The fixture pools over 32 positions.
+    let edited = with_rows_as_height(&spike(), 64).unwrap();
+    let pool = "/pool/GlobalAveragePool";
+    assert_eq!(
+        node_ints_attribute(&edited, pool, "kernel_shape").unwrap(),
+        Some(vec![1, 32])
+    );
+    assert_eq!(
+        node_ints_attribute(&edited, pool, "strides").unwrap(),
+        Some(vec![1, 1])
+    );
+    assert_eq!(node_ints_attribute(&edited, pool, "pads").unwrap(), None);
+    assert!(node_ints_attribute(&edited, "no such node", "strides").is_err());
+    // The convolutions keep their attributes, and the projection needs none.
+    let conv = "/f/f.1/f.1.0/Conv";
+    assert_eq!(
+        node_ints_attribute(&edited, conv, "pads").unwrap(),
+        Some(vec![0, 2, 0, 2])
+    );
+    assert_eq!(
+        node_ints_attribute(&edited, conv, "strides").unwrap(),
+        Some(vec![1, 2])
+    );
+    assert_eq!(
+        node_ints_attribute(&edited, "/head/Gemm", "kernel_shape").unwrap(),
+        None
+    );
+
+    // Hand-written encoders that pool over other lengths: the kernel follows the file.
+    for length in [8i64, 20] {
+        let model = Encoder::new(length).bytes();
+        let edited = with_rows_as_height(&model, 7).unwrap();
+        assert_eq!(
+            node_ints_attribute(&edited, "pool", "kernel_shape").unwrap(),
+            Some(vec![1, length])
+        );
+        assert_eq!(
+            node_ints_attribute(&edited, "pool", "strides").unwrap(),
+            Some(vec![1, 1])
+        );
+        let interface = ModelInterface::from_onnx(&edited).unwrap();
+        assert_eq!(interface.input.shape, [1, 3, 7, length]);
+        assert_eq!(interface.output.shape, [1, 5, 7, 1]);
+        let info = graph_info(&edited).unwrap();
+        assert_eq!(info.nodes.len(), 7);
+        assert_eq!(
+            info.nodes
+                .iter()
+                .find(|node| node.name == "head")
+                .unwrap()
+                .op,
+            "Conv"
+        );
+        let shape = |name: &str| {
+            &info
+                .initializers
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .shape
+        };
+        assert_eq!(shape("gw"), &[5, 4, 1, 1]);
+        assert_eq!(shape("gb"), &[5]);
+        assert_eq!(shape("w"), &[4, 3, 1, 3]);
+    }
+}
+
+#[test]
+fn a_quantize_pair_behind_flatten_is_removed_only_when_it_changes_nothing() {
+    // The same scale and zero point as the pair before Flatten, under other names.
+    let same = Encoder {
+        pair_before: true,
+        pair_behind: Some((0.5, 3)),
+        ..Encoder::new(8)
+    };
+    let edited = with_rows_as_height(&same.bytes(), 4).unwrap();
+    let info = graph_info(&edited).unwrap();
+    assert_eq!(
+        info.nodes.len(),
+        9,
+        "Flatten and the pair behind it are gone"
+    );
+    assert!(
+        info.nodes
+            .iter()
+            .all(|node| !["flatten", "f_q", "f_dq"].contains(&node.name.as_str()))
+    );
+    let head = info.nodes.iter().find(|node| node.name == "head").unwrap();
+    assert_eq!(head.inputs, ["pdq", "gw", "gb"]);
+
+    // Another scale, another zero point, or no pair before Flatten: refused.
+    for (pair_before, behind, expected) in [
+        (true, (0.25, 3), "another scale"),
+        (true, (0.5, 4), "another zero point"),
+        (false, (0.5, 3), "none precedes it"),
+    ] {
+        let model = Encoder {
+            pair_before,
+            pair_behind: Some(behind),
+            ..Encoder::new(8)
+        };
+        let error = reason(with_rows_as_height(&model.bytes(), 4).unwrap_err());
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains("would change the arithmetic"), "{error}");
+    }
+    // A pair before Flatten alone stays where it is.
+    let before_only = Encoder {
+        pair_before: true,
+        ..Encoder::new(8)
+    };
+    let info = graph_info(&with_rows_as_height(&before_only.bytes(), 4).unwrap()).unwrap();
+    assert_eq!(info.nodes.len(), 9);
+}
+
+#[test]
+fn an_image_is_refused_when_its_rows_would_not_stay_apart() {
+    let refusal = |model: Encoder| reason(with_rows_as_height(&model.bytes(), 4).unwrap_err());
+    let base = Encoder::new(8);
+    let with_conv = |attributes: Vec<Vec<u8>>| Encoder {
+        conv_attributes: attributes,
+        ..base.clone()
+    };
+    // A kernel higher than one row reads the neighbouring texts.
+    let error = refusal(Encoder {
+        conv_weight: vec![4, 3, 3, 3],
+        conv_attributes: vec![ints_attribute("pads", &[1, 1, 1, 1])],
+        ..base.clone()
+    });
+    assert!(
+        error.contains("`conv`") && error.contains("[4, 3, 3, 3]"),
+        "{error}"
+    );
+    let error = refusal(Encoder {
+        conv_weight: vec![4, 3, 3],
+        ..base.clone()
+    });
+    assert!(error.contains("[4, 3, 3]"), "{error}");
+    for (attributes, expected) in [
+        (
+            vec![ints_attribute("kernel_shape", &[3, 3])],
+            "kernel_shape is [3, 3]",
+        ),
+        (
+            vec![ints_attribute("pads", &[1, 1, 1, 1])],
+            "pads are [1, 1, 1, 1]",
+        ),
+        (
+            vec![ints_attribute("pads", &[0, 1, 1, 1])],
+            "pads are [0, 1, 1, 1]",
+        ),
+        (
+            vec![ints_attribute("strides", &[2, 1])],
+            "strides are [2, 1]",
+        ),
+        (
+            vec![ints_attribute("dilations", &[2, 1])],
+            "dilations are [2, 1]",
+        ),
+        (
+            vec![string_attribute("auto_pad", "SAME_UPPER")],
+            "auto_pad is `SAME_UPPER`",
+        ),
+        (
+            vec![string_attribute("auto_pad", "VALID")],
+            "auto_pad is `VALID`",
+        ),
+    ] {
+        let error = refusal(with_conv(attributes));
+        assert!(
+            error.contains("would not keep the rows of an image apart"),
+            "{error}"
+        );
+        assert!(error.contains(expected), "{error}");
+    }
+    // What moves along the width only is the encoder's own and is accepted.
+    for attributes in [
+        vec![
+            ints_attribute("kernel_shape", &[1, 3]),
+            ints_attribute("strides", &[1, 2]),
+        ],
+        vec![
+            ints_attribute("dilations", &[1, 2]),
+            ints_attribute("pads", &[0, 2, 0, 2]),
+        ],
+        vec![
+            string_attribute("auto_pad", "NOTSET"),
+            int_attribute("group", 1),
+        ],
+        Vec::new(),
+    ] {
+        with_rows_as_height(&with_conv(attributes).bytes(), 4).unwrap();
+    }
+
+    // The projection must be y = x W^T + b with one bias value per output.
+    let with_gemm = |attributes: Vec<Vec<u8>>| Encoder {
+        gemm_attributes: attributes,
+        ..base.clone()
+    };
+    for attributes in [
+        Vec::new(),
+        vec![int_attribute("transB", 0)],
+        vec![int_attribute("transB", 1), int_attribute("transA", 1)],
+        vec![int_attribute("transB", 1), float_attribute("alpha", 0.5)],
+        vec![int_attribute("transB", 1), float_attribute("beta", 2.0)],
+    ] {
+        let error = refusal(with_gemm(attributes));
+        assert!(error.contains("not y = x W^T + b"), "{error}");
+    }
+    with_rows_as_height(
+        &with_gemm(vec![
+            int_attribute("transB", 1),
+            int_attribute("transA", 0),
+            float_attribute("alpha", 1.0),
+            float_attribute("beta", 1.0),
+        ])
+        .bytes(),
+        4,
+    )
+    .unwrap();
+    for dims in [vec![1, 5], vec![5, 1], vec![4], vec![]] {
+        let error = refusal(Encoder {
+            gemm_bias: dims.clone(),
+            ..base.clone()
+        });
+        assert!(
+            error.contains("bias") && error.contains(&format!("{dims:?}")),
+            "{error}"
+        );
+    }
+
+    // Flatten at another axis does not give one row per text.
+    for axis in [0, 2] {
+        let error = refusal(Encoder {
+            flatten_attributes: vec![int_attribute("axis", axis)],
+            ..base.clone()
+        });
+        assert!(error.contains("Flatten node is not at axis 1"), "{error}");
+    }
+    with_rows_as_height(
+        &Encoder {
+            flatten_attributes: vec![int_attribute("axis", 1)],
+            ..base.clone()
+        }
+        .bytes(),
+        4,
+    )
+    .unwrap();
 }

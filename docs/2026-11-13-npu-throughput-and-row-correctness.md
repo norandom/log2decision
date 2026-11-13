@@ -45,19 +45,33 @@ input (23,974 of 25,608). The reference for a text is the text encoded alone
 through the same model rewritten for a batch of one. One output step is
 0.002527 (the output's scale). Distances are squared L2 between unit vectors.
 
+Where the figures come from. Rows without a mark are printed by the committed
+tests (`tests/npu_rows.rs`). Rows marked **[E1]** to **[E6]** are exploratory:
+they were measured once with a scratch test that is not committed, and what
+remains of them is the log of that run,
+`D:\BuildArtifacts\log2decision\task-2.12\logs\explore-1.log` to
+`explore-6.log` (outside the repository). The committed gate reproduces the
+core of them (first row right, other rows wrong, wrong after the first
+convolution, right as rows of an image), not every figure.
+
 ### The batch layout, `[32, 64, 1, 256]`
 
 | What was fed | Result |
 | --- | --- |
-| The same text in all 32 rows, 16 texts | Row 0 equals the text alone, bit for bit, in 16 of 16 batches. All 496 other rows differ from it, by up to 87 output steps; lowest cosine 0.626. In an earlier pass with other texts: up to 132 steps, lowest cosine -0.30 |
+| The same text in all 32 rows, 16 texts | Row 0 equals the text alone, bit for bit, in 16 of 16 batches. All 496 other rows differ from it, by up to 87 output steps; lowest cosine 0.626. **[E1]** With 16 other texts: up to 132 steps, lowest cosine -0.30 |
 | 32 different texts, 2 batches | Distance between a row's vector and the text's own, 62 rows other than the first: minimum 0.037, 10 % 0.162, median 0.504, 90 % 1.141, maximum 1.754 |
 | For scale: distance from a text's vector to the nearest other text's, 2,000 texts, right vectors | 10 % 0.00009, median 0.00053, 90 % 0.0032, maximum 0.037 |
-| One text placed in each of the 32 rows among 31 fixed other texts, 4 texts | 16 distinct vectors per text; lowest cosine against row 0 between 0.09 and 0.77 |
-| One text in a fixed row, 16 different sets of other texts | Row 0: one vector. Row 1: 15 distinct vectors (lowest cosine 0.38). Row 15: 4. Row 31: 4 |
+| **[E1]** One text placed in each of the 32 rows among 31 fixed other texts, 4 texts | 16 distinct vectors per text; lowest cosine against row 0 between 0.09 and 0.77 |
+| **[E1]** One text in a fixed row, 16 different sets of all other texts (row 0 included) | Row 0: one vector. Row 1: 15 distinct vectors (lowest cosine 0.38). Row 15: 4. Row 31: 4 |
 | Rows 2 to 31 exchanged, rows 0 and 1 kept | Row 1 keeps its vector (2 batches) |
-| One text alone in each row, the other rows empty | 8 distinct vectors, lowest cosine 0.981 |
-| Batches of 2, 4 and 8 (the file rewritten) | Every row but the first differs from it for identical inputs (lowest cosine 0.76 to 0.98) |
-| Batch of 1 against row 0 of the batch of 32 | Bit-identical |
+| **[E1]** One text alone in each row, the other rows empty | 8 distinct vectors, lowest cosine 0.981 |
+| **[E2]** Batches of 2, 4 and 8 (the file rewritten) | Every row but the first differs from it for identical inputs (lowest cosine 0.76 to 0.98) |
+| Batch of 1 against row 0 of the batch of 32 | Bit-identical (16 of 16 batches) |
+
+What the dependence on other rows amounts to: a row's vector changed when all
+other rows changed, and row 1 did not change when only rows 2 to 31 were
+exchanged. That fits a row depending on the rows before it; which rows a row
+depends on was not worked out.
 
 So the median error of a wrong row is about a thousand times the median
 distance to the nearest other text. The decision part works on those nearest
@@ -71,26 +85,39 @@ text:
 
 | Output taken | Rows that differ from row 0 |
 | --- | --- |
-| After the first convolution | Rows 1 to 31, all alike, at all 256 positions (8,019 to 8,902 of 32,768 values) |
-| After the second convolution | Two groups: rows 1 to 7, rows 8 to 31 |
-| Before the pool (after the fifth convolution) | Row 1, and rows 2 to 31 alike |
-| After the pool | 31 rows |
+| **[E2]** After the first convolution | Rows 1 to 31, all alike, at all 256 positions (8,019 to 8,902 of 32,768 values) |
+| **[E2]** After the second convolution | Two groups: rows 1 to 7, rows 8 to 31 |
+| **[E2]** Before the pool (after the fifth convolution) | Row 1, and rows 2 to 31 alike |
+| **[E1]** After the pool | 31 distinct rows among the 32 |
 
-At the output of the first convolution, with an all-zero input, row 0 shows
-the response of the bias (0.018 in channels 0 and 2) and rows 1 to 31 show
-0.000. One input value set to 3.0 in row 0 moves 302 output values (five
-positions, about 60 channels each). The same value set in row 1, 2 or 31 moves
-none. So for rows other than the first, the first convolution does not compute
-what the model says. What it computes instead was not established from
-outside the provider.
+At the output of the first convolution, with an all-zero input, only row 0 of
+the 32 rows shows the response of the bias (**[E3]**: 0.018 in channels 0 and
+2, where rows 1 to 31 show 0.000). One input value set to 3.0 in row 0 moves
+302 output values; the same value set in row 1 moves none (the committed test
+prints both; **[E3]**: five positions and about 60 channels each in row 0, and
+none for rows 2 and 31 as well). So for rows other than the first, the first
+convolution does not compute what the model says. What it computes instead was
+not established from outside the provider.
 
-What was tried and changed nothing (same 32 distinct rows, same 51 steps, same
-cosine 0.798 on one text): `opt_level` 1, 2 and 3; `target` `X2-Benchmark` and
-`PSO`; `enable_preemption` 0; feeding the quantized uint8 input directly. The
-provider's `vaip_config.json` (in AMD's NuGet package) names a sub-pass
-`dynamic_input_batch` and no option about the batch layout. The compiled model
-differs by batch size (1,435,238 bytes for a batch of 1, 1,440,113 for 32), and
-a run of the batch of 32 costs 0.61 ms against 0.30 ms for a batch of 1.
+What was tried and changed nothing, all exploratory (**[E2]**: same 32
+distinct rows, same 51 steps, same cosine 0.798 on one text): `opt_level` 1, 2
+and 3; `target` `X2-Benchmark` and `PSO`; `enable_preemption` 0; and
+(**[E4]**) feeding the quantized uint8 input directly. Three more observations
+that are not the output of a test:
+
+- `vaip_config.json` is not among the five runtime files. It was read from
+  AMD's NuGet package, `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg`,
+  entry `runtimes/win-x64/native/vaip_config.json`: its pass
+  `fuse_DPU_VAIML-x2.0` (the pass of the default target `X2`) lists a sub-pass
+  `dynamic_input_batch`, and no target or option in it names the batch layout.
+- The compiled model differs with the batch size. Sizes of
+  `compiled.AMD_AIE2P_4x8_CMC_Overlay.xmodel` in the cache folders of the
+  exploration, as they are now: 1,435,236 bytes for a batch of 1, 1,438,380
+  for 2, 1,439,104 for 4, 1,439,992 for 8, 1,440,195 for 32. The size also
+  moves by some tens of bytes between two compiles of the same model under
+  another cache key (1,435,173 and 1,440,129 in the gate's folders).
+- **[E4]** A run of the batch of 32 costs 0.61 ms against 0.30 ms for a batch
+  of 1, session only.
 
 ### The layout that is right
 
@@ -111,7 +138,15 @@ On the NPU: 33 of 35 nodes, the two on the CPU being the input's
 
 | Rows per image | Rows bit-identical to the text alone |
 | --- | --- |
-| 1, 2, 8, 32, 64, 128, 256 | all (256 of 256 at 256 rows) |
+| 64 (the gate) | all |
+| **[E6]** 1, 2, 8, 32, 128, 256 | all (256 of 256 at 256 rows) |
+
+`with_rows_as_height` refuses a file for which the rewrite would not be the
+same arithmetic: a convolution whose kernel, padding, stride or dilation
+reaches along the height, a projection that is not `y = x W^T + b` with one
+bias value per output, a `Flatten` at another axis, and a quantize pair behind
+`Flatten` whose scale or zero point differs from the pair before it
+(`tests/onnx_edit.rs`).
 
 The gate (`tests/npu_rows.rs`, 64 rows): identical rows in, 8 texts x 64 rows,
 0 rows differ; a text in each of the 64 rows among other texts that change
@@ -123,7 +158,7 @@ batch above one. It holds exactly, tolerance zero, with the texts as rows of
 one image, and trivially with a batch of one (1,300 logs per second end to
 end).
 
-One thing found on the way: when the provider's compiler failed on the first
+One thing found on the way (**[E5]**): when the provider's compiler failed on the first
 version of the rewritten file, the session still opened, in spite of
 `error_on_failure`, with 0 nodes on the NPU, and ran everything on the CPU.
 Its vectors were within 4 output steps of the NPU's for the same texts
@@ -136,7 +171,9 @@ From log text to L2-normalised vector, CSIC's 25,608 distinct texts (4.9 MB),
 `payload` mode, one untimed pass and five timed passes per setting, release
 build, one process. Two full runs; the machine is shared with another agent
 that compiles Rust, and run A was slower throughout. "CPU" is the process's
-CPU time (kernel and user) per million logs. Every setting gave the same
+CPU time (kernel and user) per million logs. The sustained run encodes the
+same 25,608 distinct texts four times over in one go (102,432 texts): it is
+sustained in time, not a run over 100,000 distinct texts. Every setting gave the same
 vectors, bit for bit (checked by comparing all 3.3 million values).
 
 | Setting | Logs/s, run B: median (range) | Logs/s, run A: median | CPU s per million logs (B) | Working set (MiB) |
