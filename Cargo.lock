@@ -1016,6 +1016,8 @@ dependencies = [
  "l2d-baseline",
  "l2d-core",
  "l2d-decide",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

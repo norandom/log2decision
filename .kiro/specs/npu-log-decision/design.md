@@ -1086,6 +1086,13 @@ pub struct EvaluationReport {
 }
 ```
 
+As built by task 1.12 (the baseline side; the encoder side, the cost types above and the command follow in 3.7 and 3.9):
+- `l2d-eval` has `split` (`Folds::{balanced, dealt, leave_one_out}` over whole groups; this is the `grouped_folds` of the traceability table), `metrics` (ROC AUC with midranks for ties, average precision, share within a budget, recall at a budget, log loss), `evaluate` (`evaluate_fold`, `evaluate`, penalty choice and calibration on the fitting side only) and `report` (JSON, Markdown and a run record; two runs give byte-identical reports). It is run by the example `baseline_gate`; the files are `reports/<date>-csic-2010-baseline.{json,md,run.json}`.
+- A fold refuses a group on both sides and stops when a held-out text was fitted on. The penalty choice and the calibration get a copy of the fitting rows only.
+- The gate figure is the pooled one (owner, 2026-11-13): the cross-endpoint ROC AUC over all held-out predictions as one ranking, at least 0.90. The mean over the folds of the per-fold figure is reported beside it. Measured on CSIC with the routing stripped and the default penalty: 0.914 pooled, 0.919 mean; with the whole text kept 0.897 pooled, below the bar.
+- Not built yet: `ScorerResult`, `CostMeasure` and `EvaluationReport` as typed above, the abstention figures, and process CPU seconds as the energy proxy (9.4). Cost is measured as fit seconds and logs per second on one thread, and varied by up to half between runs on a loaded host.
+- Calibration per fold is reported, not a pass condition. At an error rate of 0.05 it is missed for both labels on unseen endpoints (`docs/2026-11-13-baseline-gate.md`).
+
 ### Command line
 
 #### CLI
