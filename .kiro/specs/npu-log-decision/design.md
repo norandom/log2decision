@@ -242,7 +242,7 @@ sequenceDiagram
 ```
 
 - A package becomes visible only through the final rename, so an interrupted run leaves earlier packages untouched (3.6).
-- NPU registration uses `error_on_failure`; the CPU path is taken only with `--allow-cpu` (4.4).
+- NPU only (4.4): there is no CPU path; the two fallback branches in the diagram above are superseded. Registering the provider with `error_on_failure` is not the guarantee: task 2.12 saw a session open with no node on the NPU and no error after a failed compile. The session reads the placement report and refuses to encode unless the only nodes on the CPU are the quantize nodes at the two ends.
 
 ### Triage
 
@@ -290,7 +290,7 @@ flowchart TD
 | 3.5 | Repeatable training | Trainer | seed, CPU backend | |
 | 3.6 | Interrupted training is safe | EncoderPackage | atomic rename | Train |
 | 4.1 | One vector per distinct text | EncoderSession | `EncoderSession::encode` | Train |
-| 4.2 | 1,000 logs/s on NPU | EncoderSession | batch of 32, fixed shapes | |
+| 4.2 | 1,000 logs/s on NPU | EncoderSession | one image of 64 texts per run, fixed shapes | |
 | 4.3 | Encoding run record | EncoderSession, RuntimeFiles | `RunRecord`, `Placement` | Train |
 | 4.4 | Fallback only when allowed | EncoderSession | `Device`, `EncoderError::NpuUnavailable` | Train |
 | 4.5 | Mark CPU runs | EncoderSession | `RunRecord.device` | |
@@ -633,7 +633,8 @@ impl BaselineScorer {
 
 **Responsibilities & Constraints**
 - Architecture v1 (fixed): input 256 bytes; byte table 256 × 64; five convolution blocks with kernel 5 and ReLU (64→128, 128→128 stride 2, 128→256 stride 2, 256→256 stride 2, 256→256); global average pooling; linear 256→128. Output dimension 128. About one million parameters.
-- The byte-table lookup runs on the CPU in `ByteCodec`. The ONNX graph takes `[32, 64, 1, 256]` float input and returns `[32, 128]`.
+- The byte-table lookup runs on the CPU in `ByteCodec`. The packaged ONNX graph takes `[32, 64, 1, 256]` float input and returns `[32, 128]` (the batch layout).
+- The batch layout is not what runs (task 2.12): under Ryzen AI 1.9.0 the NPU computes only the first text of a batch right, for any batch above one. Before a session is created, `onnx_edit::with_rows_as_height(model, rows)` rewrites the packaged model so that the texts are the rows of one image: input `[1, 64, rows, 256]`, output `[1, 128, rows, 1]`. `GlobalAveragePool` becomes an `AveragePool` over the model's own pooled length, `Flatten` and its quantize pair are removed, and `Gemm` becomes a 1x1 `Conv` with the same stored weight bytes. Every row is then bit-identical to the text encoded alone (measured at 1 to 256 rows). The rewrite refuses any graph for which it is not equivalent: an operator other than Conv, Relu, GlobalAveragePool, Flatten, Gemm and the quantize pair; a convolution that reaches along the height (kernel, pads, stride, dilation, `auto_pad`); a Gemm that is not a plain linear layer with a stored bias of the output length; a removed quantize pair whose scale or zero point differs from the pair before it. The package and its revision are unchanged; the rewritten bytes exist in memory only.
 - `OnnxWriter` emits opset 17 with Conv, Relu, GlobalAveragePool, Flatten and Gemm.
 - `Quantizer` emits the QDQ form: uint8 activations and int8 symmetric weights, per tensor, float scales; bias int32 with scale `input_scale × weight_scale`.
 - Calibration ranges are the minimum and maximum of each activation over a calibration sample, supplied by the trainer.
@@ -674,12 +675,13 @@ impl EncoderPackage {
   - Provisioning (`tools/runtime/`, development only): a script that verifies the files against the manifest of a release, places them and writes the record, by one of two routes that a manifest's source kind selects. The wheel route takes AMD's wheel from a `uv` project pinned to AMD's release index; it is outstanding, because the index answered 403 from the reference host on 2026-11-12. The NuGet route (task 2.13) reads AMD's NuGet ZIP in place (`--release <release> --nuget-zip <path>`), checks the package id, version and hash inside, and never uses an archive path as an output path.
   - Source is part of a manifest's identity (task 2.14): `runtime/ryzenai-<release>.<source>.manifest.json`. Release 1.9.0 has a wheel manifest and a NuGet manifest; the NuGet route also takes a bare package (`--nupkg <path>`). The five files of the two sources are the same builds signed separately, and the NPU output is bit-identical between them. The tool accepts a runtime directory that matches either manifest of its built release, all files from one source, and reports which (`RuntimeFiles::source`; under the fast check that is what the record says, so a run record takes it from a full check); a mix is refused naming the files. The reference host's `runtime/ryzenai/` is provisioned from AMD's package `RyzenAI_Deployment.1.9.0.nupkg`.
   - The two manifests of release 1.9.0 are compiled into the tool. A directory of another release is refused: with a record both releases are named; without one, each file that is not the release's is named with what was found and what was expected. `RuntimeManifest::expected()` is the first manifest of the built release; callers use `check()`. A file is trusted by its modification time only when the record holds the manifest's size and hash for it. A record that cannot be read is treated as no record and replaced after the files are verified; a record of another format is refused.
-- The runtime is loaded with `ort` `load-dynamic` from that directory. The Vitis AI provider is registered with `error_on_failure`, cache directory `runtime/cache/`, cache key equal to the encoder revision, cache kept on disk.
+- The runtime is loaded with `ort` `load-dynamic` from that directory. The Vitis AI provider is registered with `error_on_failure`, cache directory `runtime/cache/`, cache kept on disk. The cache key is `encode::provider_cache_key(revision, release, model, options)`: the package revision, the runtime release, a digest of the model bytes actually handed to the provider (the rewritten ones) and the provider options. The provider checks nothing but the key: a reused key gave a failing run for another row count and silently wrong vectors for another model of the same shape (task 2.12).
 - The environment variable for the provider's placement report is set in-process before the session is created; `Placement` is read from that report.
 - NPU presence and driver version are read through a Windows device query.
-- Texts are deduplicated by the caller. The batch buffer of `ByteCodec` pads the last batch with all-zero inputs and knows how many rows are texts; the session drops the outputs of the padded rows.
+- Texts are deduplicated by the caller. The session writes the texts of a run into an image (`encode::ImageInput`, one row per text, 64 rows by default); rows without a text are all zero and their outputs are dropped (`encode::read_rows`).
 - Output vectors are L2-normalized on the CPU.
-- The CPU path runs the same `model.int8.onnx` through the CPU provider of the same runtime.
+- There is no CPU path (NPU only).
+- Measured on the reference host with a trained model (task 2.12, `docs/2026-11-13-npu-throughput-and-row-correctness.md`): from log text to unit vector about 16,000 to 17,000 logs/s with one session at 64 rows and 35,000 to 40,000 with four sessions; ready in about 5 s cold and 1 s with a warm cache; 33 of 35 nodes on the NPU. 8-bit input fed directly gave bit-identical vectors and 27 % to 48 % more throughput; it is a proposal, not adopted, because it changes what the revision's domain string covers.
 
 **Dependencies**
 - External: `ort`, AMD runtime DLLs — encoder execution (P0). Proven from Rust by the hardware gate of task 2.2 on 2026-11-12: the 8-bit spike model ran with 36 of 38 nodes on the NPU (the two on the CPU are the input quantize and the output dequantize), at 22,000 to 36,000 logs per second in batches of 32 against about 4,000 on the CPU provider, with a cosine of 0.9958 against the CPU output, and no Python on `PATH`. Caveat found in the review of task 2.3: that cosine does not establish requirement 4.6. The spike model has random weights and its output is nearly the same for every input (any two rows of the CPU output agree to 0.9998), so the comparison cannot tell a correct row from a wrong one; and on the NPU a row's output depends on its position in the batch (the same row repeated 32 times gives one exact row and 31 others, on both releases). Task 2.12 settles this before the encoder session is built. Five DLLs are needed in `runtime/ryzenai/` (`runtime/README.md`); a missing `dyn_dispatch_core.dll` ends the process with an access violation and no error, so the file check of task 2.3 runs before anything is loaded. The device query uses `windows-sys`.
@@ -699,7 +701,7 @@ pub enum EncoderError {
 pub struct Encoded { pub vector: Vec<f32>, pub truncated: bool }
 
 impl EncoderSession {
-    pub fn open(pkg: &EncoderPackage, paths: &ProjectPaths, allow_cpu: bool) -> Result<Self, EncoderError>;
+    pub fn open(pkg: &EncoderPackage, paths: &ProjectPaths) -> Result<Self, EncoderError>;   // NPU only; checks the placement
     pub fn device(&self) -> Device;
     pub fn encode(&mut self, texts: &[&str]) -> Result<Vec<Encoded>, EncoderError>;
     pub fn finish(self) -> RunRecord;      // identity, device, driver, logs per second, placement
@@ -723,7 +725,7 @@ impl ByteCodec {
   - Revision: the first 40 hex characters of SHA-256 over a domain string (`l2d-encoder-package/1`), the four architecture numbers, the input mode, `table.bin` and `model.int8.onnx`, each variable part with its length. The number in the domain string also fixes what the code does to shape a vector and is not in those bytes: the padding byte, the truncation rule, NUL handling, the tensor layout and the L2 normalisation after the graph. A change to any of them bumps it.
   - `open(paths, dir)` verifies before anything is used: the place (directly below `<project>/models/encoders/`, no links), every file's size and hash, the revision against the files and the directory name, and `encoder.json` byte for byte; anything else in the directory is refused. Opening never writes. An open package holds the codec with the byte table and the small facts, not the model; `read_model()` re-reads and re-checks it.
   - `write` is atomic and returns `Written`, `Unchanged`, or `ExistsWithOtherRecord` (the same encoder is already there with another training record or float model; nothing is overwritten and the existing package is returned). It takes finished bytes; producing the model is the trainer's work.
-  - The provider's compiled cache is keyed by more than the revision: the package's `cache_key()`, the runtime release and a digest of the provider options that change compilation (task 2.6). The runtime release that produced the vectors belongs in the run record.
+  - The provider's compiled cache is keyed by more than the revision: the package's `cache_key()`, the runtime release, a digest of the rewritten model bytes handed to the provider and the provider options that change compilation (built by `encode::provider_cache_key`, task 2.12; used by task 2.6). The runtime release that produced the vectors belongs in the run record.
 - `ByteCodec` (task 2.5): the first `input_bytes` UTF-8 bytes of the part the mode selects, cut at the raw byte, padded with byte 0; `x[n, c, 0, t] = table[byte[n, t]][c]`. The mapping is bit-identical to the Python mapping the model was trained with. `truncated` is true when that part has more than `input_bytes` bytes; `empty` when no byte other than padding reaches the model (the baseline's "no features" case). The table is 256 rows of `channels` little-endian float32 with row 0 all zeros. The codec makes no allocation per text or per batch and runs at about 200,000 to 340,000 logs per second on one thread, several times the NPU's rate. The input mode is part of the encoder identity (task 2.4); which mode ships is decided with the science gate.
 - Preconditions: package revision verified; runtime files present.
 - Postconditions: `encode` returns one entry per input text in input order, each of the identity's dimension, and the same vector for a text whatever its place in a batch (requirement 4.6).
@@ -1230,7 +1232,7 @@ Run records are written next to the artifact they describe (`training-record.jso
 - Runtime DLLs are loaded only from `runtime/ryzenai/` by absolute path.
 
 ## Performance & Scalability
-- Encoding: fixed batch of 32, target ≥ 1,000 logs/s on the NPU (measured headroom: about 36,700 logs/s with random weights).
+- Encoding: one image of 64 texts per run, target ≥ 1,000 logs/s on the NPU (measured with a trained model, text to unit vector: about 16,000 to 17,000 logs/s with one session, task 2.12).
 - Store: exact search over up to one million 128-dimension vectors (about 512 MB of vectors). Above that, an approximate index is a revalidation trigger.
 - Pairwise assessments sample at most 5,000 vectors; the shift test at most 2,000 per group.
 - Evaluation trains one encoder per fold; training time on the CPU backend is measured in the first training task and reported.

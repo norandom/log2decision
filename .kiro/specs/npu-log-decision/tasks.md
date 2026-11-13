@@ -204,7 +204,7 @@
   - Ticked on 2026-11-12 with one part outstanding: provisioning from AMD's index (the index answered 403 all day; steps to finish are in the 2.3 notes). Task 2.13 adds a route that needs no index
   - _Requirements: 4.3, 10.5_
 
-- [ ] 2.12 Use the NPU performantly, with every row of a batch right (runs before 2.6)
+- [x] 2.12 Use the NPU performantly, with every row of a batch right (runs before 2.6)
   - Owner, 2026-11-13: "we don't need to pursue cpu vs npu. we need to pursue how to use the npu performantly here." This task is about getting the most out of the NPU with the trained model. Comparisons with the CPU provider are dropped from it: the bullets below that name the CPU provider are superseded by this one, and correctness is checked on the NPU itself
   - Owner, 2026-11-13: the encoder is NPU only. The CPU fallback and the NPU-against-CPU agreement are withdrawn from the requirements (4.4 changed, 4.5 and 4.6 withdrawn; 4.6 now asks that a text's vector does not depend on its place in a batch). The first aim is end-to-end throughput
   - Throughput, measured end to end with the trained 8-bit model, from log text to vector: text to bytes, table lookup, the NPU run, reading the output. Find where the time goes and raise it: batch size (the model is compiled for 32; try larger and smaller), feeding the quantized input directly so the two nodes that run on the CPU (input quantize, output dequantize) cost as little as possible, reusing input and output buffers, binding them once, the number of sessions and threads, the provider's options and its cache, warm start. Report logs per second for each change against requirement 4.2 (at least 1,000 distinct logs per second sustained over 10,000 logs) and the time to first result (4.7)
@@ -256,9 +256,9 @@
   - _Requirements: 1.5, 3.1_
 
 - [ ] 2.6 NPU execution session via `ort`
-  - Implement `EncoderSession` in `l2d-encoder`: open package on NPU with disk cache keyed by revision
-  - NPU only (owner, 2026-11-13): if the NPU cannot be used, state the reason and do not encode; there is no CPU fallback and no `allow_cpu`
-  - Process batches with padding, with the settings task 2.12 found fastest; return one L2-normalized vector per input text in input order, the same vector whatever the text's place in a batch (requirement 4.6)
+  - Implement `EncoderSession` in `l2d-encoder`: open package on NPU with the disk cache keyed by `encode::provider_cache_key` (revision, runtime release, the rewritten model bytes, provider options)
+  - NPU only (owner, 2026-11-13): if the NPU cannot be used, state the reason and do not encode; there is no CPU fallback and no `allow_cpu`. Read the placement report and refuse unless the only nodes on the CPU are the quantize nodes at the two ends; `error_on_failure` alone does not guarantee this (task 2.12)
+  - Run the model rewritten by `onnx_edit::with_rows_as_height`, the texts as rows of one image (`ImageInput`), one session at 64 rows with float input as task 2.12 recommends; the batch layout is wrong on the NPU for every row but the first. Return one L2-normalized vector per input text in input order, the same vector whatever the text's place in a batch (requirement 4.6)
   - Record execution metrics: device and how it was matched, driver version, logs per second end to end, and placement node counts
   - Done when encoding the fixture on the NPU returns 128-dim vectors and logs placement, and opening fails with the reason when the NPU or the runtime files are missing
   - _Boundary: EncoderSession_
