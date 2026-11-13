@@ -6,17 +6,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# The release of the AMD runtime the tool is built for. ONE choice, the default below:
-# it selects the manifests a runtime directory may match
-# (`runtime/ryzenai-<release>.<source>.manifest.json`, one per source of the release)
-# and the API level `ort` asks the runtime for (ONNX Runtime 1.30 for Ryzen AI 1.9, 1.27
-# for 1.8). To build for the other release, change the one name in `default`; enabling
-# both, or neither, does not compile. `runtime/README.md` names the release too, and a
-# test holds it to this choice.
+# The release of the AMD runtime the tool is built for: AMD Ryzen AI 1.9.0 (owner,
+# 2026-11-13: "always forward"). The one feature below is on by default. It stands for
+# the manifests a runtime directory may match (`runtime/ryzenai-1.9.0.<source>.manifest.json`,
+# one per source of the release) and sets the API level `ort` asks the runtime for (ONNX
+# Runtime 1.30). Without it the crate does not compile. `runtime/README.md` names the
+# release too, and a test holds it to this; `tools/runtime/provision.py` reads the
+# release from the `default` line. A later release would be a second feature here with
+# its manifests (how release 1.8.0 was wired and removed: the 2.4 notes in tasks.md).
 [features]
 default = ["ryzenai-1-9"]
 ryzenai-1-9 = ["ort/api-30"]
-ryzenai-1-8 = ["ort/api-27"]
 
 [dependencies]
 l2d-core.workspace = true

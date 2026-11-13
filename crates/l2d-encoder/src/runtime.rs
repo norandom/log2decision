@@ -8,10 +8,10 @@
 //!
 //! A manifest is a tracked file, `runtime/ryzenai-<release>.<source>.manifest.json`,
 //! compiled into the tool: the release, where its files come from, and for each file its
-//! name, size, SHA-256 and file version. Which release that is, is one choice: the feature
-//! `ryzenai-1-9` or `ryzenai-1-8` of this crate, which also sets the API level `ort` asks
-//! the runtime for (`api-30` for the ONNX Runtime 1.30 of release 1.9.0, `api-27` for the
-//! 1.27 of release 1.8.0). The manifest is compiled in because the tool is built for one
+//! name, size, SHA-256 and file version. The release is AMD Ryzen AI 1.9.0: the feature
+//! `ryzenai-1-9` of this crate, on by default, which also sets the API level `ort` asks
+//! the runtime for (`api-30` for the ONNX Runtime 1.30 of that release). The manifests of
+//! no other release are compiled in. The manifest is compiled in because the tool is built for one
 //! release, and because the runtime directory may lie outside the project
 //! ([`l2d_core::paths::RUNTIME_DIR_VARIABLE`]), where no tracked file is at hand.
 //!
@@ -128,35 +128,23 @@ pub struct RuntimeManifest {
     pub files: Vec<ManifestFile>,
 }
 
-// The release the tool is built for is one choice: the feature `ryzenai-1-9` or
-// `ryzenai-1-8` of this crate (its default, `crates/l2d-encoder/Cargo.toml`). The feature
-// selects the manifest compiled in here and the API level `ort` asks the runtime for.
-#[cfg(all(feature = "ryzenai-1-9", feature = "ryzenai-1-8"))]
+// The release the tool is built for is AMD Ryzen AI 1.9.0: the feature `ryzenai-1-9` of
+// this crate, on by default (`crates/l2d-encoder/Cargo.toml`), which also sets the API
+// level `ort` asks the runtime for. A build without it has no release.
+#[cfg(not(feature = "ryzenai-1-9"))]
 compile_error!(
-    "the features `ryzenai-1-9` and `ryzenai-1-8` are both enabled: the tool is built for \
-     one release of the AMD runtime"
-);
-#[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
-compile_error!(
-    "neither `ryzenai-1-9` nor `ryzenai-1-8` is enabled: choose the release of the AMD \
-     runtime the tool is built for"
+    "the feature `ryzenai-1-9` of l2d-encoder is not enabled: it is the release of the AMD \
+     runtime the tool is built for (do not switch the default features of l2d-encoder off)"
 );
 
-/// The tracked manifests, all compiled in. A manifest is for one release from one source:
+/// The tracked manifests, compiled in. A manifest is for one release from one source:
 /// AMD ships the same builds in its wheel and in its NuGet package, signed separately, so
-/// the files of the two have the same sizes and other hashes. The manifests of the
-/// release the tool is built for are the ones a directory may match; the others only
-/// serve to say which release a wrong directory holds.
+/// the files of the two have the same sizes and other hashes. A runtime directory must
+/// match one of them.
 const WHEEL_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.wheel.manifest.json");
 const NUGET_1_9_0: &str = include_str!("../../../runtime/ryzenai-1.9.0.nuget.manifest.json");
-const NUGET_1_8_0: &str = include_str!("../../../runtime/ryzenai-1.8.0.nuget.manifest.json");
 
-#[cfg(feature = "ryzenai-1-9")]
 const BUILT_MANIFESTS: &[&str] = &[WHEEL_1_9_0, NUGET_1_9_0];
-#[cfg(all(feature = "ryzenai-1-8", not(feature = "ryzenai-1-9")))]
-const BUILT_MANIFESTS: &[&str] = &[NUGET_1_8_0];
-#[cfg(not(any(feature = "ryzenai-1-9", feature = "ryzenai-1-8")))]
-const BUILT_MANIFESTS: &[&str] = &[];
 
 fn compiled_in(texts: &[&str]) -> Vec<RuntimeManifest> {
     texts
@@ -170,8 +158,6 @@ fn compiled_in(texts: &[&str]) -> Vec<RuntimeManifest> {
 }
 
 static BUILT: LazyLock<Vec<RuntimeManifest>> = LazyLock::new(|| compiled_in(BUILT_MANIFESTS));
-static KNOWN: LazyLock<Vec<RuntimeManifest>> =
-    LazyLock::new(|| compiled_in(&[WHEEL_1_9_0, NUGET_1_9_0, NUGET_1_8_0]));
 
 /// Whether `name` is a plain file name that can only mean a file of that name in the
 /// runtime directory: no directory part, none of the characters Windows gives a meaning
@@ -197,11 +183,6 @@ pub fn is_plain_file_name(name: &str) -> bool {
 }
 
 impl RuntimeManifest {
-    /// Every manifest the repository has, those of the built release among them.
-    pub fn known() -> &'static [RuntimeManifest] {
-        &KNOWN
-    }
-
     /// The manifests of the release this build of the tool is for, one per source. A
     /// runtime directory must match one of them, with all its files.
     pub fn built() -> &'static [RuntimeManifest] {
@@ -661,12 +642,11 @@ impl RuntimeFiles {
             );
             return Err(L2dError::Refused {
                 reason: format!(
-                    "the runtime directory {} does not hold the files of {}: {}{} \
+                    "the runtime directory {} does not hold the files of {}: {} \
                      ({PROVISION_HINT})",
                     dir.display(),
                     manifest.release_text(),
-                    wrong.join("; "),
-                    other_release_note(manifest, dir)
+                    wrong.join("; ")
                 ),
             });
         }
@@ -1011,35 +991,6 @@ fn remove_leftover_partials(dir: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-/// For a directory that is refused: whether it looks like another release the repository
-/// has a manifest for, so that the refusal names both releases also when no record says
-/// which one the directory holds. It does when most files of that release are there with
-/// that release's sizes (two at least: one size can be the same in two releases).
-fn other_release_note(manifest: &RuntimeManifest, dir: &Path) -> String {
-    for other in RuntimeManifest::known() {
-        if other.release == manifest.release {
-            continue;
-        }
-        let present = other
-            .files
-            .iter()
-            .filter(|file| {
-                std::fs::metadata(dir.join(&file.name))
-                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.bytes)
-            })
-            .count();
-        if present >= 2 && present * 2 > other.files.len() {
-            return format!(
-                "; {present} of the {} files of {} are there with that release's sizes: the \
-                 directory holds another release than this build of l2d is for",
-                other.files.len(),
-                other.release_text()
-            );
-        }
-    }
-    String::new()
 }
 
 /// DLLs in `dir` that the manifest does not name, sorted. Other files and folders do not

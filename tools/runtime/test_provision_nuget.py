@@ -365,14 +365,24 @@ class NugetTests(NugetScratch):
             )
         self.assertEqual(code, 1)
         self.assertIn("'wheel'", stderr.getvalue())
-        # --release picks the manifest of that release; this ZIP is not AMD's 1.8.0.
+        # --release picks the manifest of that release, with the same result when it is
+        # the built one.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = provision.main(
+                ["--release", "1.9.0", "--nuget-zip", str(self.archive), "--target", str(self.target)]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("RyzenAI_Deployment.1.9.0.nupkg", stderr.getvalue())
+        self.assertIn(NUPKG, stderr.getvalue())
+        # A release that has no tracked manifest is refused by the manifest's name.
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = provision.main(
                 ["--release", "1.8.0", "--nuget-zip", str(self.archive), "--target", str(self.target)]
             )
         self.assertEqual(code, 1)
-        self.assertIn("RyzenAI_Deployment.1.8.0.nupkg", stderr.getvalue())
+        self.assertIn("ryzenai-1.8.0.nuget.manifest.json", stderr.getvalue())
         self.assertFalse(self.target.exists())
 
 
