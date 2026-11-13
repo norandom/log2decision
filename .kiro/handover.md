@@ -58,9 +58,19 @@ No agent is running. Two pieces of work are unfinished.
 ### Task 1.16, zip input: uncommitted in the main checkout
 
 - **State:** implemented, reviewed once, rejected on one finding, and the
-  implementer was in the middle of the fix when the day ended. The working
-  tree of the main checkout holds this work uncommitted. It may be in a
-  half-edited state: run the three checks before trusting it.
+  implementer finished the fix after this handover was first written. The
+  working tree of the main checkout holds the work uncommitted and complete.
+  The fix has **not** been re-reviewed. The implementer reports 608 passed,
+  0 failed, 30 ignored, fmt and clippy clean; run the checks again before
+  trusting that.
+- **The fix as reported:** `Accepted::push_raw` in `input.rs` puts a second
+  mark in front when a batch buffer starts with one, for Polars to drop. The
+  lines and CSV adapters had the same fault and are fixed by it; JSONL was not
+  affected. A mark at the very start of a file or entry is dropped once;
+  anywhere else it is text. All advisory items were done, including a test
+  over 1,500 mutated archives (none panicked, heap growth under 1 MiB) and a
+  read failure of the archive file now giving exit code 5. `data/README.md`
+  was corrected.
 - **Files:** new `crates/l2d-core/src/{zip_input.rs,zip_directory.rs}`,
   `crates/l2d-core/tests/{zip_input.rs,zip_memory.rs,byte_order_mark.rs}`,
   `crates/l2d-cli/tests/archive.rs`; changed `Cargo.toml`, `Cargo.lock`,
@@ -81,9 +91,10 @@ No agent is running. Two pieces of work are unfinished.
   mid-entry reported as damage; JSON `position` above 2^53; `grow_for`
   reserving one step early; design lines 1126 and 1128 in the stale list; a
   property test over mutated archives.
-- **Next:** check what the working tree holds, finish the fix if needed (a new
-  implementer gets this section and the `1.16:` notes), have an independent
-  reviewer confirm, then design.md in line, tick, commit, push.
+- **Next:** run the checks, have an independent reviewer confirm the fix,
+  write the owner's three zip decisions into the notes and design.md, bring
+  design.md in line (stale lines 53, 449, 457, 464-478, 1126, 1128), tick,
+  commit, push.
 - **What held up in the review:** the own zip reader survived every hostile
   archive the reviewer built; the memory accounting is exact; the AIT figures
   reproduce. Measured on `russellmitchell.zip` (7.1 GB) with `*.log` under
