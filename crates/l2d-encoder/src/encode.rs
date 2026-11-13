@@ -4,6 +4,8 @@
 //! - [`ImageInput`]: log texts written as the rows of one image, the layout in which the
 //!   NPU computes every text right (`onnx_edit::with_rows_as_height`), as floats or as
 //!   the bytes the model's first node would make of them;
+//! - [`RowImage`]: the image buffer of the session (task 2.6), the same values written
+//!   channel by channel into one buffer that is reused;
 //! - [`read_rows`]: the vectors of such an image's output, L2-normalized;
 //! - [`quantize_uint8`] and [`dequantize_uint8`]: the rule of the 8-bit graph's first and
 //!   last node, so that the tool can feed and read the bytes itself;
@@ -163,6 +165,169 @@ impl<T: Copy> ImageInput<T> {
         for plane in image.chunks_exact_mut(rows * self.input_bytes) {
             plane[row * self.input_bytes..(row + 1) * self.input_bytes].fill(self.zero);
         }
+    }
+}
+
+/// The image buffer of a session (task 2.6): `[1, channels, rows, input_bytes]` float
+/// values, allocated once and written again for every image of a run.
+///
+/// It holds the same values [`ImageInput::write`] and [`ImageInput::clear_row`] produce,
+/// bit for bit (a test holds the two together), and differs in the order of the work:
+///
+/// - the bytes of all texts of an image are taken first, then the image is written
+///   channel by channel, each channel's plane from its first row to its last. The buffer
+///   is walked once from start to end. [`ImageInput::write`] goes text by text and
+///   touches one line in each of the channel planes per text, lines that lie a whole
+///   plane apart (64 KiB at 64 rows);
+/// - it remembers how many bytes each row holds, so that after a text only the positions
+///   the previous text of that row filled and this one does not are set back to zero. A
+///   row that holds no text any more is emptied the same way.
+///
+/// The other order was tried for speed (task 2.12 had measured its writer at 13.8 us per
+/// log inside a run against 3 to 4 us for the codec's batch layout) and gains nothing:
+/// on CSIC's 25,608 distinct texts, writers alone on one thread, 15 alternating passes,
+/// 3.14 us per log against 3.21 us in `payload` mode and 3.75 against 3.71 in `whole`
+/// mode, with the batch layout at 3.00 and 3.58
+/// (`tests/byte_codec_speed.rs`, `csic_throughput_of_the_image_writers_on_one_thread`).
+/// The layout of the image is not what made the writer slow in that measurement. The
+/// type is kept as the session's buffer because it owns the image and the flags of its
+/// texts and allocates nothing after it is made.
+#[derive(Debug, Clone)]
+pub struct RowImage {
+    codec: ByteCodec,
+    /// `lookups[c * 256 + byte]`.
+    lookups: Box<[f32]>,
+    rows: usize,
+    input_bytes: usize,
+    values: Box<[f32]>,
+    /// The bytes read of each row's text, `rows * input_bytes`.
+    ids: Box<[u8]>,
+    /// `lengths[n]`: the values of row `n` from this position on are zero in every channel.
+    lengths: Box<[usize]>,
+    flags: Box<[TextInput]>,
+    /// Rows that hold a text.
+    used: usize,
+}
+
+impl RowImage {
+    /// An all-zero image of `rows` rows for the codec's architecture.
+    ///
+    /// # Panics
+    /// When `rows` is zero.
+    pub fn new(codec: ByteCodec, rows: usize) -> Self {
+        assert!(rows > 0, "an image has at least one row");
+        let arch = *codec.arch();
+        let channels = arch.channels as usize;
+        let input_bytes = arch.input_bytes as usize;
+        let mut lookups = Vec::with_capacity(channels * 256);
+        for channel in 0..channels {
+            for byte in 0..=255u8 {
+                lookups.push(codec.table().value(byte, channel));
+            }
+        }
+        Self {
+            codec,
+            lookups: lookups.into_boxed_slice(),
+            rows,
+            input_bytes,
+            values: vec![0.0; channels * rows * input_bytes].into_boxed_slice(),
+            ids: vec![0u8; rows * input_bytes].into_boxed_slice(),
+            lengths: vec![0usize; rows].into_boxed_slice(),
+            flags: vec![TextInput::default(); rows].into_boxed_slice(),
+            used: 0,
+        }
+    }
+
+    /// The codec whose mapping the image holds.
+    pub fn codec(&self) -> &ByteCodec {
+        &self.codec
+    }
+
+    /// The rows of the image.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// The shape of the image as a tensor: `[1, channels, rows, input_bytes]`.
+    pub fn dims(&self) -> [i64; 4] {
+        [
+            1,
+            i64::from(self.codec.arch().channels),
+            self.rows as i64,
+            self.input_bytes as i64,
+        ]
+    }
+
+    /// Makes `texts` the rows of the image, text `n` as row `n`; the rows after them are
+    /// empty inputs. Returns the flags of the texts, in order.
+    ///
+    /// # Panics
+    /// When there are more texts than rows.
+    pub fn fill(&mut self, texts: &[&str]) -> &[TextInput] {
+        assert!(
+            texts.len() <= self.rows,
+            "{} texts for an image of {} rows",
+            texts.len(),
+            self.rows
+        );
+        let width = self.input_bytes;
+        for (row, text) in texts.iter().enumerate() {
+            let (read, flags) = self.codec.read(text);
+            self.ids[row * width..row * width + read.len()].copy_from_slice(read);
+            self.flags[row] = flags;
+        }
+        let used = texts.len();
+        let lookups = self.lookups.as_chunks::<256>().0;
+        for (lookup, plane) in lookups
+            .iter()
+            .zip(self.values.chunks_exact_mut(self.rows * width))
+        {
+            for row in 0..used {
+                let new = self.flags[row].read_bytes;
+                let old = self.lengths[row];
+                let line = &mut plane[row * width..(row + 1) * width];
+                let ids = &self.ids[row * width..row * width + new];
+                for (value, id) in line[..new].iter_mut().zip(ids) {
+                    *value = lookup[*id as usize];
+                }
+                if old > new {
+                    line[new..old].fill(0.0);
+                }
+            }
+            for row in used..self.used {
+                plane[row * width..row * width + self.lengths[row]].fill(0.0);
+            }
+        }
+        for row in 0..used {
+            self.lengths[row] = self.flags[row].read_bytes;
+        }
+        for row in used..self.used {
+            self.lengths[row] = 0;
+        }
+        self.used = used;
+        &self.flags[..used]
+    }
+
+    /// The values of the image, one contiguous slice in the tensor's order.
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    /// The flags of the texts the image holds.
+    pub fn flags(&self) -> &[TextInput] {
+        &self.flags[..self.used]
+    }
+
+    /// The heap bytes the buffer holds for as long as it lives, whatever the texts: the
+    /// values (`channels * rows * input_bytes` floats), the codec's table and its copy in
+    /// channel order, the bytes of one image's texts, and a length and the flags per row.
+    pub fn held_bytes(&self) -> u64 {
+        (std::mem::size_of_val(&*self.values)
+            + std::mem::size_of_val(&*self.lookups)
+            + std::mem::size_of_val(&*self.ids)
+            + std::mem::size_of_val(&*self.lengths)
+            + std::mem::size_of_val(&*self.flags)) as u64
+            + self.codec.held_bytes()
     }
 }
 
@@ -431,5 +596,67 @@ mod tests {
         ] {
             assert_ne!(key, other);
         }
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    /// The image buffer of the session against `ImageInput`, the writer task 2.12
+    /// measured with: the same values bit for bit, image after image in one buffer.
+    #[test]
+    fn the_image_buffer_holds_what_the_row_writer_writes() {
+        let codec = small_codec();
+        let rows = 4;
+        let mut writer = ImageInput::float(&codec);
+        let mut buffer = RowImage::new(codec.clone(), rows);
+        assert_eq!(buffer.rows(), rows);
+        assert_eq!(buffer.dims(), [1, 2, 4, 6]);
+        assert_eq!(buffer.values().len(), writer.image_values(rows));
+        assert!(buffer.values().iter().all(|value| value.to_bits() == 0));
+        assert!(buffer.flags().is_empty());
+
+        // Long after short and short after long in the same row, a NUL byte, an empty
+        // text, images that are not full, an image without a text, a full one again.
+        let images: [&[&str]; 8] = [
+            &["abcdef", "abcdefgh", "a", ""],
+            &["a", "ab", "abcdef", "abc"],
+            &["abcdefgh", "a\0b"],
+            &["\u{00e9}\u{00e9}\u{00e9}\u{00e9}"],
+            &[],
+            &["", "", ""],
+            &["zzzzzz", "yyyyyy", "xxxxxx", "wwwwww"],
+            &["a"],
+        ];
+        for (index, texts) in images.iter().enumerate() {
+            let mut expected = vec![0.0f32; writer.image_values(rows)];
+            let mut flags = Vec::new();
+            for (row, text) in texts.iter().enumerate() {
+                flags.push(writer.write(&codec, text, rows, row, &mut expected));
+            }
+            assert_eq!(buffer.fill(texts), &flags[..], "image {index}");
+            assert_eq!(buffer.flags(), &flags[..], "image {index}");
+            assert_eq!(bits(buffer.values()), bits(&expected), "image {index}");
+        }
+    }
+
+    #[test]
+    fn the_image_buffer_states_what_it_holds() {
+        let codec = small_codec();
+        // 2 channels, 3 rows, 6 bytes: 36 values; the table twice (2 x 256 values each);
+        // 18 bytes of texts; a length and the flags per row.
+        let buffer = RowImage::new(codec.clone(), 3);
+        let per_row = std::mem::size_of::<usize>() + std::mem::size_of::<TextInput>();
+        assert_eq!(
+            buffer.held_bytes(),
+            (36 * 4 + 2 * 256 * 4 + 18 + 3 * per_row) as u64 + codec.held_bytes()
+        );
+        assert_eq!(codec.held_bytes(), 2 * 256 * 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "5 texts for an image of 4 rows")]
+    fn more_texts_than_rows_are_a_programming_error() {
+        RowImage::new(small_codec(), 4).fill(&["a"; 5]);
     }
 }

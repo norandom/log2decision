@@ -1,6 +1,6 @@
 [package]
 name = "l2d-encoder"
-description = "Encoder package format, identity, and execution on NPU or CPU."
+description = "Encoder package format, identity, and execution on the NPU."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,10 @@ l2d-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# ONNX Runtime binding, for the session on the NPU (`session.rs`, task 2.6). Nothing is
+# linked or downloaded at build time: the runtime is AMD's DLL, loaded at run time from
+# the runtime directory after its files were checked.
+ort.workspace = true
 
 # The NPU device query (configuration manager) and the file version of a DLL that does
 # not match the manifest (version resource, read as data; the DLL is not loaded).
@@ -31,7 +35,6 @@ sha2.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-ort.workspace = true
 # The quality test of task 2.12 (`tests/npu_quality.rs`) fits the linear head with the
 # baseline's deterministic logistic regression (its dense path). A dev-dependency only:
 # the library does not import from `l2d-baseline`.

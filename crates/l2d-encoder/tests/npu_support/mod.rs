@@ -31,8 +31,8 @@ use ort::ep::{ArbitrarilyConfigurableExecutionProvider, Vitis};
 use ort::session::Session;
 
 pub const ALLOW_SKIP_VARIABLE: &str = "L2D_GATE_ALLOW_SKIP";
-const REPORT_VARIABLE: &str = "XLNX_ONNX_EP_REPORT_FILE";
-pub const REPORT_FILE: &str = "vitisai_ep_report.json";
+pub use l2d_encoder::session::REPORT_FILE;
+use l2d_encoder::session::REPORT_VARIABLE;
 /// The published model of task 2.1 (fitted without the three endpoints of the 1.7 split).
 pub const PUBLISHED_STEM: &str = "split17-f0-s0-strip-bce-norm-unit";
 
@@ -84,51 +84,12 @@ fn pythons_on_path() -> Vec<PathBuf> {
     real
 }
 
-/// Node counts of the provider's placement report (see `npu_gate.rs`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Placement {
-    pub npu_nodes: u64,
-    pub cpu_nodes: u64,
-    pub all_nodes: u64,
-    /// The operators of the nodes left to the CPU, in graph order.
-    pub cpu_operators: Vec<String>,
-    /// How many subgraphs the provider compiled for the NPU, when the report says.
-    pub subgraphs: Option<usize>,
-}
+/// Node counts of the provider's placement report: since task 2.6 the reader of the
+/// library (`l2d_encoder::session`), which the session itself decides by.
+pub use l2d_encoder::PlacementReport as Placement;
 
 pub fn placement_from_report(report: &str) -> Result<Placement, String> {
-    let json: serde_json::Value =
-        serde_json::from_str(report).map_err(|error| format!("report is not JSON: {error}"))?;
-    let nodes = json
-        .get("nodeStat")
-        .and_then(|value| value.as_array())
-        .ok_or("report has no `nodeStat` list")?;
-    let mut placement = Placement {
-        npu_nodes: 0,
-        cpu_nodes: 0,
-        all_nodes: nodes.len() as u64,
-        cpu_operators: Vec::new(),
-        subgraphs: json
-            .get("subgraphStat")
-            .and_then(|value| value.as_array())
-            .map(Vec::len),
-    };
-    for (index, node) in nodes.iter().enumerate() {
-        match node.get("device").and_then(|device| device.as_str()) {
-            Some("NPU") => placement.npu_nodes += 1,
-            Some("CPU") => {
-                placement.cpu_nodes += 1;
-                placement.cpu_operators.push(
-                    node.get("opType")
-                        .and_then(|op| op.as_str())
-                        .unwrap_or("?")
-                        .to_string(),
-                );
-            }
-            other => return Err(format!("node {index} of `nodeStat` is on {other:?}")),
-        }
-    }
-    Ok(placement)
+    Placement::parse(report)
 }
 
 /// How a session is opened.
@@ -511,14 +472,18 @@ pub fn read(path: &Path) -> Vec<u8> {
 /// The published model of task 2.1 packaged into a scratch project below the work
 /// directory, as `EncoderPackage` (payload mode: the model was fitted on the payload).
 pub fn published_package(rig: &Rig, science_dir: &Path) -> EncoderPackage {
+    published_package_in(&ProjectPaths::new(rig.dir("project")), science_dir)
+}
+
+/// The published model of task 2.1 as a package of the project `paths`.
+pub fn published_package_in(paths: &ProjectPaths, science_dir: &Path) -> EncoderPackage {
     let file = |suffix: &str| read(&science_dir.join(format!("{PUBLISHED_STEM}{suffix}")));
     let model = file(".int8.onnx");
     let float = file(".f32.onnx");
     let table = file(".table.bin");
     let record = read(&science_dir.join("record.json"));
-    let paths = ProjectPaths::new(rig.dir("project"));
     let written = EncoderPackage::write(
-        &paths,
+        paths,
         &PackageParts {
             name: "csic-science-2.1",
             arch: EncoderArch::V1,
@@ -531,7 +496,54 @@ pub fn published_package(rig: &Rig, science_dir: &Path) -> EncoderPackage {
     )
     .unwrap_or_else(|error| panic!("packaging the published model: {error}"));
     let dir = written.package.dir().to_path_buf();
-    EncoderPackage::open(&paths, &dir).unwrap_or_else(|error| panic!("{error}"))
+    EncoderPackage::open(paths, &dir).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// What a hardware test of `EncoderSession` (task 2.6) needs before it opens a session:
+/// the preconditions of [`Rig::prepare`] without loading the runtime (the session loads
+/// it itself), and a scratch project below the work directory, whose `runtime/cache/`
+/// takes the provider's cache. `None` when the test was skipped on request.
+pub fn session_project(tag: &'static str) -> Option<ProjectPaths> {
+    let runtime_dir = ProjectPaths::new(workspace_root())
+        .runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref());
+    if let Err(error @ L2dError::Missing { .. }) =
+        RuntimeFiles::check(&runtime_dir, CheckDepth::Fast)
+    {
+        skip(tag, &error.to_string());
+        return None;
+    }
+    let npu = NpuStatus::query().unwrap_or_else(|error| panic!("{error}"));
+    if !npu.is_present() {
+        for line in npu.log_lines() {
+            println!("{tag}: {line}");
+        }
+        skip(tag, "no AMD NPU device on this host");
+        return None;
+    }
+    let pythons = pythons_on_path();
+    assert!(
+        pythons.is_empty() || skip_allowed(),
+        "PATH has a Python interpreter, so this run does not show that none is needed: \
+         {pythons:?}"
+    );
+    let work_dir = std::env::var_os("L2D_NPU_WORK_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("l2d-npu-work"));
+    let project = work_dir.join("session-project");
+    std::fs::create_dir_all(&project)
+        .unwrap_or_else(|error| panic!("creating {}: {error}", project.display()));
+    println!(
+        "{tag}: runtime files {}; scratch project {}; {} build",
+        runtime_dir.display(),
+        project.display(),
+        if cfg!(debug_assertions) {
+            "DEBUG (timings mean nothing)"
+        } else {
+            "release"
+        }
+    );
+    Some(ProjectPaths::new(plain(&project)))
 }
 
 /// One distinct CSIC text with its label and its group (the URL path).

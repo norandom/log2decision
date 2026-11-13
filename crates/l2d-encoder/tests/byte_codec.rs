@@ -419,6 +419,7 @@ fn a_text_without_delimiter_is_an_empty_input_in_payload_mode_and_is_flagged() {
                 read_bytes: 0,
                 nul_bytes: 0,
                 truncated: false,
+                text_longer_than_input: false,
                 empty: true,
             }
         );
@@ -426,6 +427,93 @@ fn a_text_without_delimiter_is_an_empty_input_in_payload_mode_and_is_flagged() {
     assert!(payload.describe("GET /a?").empty);
     assert!(!payload.describe("GET /a?x").empty);
     assert!(!whole.describe("GET /a?").empty);
+}
+
+/// Requirement 1.5 as amended on 2026-11-13: two flags per text. `truncated` is about
+/// the part the input mode reads; `text_longer_than_input` is about the whole text,
+/// whatever the mode.
+#[test]
+fn the_second_flag_says_that_the_whole_text_is_longer_than_the_input() {
+    let whole = codec(InputMode::Whole);
+    let payload = codec(InputMode::Payload);
+    let length = InputArch::V1.input_bytes as usize;
+    let routing = "GET http://localhost:8080/tienda1/publico/anadir.jsp";
+    let flags = |codec: &ByteCodec, text: &str| {
+        let flags = codec.describe(text);
+        (flags.truncated, flags.text_longer_than_input)
+    };
+
+    // (text, payload mode, whole mode), each (truncated, text longer than the input).
+    let long_routing = format!("{}/{}?id=1", routing, "a".repeat(length));
+    let no_payload = "x".repeat(length + 1);
+    let exactly = "y".repeat(length);
+    let long_payload = format!("{routing}?{}", "b".repeat(length + 1));
+    let fitting_payload = format!("{routing}?{}", "c".repeat(length - routing.len() - 1));
+    let multibyte = "\u{00e9}".repeat(length / 2 + 1);
+    type Flags = (bool, bool);
+    let cases: [(&str, &str, Flags, Flags); 7] = [
+        (
+            "a long routing part, a short payload",
+            &long_routing,
+            (false, true),
+            (true, true),
+        ),
+        (
+            "a long text without payload",
+            &no_payload,
+            (false, true),
+            (true, true),
+        ),
+        (
+            "exactly the input length",
+            &exactly,
+            (false, false),
+            (false, false),
+        ),
+        (
+            "a payload longer than the input",
+            &long_payload,
+            (true, true),
+            (true, true),
+        ),
+        (
+            "routing and payload together exactly the input length",
+            &fitting_payload,
+            (false, false),
+            (false, false),
+        ),
+        (
+            "bytes count, not characters",
+            &multibyte,
+            (false, true),
+            (true, true),
+        ),
+        ("a short text", "GET /a?x=1", (false, false), (false, false)),
+    ];
+    assert_eq!(fitting_payload.len(), length);
+    assert_eq!(multibyte.chars().count(), length / 2 + 1);
+    for (what, text, in_payload, in_whole) in cases {
+        assert_eq!(flags(&payload, text), in_payload, "payload mode: {what}");
+        assert_eq!(flags(&whole, text), in_whole, "whole mode: {what}");
+        // In whole mode the part is the text, so the two flags agree.
+        let read = whole.describe(text);
+        assert_eq!(read.truncated, read.text_longer_than_input, "{what}");
+    }
+
+    // Every way of producing an input reports the same flags, and the flag changes no
+    // value of the input.
+    let mut ids = vec![0u8; length];
+    let mut row = vec![0f32; InputArch::V1.row_values()];
+    let mut batch = payload.new_batch();
+    for (what, text, ..) in cases {
+        let described = payload.describe(text);
+        assert_eq!(payload.byte_ids(text, &mut ids), described, "{what}");
+        assert_eq!(payload.encode_text(text, &mut row), described, "{what}");
+        assert_eq!(payload.push(&mut batch, text), Some(described), "{what}");
+    }
+    assert!(batch.texts()[0].text_longer_than_input);
+    // The flags of a text still take 32 bytes: the batch buffer did not grow.
+    assert_eq!(std::mem::size_of::<TextInput>(), 32);
 }
 
 #[test]

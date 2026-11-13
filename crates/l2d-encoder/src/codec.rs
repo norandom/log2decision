@@ -20,6 +20,12 @@
 //! whole text. In [`InputMode::Payload`] a long routing part therefore never truncates,
 //! and a text of exactly `input_bytes` payload bytes is not truncated.
 //!
+//! That flag alone would leave a long text unmarked whose routing part the encoder does
+//! not read. So there is a second flag, [`TextInput::text_longer_than_input`]: the
+//! **whole** text has more than `input_bytes` bytes, whatever the mode (owner,
+//! 2026-11-13). The two flags only describe a text; neither changes a byte of the input,
+//! so neither touches what the package revision covers.
+//!
 //! The cut is at the byte. When it falls inside a multi-byte UTF-8 character, the bytes
 //! of that character before the cut stay in the input and the others are dropped; the
 //! codec does not back up to a character boundary, because the model was trained on raw
@@ -385,6 +391,12 @@ pub struct TextInput {
     /// The part is longer than the input length, so its end is not in the input
     /// (requirement 1.5).
     pub truncated: bool,
+    /// The whole log text is longer than the input length, whatever the input mode
+    /// (requirement 1.5, the second flag). In [`InputMode::Whole`] it equals `truncated`.
+    /// In [`InputMode::Payload`] it is also true for a long text whose payload fits, or
+    /// that has no payload at all: bytes of such a text are outside the input although
+    /// nothing of the part that is read was cut.
+    pub text_longer_than_input: bool,
     /// No byte other than padding is in the input: it is all zeros.
     pub empty: bool,
 }
@@ -431,7 +443,7 @@ impl ByteCodec {
     }
 
     /// The bytes of `text` that are read, and the flags.
-    fn read<'t>(&self, text: &'t str) -> (&'t [u8], TextInput) {
+    pub(crate) fn read<'t>(&self, text: &'t str) -> (&'t [u8], TextInput) {
         let part = self.mode.select(text).as_bytes();
         let read = &part[..part.len().min(self.arch.input_bytes as usize)];
         let nul_bytes = read.iter().filter(|byte| **byte == PAD_BYTE).count();
@@ -440,6 +452,7 @@ impl ByteCodec {
             read_bytes: read.len(),
             nul_bytes,
             truncated: part.len() > read.len(),
+            text_longer_than_input: text.len() > self.arch.input_bytes as usize,
             empty: nul_bytes == read.len(),
         };
         (read, flags)

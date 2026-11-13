@@ -411,6 +411,21 @@ impl Parts {
         }
     }
 
+    /// The spike's 8-bit model (random weights, node for node the trained model's graph)
+    /// with the science gate's byte table, as an encoder of architecture v1 in `payload`
+    /// mode: the fixture of the session (task 2.6).
+    pub fn spike() -> Self {
+        Self {
+            name: "spike".into(),
+            arch: EncoderArch::V1,
+            input_mode: InputMode::Payload,
+            model_int8: std::fs::read(fixture("spike-enc-b32-int8.onnx")).unwrap(),
+            table: std::fs::read(fixture("science-2.1.table.bin")).unwrap(),
+            training_record: br#"{"kind":"spike"}"#.to_vec(),
+            model_f32: None,
+        }
+    }
+
     pub fn parts(&self) -> PackageParts<'_> {
         PackageParts {
             name: &self.name,
