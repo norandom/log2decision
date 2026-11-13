@@ -710,8 +710,8 @@ impl ByteCodec {
 }
 ```
 - Preconditions: package revision verified; runtime files present.
-- Postconditions: `encode` returns one entry per input text in input order, each of the identity's dimension.
-- `open` with `allow_cpu = false` returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed.
+- Postconditions: `encode` returns one entry per input text in input order, each of the identity's dimension, and the same vector for a text whatever its place in a batch (requirement 4.6).
+- NPU only (owner decision of 2026-11-13): there is no CPU fallback. Every mention of `allow_cpu`, `--allow-cpu`, a CPU provider as fallback or a CPU run in this document is superseded; `open` takes no such flag and returns `NpuUnavailable` when the provider cannot be registered or no NPU nodes are placed. The baseline scorer is the path for a host without an NPU. Agreement between NPU and CPU vectors is not a requirement any more. The aim for the encoder path is end-to-end throughput on the NPU (task 2.12).
 
 **Implementation Notes**
 - Integration: the `api-NN` feature of `ort` is chosen once from the DLL's reported version and recorded in the workspace manifest. It is `api-30` (task 2.2). The gate test finds the runtime directory through `L2D_RUNTIME_DIR`, with `runtime/ryzenai/` as the default; the tool reads that variable too (task 2.3).

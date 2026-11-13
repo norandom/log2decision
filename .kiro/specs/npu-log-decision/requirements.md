@@ -94,9 +94,9 @@ features on HTTP CSIC 2010.
 1. When logs are submitted for encoding, the Log Triage Tool shall return one vector per distinct log text, with the dimension stated in the encoder identity.
 2. While the NPU is available, the Log Triage Tool shall encode at least 1,000 distinct logs per second, sustained over 10,000 logs, on the reference host.
 3. When an encoding run completes, the Log Triage Tool shall record the encoder identity, the driver version, the logs per second, and evidence of whether the work ran on the NPU.
-4. If the NPU cannot be used, then the Log Triage Tool shall state the reason and encode on the CPU only when the analyst has allowed that fallback.
-5. If encoding ran on the CPU, then the Log Triage Tool shall mark the run record as a CPU run.
-6. The Log Triage Tool shall return vectors for the same log text and encoder identity that agree with a cosine similarity of at least 0.99 between the NPU and the CPU.
+4. If the NPU cannot be used, then the Log Triage Tool shall state the reason and shall not encode. (Changed on 2026-11-13 by the owner: the encoder runs on the NPU only; there is no CPU fallback. The baseline scorer remains the path for a host without an NPU, requirement 2.5.)
+5. (Withdrawn on 2026-11-13 with the CPU fallback: there are no CPU encoding runs to mark. The number is kept so that later numbers do not move.)
+6. (Withdrawn on 2026-11-13: agreement between NPU and CPU vectors is not pursued. In its place:) The Log Triage Tool shall return the same vector for the same log text and encoder identity whatever the position of the text in a batch and whatever the other texts in the batch.
 7. When the encoder is loaded for the first time, the Log Triage Tool shall be ready to encode within 30 seconds.
 
 ### Requirement 5: Storage and search

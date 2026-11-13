@@ -204,16 +204,20 @@
   - Ticked on 2026-11-12 with one part outstanding: provisioning from AMD's index (the index answered 403 all day; steps to finish are in the 2.3 notes). Task 2.13 adds a route that needs no index
   - _Requirements: 4.3, 10.5_
 
-- [ ] 2.12 NPU output is right for every row of a batch (runs before 2.6)
+- [ ] 2.12 Use the NPU performantly, with every row of a batch right (runs before 2.6)
+  - Owner, 2026-11-13: "we don't need to pursue cpu vs npu. we need to pursue how to use the npu performantly here." This task is about getting the most out of the NPU with the trained model. Comparisons with the CPU provider are dropped from it: the bullets below that name the CPU provider are superseded by this one, and correctness is checked on the NPU itself
+  - Owner, 2026-11-13: the encoder is NPU only. The CPU fallback and the NPU-against-CPU agreement are withdrawn from the requirements (4.4 changed, 4.5 and 4.6 withdrawn; 4.6 now asks that a text's vector does not depend on its place in a batch). The first aim is end-to-end throughput
+  - Throughput, measured end to end with the trained 8-bit model, from log text to vector: text to bytes, table lookup, the NPU run, reading the output. Find where the time goes and raise it: batch size (the model is compiled for 32; try larger and smaller), feeding the quantized input directly so the two nodes that run on the CPU (input quantize, output dequantize) cost as little as possible, reusing input and output buffers, binding them once, the number of sessions and threads, the provider's options and its cache, warm start. Report logs per second for each change against requirement 4.2 (at least 1,000 distinct logs per second sustained over 10,000 logs) and the time to first result (4.7)
+  - Correctness on the NPU itself: identical rows in give identical rows out; a row gives the same vector in every slot of a batch and in a batch of one. First candidate for the cause of the batch-position effect: the pooling step
+  - Quality as measured: the triage quality of the vectors that come off the NPU (cross-endpoint ROC AUC and average precision of the linear head and of the neighbour ratio), next to the baseline figures of task 1.12. This and the throughput are what the science gate is decided on
   - Found in the review of 2.3: on the NPU the output of a row depends on its position in the batch. The same row repeated 32 times gives one exact row (row 0) and 31 others, on Ryzen AI 1.9.0 (32 distinct rows, as low as cosine 0.9958 against row 0) and on 1.8.0 (two distinct rows, the other at 0.9785); the CPU provider gives 32 identical rows on both. The gate's cosine against the CPU could not show this, because the spike model has random weights and its output is nearly constant over inputs
   - Find the cause (the model's batch layout, the quantized graph, a provider option, or the provider itself) with a fixture whose rows differ by many output steps, preferably the trained 8-bit model of task 2.1; try a batch-of-one model and other batch sizes. First candidate (owner, 2026-11-12): the pooling step. The spike model ends in a global average pool over the sequence followed by a flatten and a linear layer, all placed on the NPU; if the provider pools or lays out the batch so that rows are not kept apart, rows would influence each other. Test it by changing one row and watching the others, and by comparing a model cut before the pool with one cut after it
   - Add to the hardware gate: identical rows in give identical rows out; each row of a batch agrees with a batch-of-one run of the same row; the NPU agrees with the CPU provider row by row on a fixture where rows differ. State what agreement a trained model reaches (requirement 4.6 asks for a cosine of at least 0.99)
   - Release: the owner decided on 2026-11-13 that the tool stays on Ryzen AI 1.9.0 ("always forward"); 1.8.0 is not pursued and needs no further comparison. Work on 1.9.0 only
-  - Measure, do not estimate (owner, 2026-11-13, for the science gate): with the trained 8-bit model on the NPU, report logs per second and time to first result as measured, and the triage quality of the vectors that come off the NPU (cross-endpoint ROC AUC and average precision of the linear head and of the neighbour ratio), next to the CPU figures of the science gate and the baseline figures of task 1.12
   - If rows other than the first cannot be made right, say what that means for the batch size and the logs per second of requirement 4.2, and stop before 2.6
-  - Done when the gate asserts row-wise agreement on a meaningful fixture and passes, or the blocker is reported with the evidence
-  - _Depends: 2.1, 2.2, 2.3_
-  - _Requirements: 4.1, 4.2, 4.6_
+  - Done when the measured throughput and its breakdown are recorded with the settings that gave the best figure, the gate asserts that a row's vector does not depend on its slot and passes on the trained model, and the quality of the NPU's vectors is reported; or the blocker is reported with the evidence
+  - _Depends: 2.1, 2.2, 2.3, 2.4, 2.5_
+  - _Requirements: 4.1, 4.2, 4.3, 4.7_
 
 - [x] 2.13 Provision the runtime without AMD's index
   - Owner, 2026-11-12: provision from AMD's NuGet ZIP, as the sibling project `npu_rag_from_folder` does (`C:\Users\mariu\Downloads\ryzen_ai_nuget_1.8.0 (1).zip` holds `RyzenAI_Deployment.1.8.0.nupkg` with the runtime files of release 1.8.0; that release needs six files, `aiecompiler_client.dll` being the sixth)
@@ -251,12 +255,12 @@
   - _Boundary: ByteCodec_
   - _Requirements: 1.5, 3.1_
 
-- [ ] 2.6 NPU execution session via `ort` with CPU fallback permission
+- [ ] 2.6 NPU execution session via `ort`
   - Implement `EncoderSession` in `l2d-encoder`: open package on NPU with disk cache keyed by revision
-  - If NPU is unavailable, state reason and fall back to CPU provider only if `allow_cpu: true`
-  - Process batches of 32 with padding; return one L2-normalized vector per input text in input order
-  - Record execution metrics: device used, driver version, logs per second, and placement node counts
-  - Done when encoding fixture with CPU allowed returns 128-dim vectors, CPU-disallowed open fails when NPU missing, and NPU execution logs placement
+  - NPU only (owner, 2026-11-13): if the NPU cannot be used, state the reason and do not encode; there is no CPU fallback and no `allow_cpu`
+  - Process batches with padding, with the settings task 2.12 found fastest; return one L2-normalized vector per input text in input order, the same vector whatever the text's place in a batch (requirement 4.6)
+  - Record execution metrics: device and how it was matched, driver version, logs per second end to end, and placement node counts
+  - Done when encoding the fixture on the NPU returns 128-dim vectors and logs placement, and opening fails with the reason when the NPU or the runtime files are missing
   - _Boundary: EncoderSession_
   - _Depends: 2.2, 2.4, 2.5_
   - _Requirements: 4.1, 4.3, 4.4, 4.5, 4.6, 4.7_
@@ -281,7 +285,7 @@
 
 - [ ] 2.9 Wire NPU & Encoder CLI commands
   - Wire CLI commands in `l2d-cli`: `l2d runtime check`, `l2d encoder info`, `l2d encoder encode`, `l2d store add`
-  - Include `--allow-cpu` flag and display truncation flags and placement evidence
+  - Display truncation flags and placement evidence; no `--allow-cpu` flag (the encoder is NPU only, owner 2026-11-13)
   - After 2.10 and 2.11 (requirement 14): also `l2d head fit`, `l2d head score` and `l2d outliers`; the outlier output calls its figure a distance
   - Done when CLI commands execute against fixture and print run records in human and JSON format
   - _Requirements: 1.5, 3.2, 4.3, 4.4, 4.5, 10.5, 10.7, 14.7, 14.11_
