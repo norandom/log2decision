@@ -111,8 +111,10 @@ No agent is running. Two pieces of work are unfinished.
 - **Blocking 2:** the `2.6:` throughput note explains the gap to 2.12's
   16,636 logs/s by host load. That is not supported: 16,636 was 2.12's
   quieter run, and process CPU per million logs fell from 33 s to 11 to 15 s.
-  State the range without a cause (medians 27,044 to 42,217 logs/s over ten
-  runs, the reviewer's included) and say the difference is unexplained.
+  State the range (medians 27,044 to 42,217 logs/s over ten runs, the
+  reviewer's included) and note the owner's reading of 2026-11-13: the host
+  is a laptop with power management, the difference is related to the system
+  itself, it was not measured and is not pursued.
 - **Advisory:** stale lines missing from the list (design.md 15, 295, 296;
   tasks.md 267 and 419); the comment in `tests/npu_session.rs` that no CPU
   provider runs anywhere, while `tests/npu_gate.rs` still has one from task
@@ -301,7 +303,10 @@ recommendation.
   encoded alone.
 - **NPU, speed:** from log text to unit vector, one session at 64 rows:
   16,000 to 17,000 logs/s in 2.12's runs and 27,000 to 42,000 in 2.6's runs
-  on the same host. The difference is unexplained. Four sessions: 35,000 to
+  on the same host. The owner's reading: the host is a laptop with power
+  management, so the difference belongs to the system, not to the code. It
+  was not measured and is left as it is; figures are stated as ranges.
+  Four sessions: 35,000 to
   40,000 in 2.12's runs. The requirement is 1,000. Ready in 3 to 5 s cold and
   0.6 to 1 s warm; the requirement allows 30 s.
 - **NPU, quality:** the vectors off the NPU reproduce the science gate:
@@ -341,8 +346,10 @@ recommendation.
 - **Debug builds are slow where it matters.** Run evaluations in release. The
   full baseline evaluation is about 30 minutes.
 - **Timings on this host vary.** Fit times differed by 30 % to 50 % and NPU
-  throughput by a factor of two between runs. State ranges over recorded
-  runs and no cause that was not measured.
+  throughput by a factor of two between runs. The host is a laptop with
+  power management; the owner attributes the variation to the system itself
+  and does not want it pursued. State ranges over recorded runs, and mark a
+  cause that was not measured as a reading, not a finding.
 - **Polars.** Import it only as `l2d_core::polars`. Do not enable its `csv`,
   `json`, `strings` or `streaming` facade features and do not upgrade it
   without checking `cargo tree` for network crates. It drops a byte-order
