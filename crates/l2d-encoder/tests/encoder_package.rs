@@ -18,11 +18,17 @@ use l2d_encoder::package::{
 };
 use l2d_encoder::{
     ByteCodec, ByteTable, EncoderArch, EncoderPackage, InputArch, InputMode, PackageParts,
+    WriteOutcome,
 };
 use sha2::{Digest, Sha256};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Writes a package and returns it, whatever the outcome was.
+fn write(paths: &ProjectPaths, parts: &PackageParts<'_>) -> Result<EncoderPackage, L2dError> {
+    EncoderPackage::write(paths, parts).map(|written| written.package)
 }
 
 fn refusal(result: Result<EncoderPackage, L2dError>) -> String {
@@ -46,7 +52,7 @@ fn written(tag: &str) -> (Project, ProjectPaths, Parts, EncoderPackage) {
     let project = Project::new(tag);
     let paths = project.paths();
     let parts = Parts::tiny();
-    let package = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    let package = write(&paths, &parts.parts()).unwrap();
     (project, paths, parts, package)
 }
 
@@ -216,7 +222,7 @@ fn name_training_record_float_model_and_file_times_do_not_change_the_revision() 
     let project = Project::new("revision-stable");
     let paths = project.paths();
     let parts = Parts::tiny();
-    let first = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    let first = write(&paths, &parts.parts()).unwrap();
     let revision = first.identity().revision.clone();
     assert_eq!(
         revision,
@@ -233,7 +239,7 @@ fn name_training_record_float_model_and_file_times_do_not_change_the_revision() 
         name: "other-name".into(),
         ..parts.clone()
     };
-    let second = EncoderPackage::write(&paths, &renamed.parts()).unwrap();
+    let second = write(&paths, &renamed.parts()).unwrap();
     assert_eq!(second.identity().revision, revision);
     assert_ne!(second.dir(), first.dir());
 
@@ -246,7 +252,7 @@ fn name_training_record_float_model_and_file_times_do_not_change_the_revision() 
         ..parts.clone()
     };
     std::thread::sleep(std::time::Duration::from_millis(30));
-    let third = EncoderPackage::write(&other_project.paths(), &other.parts()).unwrap();
+    let third = write(&other_project.paths(), &other.parts()).unwrap();
     assert_eq!(third.identity().revision, revision);
 
     // Files rewritten with the same bytes get new times; the package still opens under
@@ -423,7 +429,7 @@ fn a_package_without_a_float_model_round_trips() {
         model_f32: None,
         ..Parts::tiny()
     };
-    let written = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    let written = write(&paths, &parts.parts()).unwrap();
     assert!(!written.dir().join(MODEL_F32_FILE).exists());
     let text = std::fs::read_to_string(written.dir().join(ENCODER_JSON)).unwrap();
     assert!(!text.contains(MODEL_F32_FILE), "{text}");
@@ -476,40 +482,177 @@ fn the_package_hands_out_a_ready_codec() {
 
 #[test]
 fn the_same_package_written_twice_is_not_an_error_and_writes_nothing() {
-    let (_project, paths, parts, first) = written("twice");
+    let project = Project::new("twice");
+    let paths = project.paths();
+    let parts = Parts::tiny();
+    let first = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    assert_eq!(first.outcome, WriteOutcome::Written);
     let before = snapshot(&paths.models_dir());
     std::thread::sleep(std::time::Duration::from_millis(30));
     let second = EncoderPackage::write(&paths, &parts.parts()).unwrap();
-    assert_eq!(second.identity(), first.identity());
-    assert_eq!(second.dir(), first.dir());
+    assert_eq!(second.outcome, WriteOutcome::Unchanged);
+    assert_eq!(second.package.identity(), first.package.identity());
+    assert_eq!(second.package.dir(), first.package.dir());
     assert_eq!(snapshot(&paths.models_dir()), before);
 }
 
 #[test]
-fn an_existing_package_of_other_content_is_never_overwritten() {
-    let (_project, paths, parts, first) = written("no-overwrite");
+fn the_same_encoder_with_another_record_is_found_reported_and_not_overwritten() {
+    let (_project, paths, parts, first) = written("other-record");
     let before = snapshot(&paths.models_dir());
     let record_before = std::fs::read(first.dir().join(TRAINING_RECORD_FILE)).unwrap();
 
-    // Same model, table and architecture, so the same revision and directory, but
-    // another training record.
+    // Same model, table, architecture and mode, so the same revision and directory, but
+    // another training record: a second training run that ended in the same encoder.
     let other = Parts {
         training_record: br#"{"kind":"train","seed":99}"#.to_vec(),
         ..parts.clone()
     };
-    let reason = refusal(EncoderPackage::write(&paths, &other.parts()));
-    assert!(reason.contains(TRAINING_RECORD_FILE), "{reason}");
-    assert!(reason.contains("left unchanged"), "{reason}");
+    let second = EncoderPackage::write(&paths, &other.parts()).unwrap();
+    assert_eq!(
+        second.outcome,
+        WriteOutcome::ExistsWithOtherRecord {
+            differing: vec![TRAINING_RECORD_FILE]
+        }
+    );
+    // The package returned is the one that was there, with its own record.
+    assert_eq!(second.package.identity(), first.identity());
+    assert_eq!(second.package.files(), first.files());
     assert_eq!(snapshot(&paths.models_dir()), before);
     assert_eq!(
         std::fs::read(first.dir().join(TRAINING_RECORD_FILE)).unwrap(),
         record_before
     );
 
+    // Another float model, no float model, and both files at once.
+    let other_float = Parts {
+        model_f32: Some(
+            Model {
+                quantized: false,
+                seed: 9,
+                ..Model::tiny()
+            }
+            .bytes(),
+        ),
+        ..parts.clone()
+    };
+    let no_float = Parts {
+        model_f32: None,
+        ..parts.clone()
+    };
+    for changed in [&other_float, &no_float] {
+        assert_eq!(
+            EncoderPackage::write(&paths, &changed.parts())
+                .unwrap()
+                .outcome,
+            WriteOutcome::ExistsWithOtherRecord {
+                differing: vec![MODEL_F32_FILE]
+            }
+        );
+    }
+    let both = Parts {
+        training_record: other.training_record.clone(),
+        ..no_float.clone()
+    };
+    assert_eq!(
+        EncoderPackage::write(&paths, &both.parts())
+            .unwrap()
+            .outcome,
+        WriteOutcome::ExistsWithOtherRecord {
+            differing: vec![TRAINING_RECORD_FILE, MODEL_F32_FILE]
+        }
+    );
+    assert_eq!(snapshot(&paths.models_dir()), before);
+}
+
+/// Eight writers at once, of the same package and of the same encoder with eight
+/// training records: one writes, the others find what it wrote, nobody fails, and the
+/// package verifies.
+#[test]
+fn eight_writers_at_once_end_in_one_package_and_distinguishable_outcomes() {
+    for same_record in [true, false] {
+        let project = Project::new("eight");
+        let paths = project.paths();
+        let parts: Vec<Parts> = (0..8)
+            .map(|writer| Parts {
+                training_record: if same_record {
+                    Parts::tiny().training_record
+                } else {
+                    format!(r#"{{"kind":"train","writer":{writer}}}"#).into_bytes()
+                },
+                ..Parts::tiny()
+            })
+            .collect();
+        let barrier = std::sync::Barrier::new(parts.len());
+        let (barrier, paths) = (&barrier, &paths);
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let writers: Vec<_> = parts
+                .iter()
+                .map(|parts| {
+                    scope.spawn(move || {
+                        barrier.wait();
+                        EncoderPackage::write(paths, &parts.parts())
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .map(|writer| writer.join().unwrap())
+                .collect()
+        });
+        let written: Vec<_> = results
+            .into_iter()
+            .map(|result: Result<_, L2dError>| result.unwrap())
+            .collect();
+
+        let count = |wanted: fn(&WriteOutcome) -> bool| {
+            written
+                .iter()
+                .filter(|written| wanted(&written.outcome))
+                .count()
+        };
+        assert_eq!(count(|outcome| *outcome == WriteOutcome::Written), 1);
+        if same_record {
+            assert_eq!(count(|outcome| *outcome == WriteOutcome::Unchanged), 7);
+        } else {
+            // A loser's record is not the stored one.
+            assert_eq!(
+                count(|outcome| matches!(
+                    outcome,
+                    WriteOutcome::ExistsWithOtherRecord { differing }
+                        if differing == &[TRAINING_RECORD_FILE]
+                )),
+                7
+            );
+        }
+        // Everyone got the one package, and it is the winner's.
+        let winner = written
+            .iter()
+            .position(|written| written.outcome == WriteOutcome::Written)
+            .unwrap();
+        for one in &written {
+            assert_eq!(one.package.identity(), written[winner].package.identity());
+            assert_eq!(one.package.files(), written[winner].package.files());
+        }
+        let dir = written[winner].package.dir();
+        assert_eq!(
+            std::fs::read(dir.join(TRAINING_RECORD_FILE)).unwrap(),
+            parts[winner].training_record
+        );
+        EncoderPackage::open(paths, dir).unwrap();
+        // No temporary directory is left.
+        assert_eq!(std::fs::read_dir(paths.encoders_dir()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn what_is_in_the_place_and_is_no_such_package_is_refused_and_left_unchanged() {
+    let (_project, paths, parts, first) = written("no-overwrite");
+
     // A damaged package in the place is not repaired by writing over it.
     flip_bit(&first.dir().join(TABLE_FILE), 40);
     let damaged = snapshot(&paths.models_dir());
-    let reason = refusal(EncoderPackage::write(&paths, &parts.parts()));
+    let reason = refusal(write(&paths, &parts.parts()));
     assert!(reason.contains("left unchanged"), "{reason}");
     assert!(reason.contains(TABLE_FILE), "{reason}");
     assert_eq!(snapshot(&paths.models_dir()), damaged);
@@ -546,13 +689,13 @@ fn a_directory_left_by_an_interrupted_write_is_no_package_and_is_not_in_the_way(
     // The completed package is as it was, and writing goes on beside the leftover.
     let opened = EncoderPackage::open(&paths, first.dir()).unwrap();
     assert_eq!(opened.identity(), first.identity());
-    let again = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    let again = write(&paths, &parts.parts()).unwrap();
     assert_eq!(again.identity(), first.identity());
     let other = Parts {
         name: "second".into(),
         ..parts.clone()
     };
-    let second = EncoderPackage::write(&paths, &other.parts()).unwrap();
+    let second = write(&paths, &other.parts()).unwrap();
     assert_eq!(second.identity().name, "second");
     assert!(leftover.is_dir());
 }
@@ -722,7 +865,15 @@ fn an_altered_encoder_json_is_refused() {
     let reason = refused();
     assert!(reason.contains(ENCODER_JSON), "{reason}");
     assert!(reason.contains(MODEL_INT8_FILE), "{reason}");
-    assert!(reason.contains("127") && reason.contains("128"), "{reason}");
+    assert!(
+        reason.contains(
+            "states the quantized input as `x_q` uint8 with scale 0.015625 and zero point \
+             127, but in model.int8.onnx it is `x_q` uint8 with scale 0.015625 and zero point \
+             128"
+        ),
+        "{reason}"
+    );
+    assert!(!reason.contains('{'), "{reason}");
     restore();
     edit_json(&dir, "0.015625", "0.015626");
     let reason = refused();
@@ -1029,7 +1180,7 @@ fn a_package_reached_through_a_link_is_refused() {
         name: "through-link".into(),
         ..Parts::tiny()
     };
-    let reason = refusal(EncoderPackage::write(&linked_paths, &other.parts()));
+    let reason = refusal(write(&linked_paths, &other.parts()));
     assert!(reason.contains("link"), "{reason}");
     assert_eq!(snapshot(&outside.root), before);
     drop(project);
@@ -1040,7 +1191,7 @@ fn a_package_is_written_only_below_the_model_directory() {
     let project = Project::new("write-outside");
     let parts = Parts::tiny();
     let dotted = ProjectPaths::new(project.root.join("a").join(".."));
-    let reason = refusal(EncoderPackage::write(&dotted, &parts.parts()));
+    let reason = refusal(write(&dotted, &parts.parts()));
     assert!(reason.contains("model directory"), "{reason}");
     assert!(snapshot(&project.root).is_empty());
 }
@@ -1051,7 +1202,7 @@ fn a_package_is_written_only_below_the_model_directory() {
 fn write_error(parts: &Parts) -> L2dError {
     let project = Project::new("write-refused");
     let paths = project.paths();
-    let error = EncoderPackage::write(&paths, &parts.parts()).unwrap_err();
+    let error = write(&paths, &parts.parts()).unwrap_err();
     assert!(
         snapshot(&project.root)
             .iter()
@@ -1092,7 +1243,7 @@ fn an_unusable_name_is_invalid_input() {
         name: "csic-2010_v1.a".into(),
         ..Parts::tiny()
     };
-    EncoderPackage::write(&project.paths(), &parts.parts()).unwrap();
+    write(&project.paths(), &parts.parts()).unwrap();
 }
 
 #[test]
@@ -1241,7 +1392,7 @@ fn an_open_package_holds_the_table_and_small_things_but_not_the_model() {
         ..Parts::tiny()
     };
     assert!(parts.model_int8.len() > 4 << 20);
-    let written = EncoderPackage::write(&paths, &parts.parts()).unwrap();
+    let written = write(&paths, &parts.parts()).unwrap();
     let opened = EncoderPackage::open(&paths, written.dir()).unwrap();
 
     // Held: the codec's table (256 x 3 x 4 bytes here) and under 4 KiB of names, hashes
@@ -1334,7 +1485,7 @@ fn the_tracked_model_fixture_packages_with_the_science_table() {
         training_record: b"{}",
         model_f32: None,
     };
-    let written = EncoderPackage::write(&paths, &parts).unwrap();
+    let written = write(&paths, &parts).unwrap();
     let opened = EncoderPackage::open(&paths, written.dir()).unwrap();
     assert_eq!(opened.identity().dimension, 128);
     assert_eq!(opened.arch().input, InputArch::V1);
@@ -1349,15 +1500,326 @@ fn the_tracked_model_fixture_packages_with_the_science_table() {
     assert_eq!(opened.codec().mode(), InputMode::Whole);
 }
 
+// ---------------------------------------------------------------------------------------
+// Review round 1.
+
+/// The bytes of `encoder.json` for the tiny package, as a literal. A change in how
+/// `serde_json` indents or prints a 32-bit float, or in the order of the keys, would make
+/// every existing package unopenable (the file must be byte for byte what the tool
+/// writes); this test fails first.
+#[test]
+fn encoder_json_is_this_file_byte_for_byte() {
+    let (_project, _paths, _parts, written) = written("literal");
+    let text = std::fs::read_to_string(written.dir().join(ENCODER_JSON)).unwrap();
+    assert_eq!(text, TINY_ENCODER_JSON);
+}
+
+/// Written line by line with explicit line feeds, so that a checkout that converts line
+/// endings does not change it.
+const TINY_ENCODER_JSON: &str = concat!(
+    "{\n",
+    "  \"format\": 1,\n",
+    "  \"kind\": \"l2d-encoder\",\n",
+    "  \"identity\": {\n",
+    "    \"name\": \"tiny\",\n",
+    "    \"revision\": \"6e0cad4ec57168576a2a1000a45513035a5f2764\",\n",
+    "    \"dimension\": 4\n",
+    "  },\n",
+    "  \"arch\": {\n",
+    "    \"input\": {\n",
+    "      \"input_bytes\": 8,\n",
+    "      \"channels\": 3,\n",
+    "      \"batch\": 2\n",
+    "    },\n",
+    "    \"dimension\": 4\n",
+    "  },\n",
+    "  \"input_mode\": \"payload\",\n",
+    "  \"model\": {\n",
+    "    \"input\": {\n",
+    "      \"name\": \"x\",\n",
+    "      \"element_type\": \"float32\",\n",
+    "      \"shape\": [\n",
+    "        2,\n",
+    "        3,\n",
+    "        1,\n",
+    "        8\n",
+    "      ]\n",
+    "    },\n",
+    "    \"output\": {\n",
+    "      \"name\": \"e\",\n",
+    "      \"element_type\": \"float32\",\n",
+    "      \"shape\": [\n",
+    "        2,\n",
+    "        4\n",
+    "      ]\n",
+    "    }\n",
+    "  },\n",
+    "  \"quantization\": {\n",
+    "    \"input\": {\n",
+    "      \"tensor\": \"x_q\",\n",
+    "      \"element_type\": \"uint8\",\n",
+    "      \"scale\": 0.015625,\n",
+    "      \"zero_point\": 128\n",
+    "    },\n",
+    "    \"output\": {\n",
+    "      \"tensor\": \"e_q\",\n",
+    "      \"element_type\": \"uint8\",\n",
+    "      \"scale\": 0.03137255,\n",
+    "      \"zero_point\": 121\n",
+    "    }\n",
+    "  },\n",
+    "  \"files\": {\n",
+    "    \"model.int8.onnx\": {\n",
+    "      \"bytes\": 647,\n",
+    "      \"sha256\": \"dc81af85a73f0a8d4950f34d8eb80ec5f78110a699a631bbeb7e4d6979555774\"\n",
+    "    },\n",
+    "    \"table.bin\": {\n",
+    "      \"bytes\": 3072,\n",
+    "      \"sha256\": \"ef9b6a451d22ee077307318f5f951e0574d0685cbcea22ba1275919e1bc51f2a\"\n",
+    "    },\n",
+    "    \"training-record.json\": {\n",
+    "      \"bytes\": 25,\n",
+    "      \"sha256\": \"c2dbcbd0e39fc4ef96b1b3b1d9cfe1a21fd78326e47510babf7892eb2a9f484d\"\n",
+    "    },\n",
+    "    \"model.f32.onnx\": {\n",
+    "      \"bytes\": 441,\n",
+    "      \"sha256\": \"3cb8f97fb0e2cd41dae78a72ec23e3113b44cb488c7646ae69a182da662fb179\"\n",
+    "    }\n",
+    "  }\n",
+    "}\n",
+);
+
+#[test]
+fn a_directory_in_the_place_of_encoder_json_is_refused() {
+    let (_project, paths, _parts, written) = written("json-directory");
+    std::fs::remove_file(written.dir().join(ENCODER_JSON)).unwrap();
+    std::fs::create_dir(written.dir().join(ENCODER_JSON)).unwrap();
+    let reason = refusal(EncoderPackage::open(&paths, written.dir()));
+    assert!(
+        reason.contains(&format!("{ENCODER_JSON} is not a plain file")),
+        "{reason}"
+    );
+}
+
+#[test]
+fn an_encoder_json_above_the_size_that_is_read_is_refused() {
+    let (_project, paths, _parts, written) = written("json-size");
+    let path = written.dir().join(ENCODER_JSON);
+    let mut bytes = std::fs::read(&path).unwrap();
+    // White space after the document: still JSON, and one byte above 1 MiB.
+    bytes.resize((1 << 20) + 1, b' ');
+    std::fs::write(&path, &bytes).unwrap();
+    let reason = refusal(EncoderPackage::open(&paths, written.dir()));
+    assert!(reason.contains(ENCODER_JSON), "{reason}");
+    assert!(reason.contains("1048577 bytes"), "{reason}");
+    assert!(reason.contains("1048576"), "{reason}");
+
+    // At exactly 1 MiB it is read, and refused for what it is.
+    bytes.truncate(1 << 20);
+    std::fs::write(&path, &bytes).unwrap();
+    let reason = refusal(EncoderPackage::open(&paths, written.dir()));
+    assert!(reason.contains("byte for byte"), "{reason}");
+}
+
+#[test]
+fn a_model_file_with_two_graphs_is_refused() {
+    let model = Model {
+        graphs: 2,
+        ..Model::tiny()
+    };
+    let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+    assert!(error.to_string().contains("more than one graph"), "{error}");
+    let parts = Parts {
+        model_int8: model.bytes(),
+        ..Parts::tiny()
+    };
+    match write_error(&parts) {
+        L2dError::Refused { reason } => {
+            assert!(reason.contains(MODEL_INT8_FILE), "{reason}");
+            assert!(reason.contains("more than one graph"), "{reason}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_float_model_that_is_not_the_8_bit_models_is_refused_when_written() {
+    let float = |change: fn(&mut Model)| {
+        let mut model = Model {
+            quantized: false,
+            ..Model::tiny()
+        };
+        change(&mut model);
+        model.bytes()
+    };
+    let whole = float(|_| {});
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        ("empty", Vec::new(), "no graph"),
+        (
+            "not a model",
+            b"float model to follow".to_vec(),
+            MODEL_F32_FILE,
+        ),
+        ("cut short", whole[..whole.len() - 9].to_vec(), "cut short"),
+        (
+            "another input shape",
+            float(|model| model.input_shape = vec![2, 3, 1, 16]),
+            "[2, 3, 1, 16]",
+        ),
+        (
+            "another output shape",
+            float(|model| model.output_shape = vec![2, 8]),
+            "[2, 8]",
+        ),
+        (
+            "another input name",
+            float(|model| model.input_name = "input".into()),
+            "`input`",
+        ),
+        (
+            "another output name",
+            float(|model| model.output_name = "out".into()),
+            "`out`",
+        ),
+        (
+            "another element type",
+            float(|model| model.input_type = common::DOUBLE),
+            "float64",
+        ),
+        (
+            "two graphs",
+            float(|model| model.graphs = 2),
+            "more than one graph",
+        ),
+    ];
+    for (what, bytes, names) in cases {
+        let parts = Parts {
+            model_f32: Some(bytes),
+            ..Parts::tiny()
+        };
+        match write_error(&parts) {
+            L2dError::Refused { reason } => {
+                assert!(reason.contains(MODEL_F32_FILE), "{what}: {reason}");
+                assert!(reason.contains(names), "{what}: {reason}");
+            }
+            other => panic!("{what}: expected a refusal, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_refusal_names_a_few_of_many_nodes_and_a_graph_has_a_ceiling() {
+    // 100,000 nodes that read the graph input beside the QuantizeLinear.
+    let model = Model {
+        extra_nodes: 100_000,
+        extra_read_input: true,
+        ..Model::tiny()
+    };
+    let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("it is read by 100001 node(s)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("(`QuantizeLinear`, `Relu`, `Relu` and 99998 more)"),
+        "{message}"
+    );
+    assert!(message.len() < 400, "{} bytes", message.len());
+
+    // The same number of nodes that do not concern the input or the output: the model
+    // reads as the tiny one.
+    let model = Model {
+        extra_nodes: 100_000,
+        ..Model::tiny()
+    };
+    assert_eq!(
+        l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap(),
+        l2d_encoder::ModelInterface::from_onnx(&Model::tiny().bytes()).unwrap()
+    );
+
+    // More graph inputs than the reader keeps, and more dimensions.
+    let mut graph = Vec::new();
+    for at in 0..=l2d_encoder::onnx::MAX_GRAPH_TENSORS {
+        let info = common::value_info(&format!("input-{at}"), common::FLOAT, &[1]);
+        common::bytes_field(&mut graph, 11, &info);
+    }
+    let mut many = Vec::new();
+    common::bytes_field(&mut many, 7, &graph);
+    let error = l2d_encoder::ModelInterface::from_onnx(&many).unwrap_err();
+    assert!(
+        error.to_string().contains("more than 256 inputs"),
+        "{error}"
+    );
+    let model = Model {
+        input_shape: vec![1; l2d_encoder::onnx::MAX_TENSOR_DIMS + 1],
+        ..Model::tiny()
+    };
+    let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+    assert!(
+        error.to_string().contains("more than 8 dimensions"),
+        "{error}"
+    );
+    // A name too long to be shown is refused, and not shown whole.
+    let model = Model {
+        input_name: "n".repeat(100_000),
+        ..Model::tiny()
+    };
+    let error = l2d_encoder::ModelInterface::from_onnx(&model.bytes()).unwrap_err();
+    assert!(error.to_string().contains("100000 bytes"), "{error}");
+    assert!(error.to_string().len() < 400);
+}
+
+/// On a file system that does not tell upper case from lower case, `TINY` beside `tiny`
+/// with the same revision is the same directory: the write says so and what to do.
+#[test]
+fn a_name_that_differs_only_by_case_is_explained_where_the_file_system_merges_them() {
+    let (_project, paths, parts, first) = written("case");
+    let before = snapshot(&paths.models_dir());
+    let shouted = Parts {
+        name: "TINY".into(),
+        ..parts.clone()
+    };
+    let shouted_dir = paths.encoder_dir("TINY", &first.identity().revision);
+    if shouted_dir.is_dir() {
+        let reason = refusal(write(&paths, &shouted.parts()));
+        assert!(reason.contains("upper case"), "{reason}");
+        assert!(
+            reason.contains(&format!("`tiny-{}`", &first.identity().revision[..12])),
+            "{reason}"
+        );
+        assert!(reason.contains("a name that differs"), "{reason}");
+        assert!(reason.contains("left unchanged"), "{reason}");
+        assert_eq!(snapshot(&paths.models_dir()), before);
+        // Opening under the other spelling is refused the same way.
+        let reason = refusal(EncoderPackage::open(&paths, &shouted_dir));
+        assert!(reason.contains("upper case"), "{reason}");
+    } else {
+        let second = EncoderPackage::write(&paths, &shouted.parts()).unwrap();
+        assert_eq!(second.outcome, WriteOutcome::Written);
+    }
+    EncoderPackage::open(&paths, first.dir()).unwrap();
+}
+
 /// On request: packages the model the science gate published (task 2.1) into a temporary
 /// project, opens it, builds the codec and encodes a few texts. No model is run. The
-/// files are read from the main checkout, or from the directory `L2D_SCIENCE_DIR` names.
+/// files are read from the directory the environment variable `L2D_SCIENCE_DIR` names
+/// (on the reference host `<main checkout>\models\science-2.1`); without it the test
+/// says so and does nothing.
 #[test]
 #[ignore = "reads the science gate's published files, which are not tracked"]
 fn the_science_gate_model_packages_and_opens() {
-    let source = std::env::var_os("L2D_SCIENCE_DIR")
+    let Some(source) = std::env::var_os("L2D_SCIENCE_DIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"D:\Source\log2decision\models\science-2.1"));
+    else {
+        println!(
+            "SKIPPED: set L2D_SCIENCE_DIR to the directory that holds the science gate's \
+             files (split17-f0-s0-strip-bce-norm-unit.int8.onnx, .f32.onnx, .table.bin and \
+             record.json); nothing was packaged"
+        );
+        return;
+    };
     let stem = "split17-f0-s0-strip-bce-norm-unit";
     let read = |suffix: &str| {
         let path = source.join(format!("{stem}{suffix}"));
@@ -1388,7 +1850,7 @@ fn the_science_gate_model_packages_and_opens() {
         training_record: &record,
         model_f32: Some(&float),
     };
-    let written = EncoderPackage::write(&paths, &parts).unwrap();
+    let written = write(&paths, &parts).unwrap();
     let opened = EncoderPackage::open(&paths, written.dir()).unwrap();
     assert_eq!(opened.identity(), written.identity());
     println!("identity: {}", opened.identity());

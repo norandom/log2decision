@@ -16,6 +16,7 @@
 //!
 //! The 8-bit model in the QDQ form that ONNX Runtime's static quantization writes and
 //! the design's quantizer is to write:
+//! - one `graph` in the file;
 //! - exactly one graph input that is not an initializer and exactly one graph output,
 //!   both tensors with a fixed shape (every dimension a positive number);
 //! - the input is read by exactly one node, a `QuantizeLinear` whose scale and zero point
@@ -27,14 +28,31 @@
 //! element type `T` (`uint8` or `int8`), the graph computes
 //! `q = saturate_T(round_half_even(x / s) + z)` for the input and `e = (q - z) * s` for
 //! the output.
-
-use std::collections::HashMap;
+//!
+//! # Memory
+//!
+//! The reader walks the graph several times and keeps, besides the bytes it is given,
+//! only the graph's inputs and outputs: at most [`MAX_GRAPH_TENSORS`] of each with at
+//! most [`MAX_TENSOR_DIMS`] dimensions (a graph with more is refused), under 200 KiB at
+//! that ceiling and a few hundred bytes for an encoder model. Nodes and initializers are
+//! looked at one at a time and not kept, so what it allocates does not grow with the
+//! size of the file or the number of its nodes, and a refusal names at most
+//! [`LISTED_NAMES`] of whatever it counts.
 
 use l2d_core::L2dError;
 use serde::{Deserialize, Serialize};
 
 /// The element type every encoder input and output has.
 pub const FLOAT32: &str = "float32";
+/// The most graph inputs, and the most graph outputs, the reader accepts (old exporters
+/// list every initializer as an input).
+pub const MAX_GRAPH_TENSORS: usize = 256;
+/// The most dimensions a graph input or output may have.
+pub const MAX_TENSOR_DIMS: usize = 8;
+/// The longest name a graph input, a graph output or a quantized tensor may have.
+pub const MAX_TENSOR_NAME_BYTES: usize = 256;
+/// How many names a refusal lists before it says how many more there are.
+pub const LISTED_NAMES: usize = 3;
 
 /// A graph input or output: its name, element type and fixed shape.
 ///
@@ -46,6 +64,13 @@ pub struct TensorSpec {
     pub name: String,
     pub element_type: String,
     pub shape: Vec<i64>,
+}
+
+impl std::fmt::Display for TensorSpec {
+    /// `` `x` float32 [32, 64, 1, 256] ``
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` {} {:?}", self.name, self.element_type, self.shape)
+    }
 }
 
 /// How the graph quantizes its input or dequantizes its output (see the module
@@ -61,6 +86,17 @@ pub struct QuantSpec {
     /// A positive finite number.
     pub scale: f32,
     pub zero_point: i32,
+}
+
+impl std::fmt::Display for QuantSpec {
+    /// `` `x_q` uint8 with scale 0.015625 and zero point 128 ``
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` {} with scale {} and zero point {}",
+            self.tensor, self.element_type, self.scale, self.zero_point
+        )
+    }
 }
 
 /// The interface of an 8-bit encoder model, read from the model file.
@@ -84,76 +120,80 @@ impl ModelInterface {
     /// As [`ModelInterface::from_onnx`], with the bare reason for the caller to place.
     pub(crate) fn read(bytes: &[u8]) -> Result<Self, String> {
         let graph = graph_of(bytes)?;
-        let graph = Graph::parse(graph)?;
+        let (input, output) = graph_tensors(graph)?;
 
-        let inputs: Vec<&ValueInfo<'_>> = graph
-            .inputs
-            .iter()
-            .filter(|input| !graph.initializers.contains_key(input.name))
-            .collect();
-        let [input] = inputs.as_slice() else {
-            return Err(format!(
-                "the graph has {} inputs that are not initializers ({}), an encoder has one",
-                inputs.len(),
-                names(inputs.iter().map(|input| input.name))
-            ));
-        };
-        let [output] = graph.outputs.as_slice() else {
-            return Err(format!(
-                "the graph has {} outputs ({}), an encoder has one",
-                graph.outputs.len(),
-                names(graph.outputs.iter().map(|output| output.name))
-            ));
-        };
-
-        // The input: read by one node, a QuantizeLinear.
-        let readers: Vec<&Node<'_>> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.inputs.contains(&input.name))
-            .collect();
-        let quantize = match readers.as_slice() {
-            [node] if node.op == "QuantizeLinear" && node.inputs.first() == Some(&input.name) => {
-                *node
+        // The nodes, one at a time: who reads the input, who produces the output.
+        let mut readers = Tally::default();
+        let mut writers = Tally::default();
+        for field in fields(graph, "the graph") {
+            if let (1, Wire::Bytes(node)) = field? {
+                let node = Node::parse(node, input.name, output.name)?;
+                if node.reads {
+                    readers.add(node);
+                }
+                if node.writes {
+                    writers.add(node);
+                }
             }
+        }
+        let quantize = match readers.only {
+            Some(node) if node.op == "QuantizeLinear" && node.inputs[0] == input.name => node,
             _ => {
                 return Err(format!(
                     "the input `{}` must be read by exactly one node, a QuantizeLinear, as in \
                      the 8-bit QDQ form; it is read by {} node(s) ({})",
                     input.name,
-                    readers.len(),
-                    names(readers.iter().map(|node| node.op))
+                    readers.count,
+                    readers.listed()
                 ));
             }
         };
-        // The output: produced by a DequantizeLinear.
-        let writers: Vec<&Node<'_>> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.outputs.contains(&output.name))
-            .collect();
-        let dequantize = match writers.as_slice() {
-            [node] if node.op == "DequantizeLinear" => *node,
+        let dequantize = match writers.only {
+            Some(node) if node.op == "DequantizeLinear" => node,
             _ => {
                 return Err(format!(
                     "the output `{}` must be produced by exactly one node, a DequantizeLinear, \
                      as in the 8-bit QDQ form; it is produced by {} node(s) ({})",
                     output.name,
-                    writers.len(),
-                    names(writers.iter().map(|node| node.op))
+                    writers.count,
+                    writers.listed()
                 ));
             }
         };
 
+        // The four scalars of the two nodes, found by name among the initializers.
+        let wanted = [
+            quantize.inputs[1],
+            quantize.inputs[2],
+            dequantize.inputs[1],
+            dequantize.inputs[2],
+        ];
+        let mut found: [Option<Initializer<'_>>; 4] = [None, None, None, None];
+        for field in fields(graph, "the graph") {
+            if let (5, Wire::Bytes(tensor)) = field? {
+                let (name, initializer) = Initializer::parse(tensor)?;
+                if name.is_empty() {
+                    continue;
+                }
+                for (slot, wanted) in found.iter_mut().zip(wanted) {
+                    if wanted == name {
+                        *slot = Some(initializer.clone());
+                    }
+                }
+            }
+        }
+        let [in_scale, in_zero, out_scale, out_zero] = found;
         let input_quantization = QuantSpec::of(
-            &graph,
-            quantize,
-            quantize.outputs.first().copied().unwrap_or(""),
+            &quantize,
+            quantize.output,
+            in_scale.as_ref(),
+            in_zero.as_ref(),
         )?;
         let output_quantization = QuantSpec::of(
-            &graph,
-            dequantize,
-            dequantize.inputs.first().copied().unwrap_or(""),
+            &dequantize,
+            dequantize.inputs[0],
+            out_scale.as_ref(),
+            out_zero.as_ref(),
         )?;
         Ok(Self {
             input: input.spec()?,
@@ -164,22 +204,45 @@ impl ModelInterface {
     }
 }
 
+/// The one input and the one output of a model file, 8-bit or float: what
+/// [`ModelInterface`] reads first. Used to hold a float model to its 8-bit model.
+pub(crate) fn tensors(bytes: &[u8]) -> Result<(TensorSpec, TensorSpec), String> {
+    let (input, output) = graph_tensors(graph_of(bytes)?)?;
+    Ok((input.spec()?, output.spec()?))
+}
+
 impl QuantSpec {
     /// The scale and zero point of a `QuantizeLinear` or `DequantizeLinear` node: its
     /// second and third input, both scalar initializers.
-    fn of(graph: &Graph<'_>, node: &Node<'_>, tensor: &str) -> Result<Self, String> {
-        let what = format!("the {} node at `{tensor}`", node.op);
+    fn of(
+        node: &Node<'_>,
+        tensor: &str,
+        scale: Option<&Initializer<'_>>,
+        zero: Option<&Initializer<'_>>,
+    ) -> Result<Self, String> {
         if tensor.is_empty() {
             return Err(format!("a {} node names no quantized tensor", node.op));
         }
-        let initializer = |at: usize, role: &str| -> Result<&Initializer<'_>, String> {
-            let name = node
-                .inputs
-                .get(at)
-                .copied()
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| format!("{what} has no {role}"))?;
-            let found = graph.initializers.get(name).ok_or_else(|| {
+        if tensor.len() > MAX_TENSOR_NAME_BYTES {
+            return Err(format!(
+                "the quantized tensor of a {} node has a name of {} bytes, more than \
+                 {MAX_TENSOR_NAME_BYTES}",
+                node.op,
+                tensor.len()
+            ));
+        }
+        let what = format!("the {} node at `{tensor}`", node.op);
+        fn scalar<'i, 'a>(
+            what: &str,
+            name: &str,
+            role: &str,
+            found: Option<&'i Initializer<'a>>,
+        ) -> Result<&'i Initializer<'a>, String> {
+            if name.is_empty() {
+                return Err(format!("{what} has no {role}"));
+            }
+            let name = clipped(name);
+            let found = found.ok_or_else(|| {
                 format!("{what}: its {role} `{name}` is not an initializer of the graph")
             })?;
             if found.external {
@@ -194,9 +257,9 @@ impl QuantSpec {
                 ));
             }
             Ok(found)
-        };
+        }
 
-        let scale = initializer(1, "scale")?;
+        let scale = scalar(&what, node.inputs[1], "scale", scale)?;
         if scale.data_type != ONNX_FLOAT {
             return Err(format!(
                 "{what}: its scale has the element type {}, not {FLOAT32}",
@@ -214,7 +277,7 @@ impl QuantSpec {
             ));
         }
 
-        let zero = initializer(2, "zero point")?;
+        let zero = scalar(&what, node.inputs[2], "zero point", zero)?;
         let signed = match zero.data_type {
             ONNX_UINT8 => false,
             ONNX_INT8 => true,
@@ -248,12 +311,29 @@ impl QuantSpec {
     }
 }
 
-fn names<'a>(names: impl Iterator<Item = &'a str>) -> String {
-    let listed: Vec<String> = names.map(|name| format!("`{name}`")).collect();
-    if listed.is_empty() {
-        "none".into()
+/// The first [`LISTED_NAMES`] of `count` names, and how many more there are.
+fn listed(names: &[&str], count: usize) -> String {
+    if count == 0 {
+        return "none".into();
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .take(LISTED_NAMES.min(count))
+        .map(|name| format!("`{}`", clipped(name)))
+        .collect();
+    let more = count - shown.len();
+    if more == 0 {
+        shown.join(", ")
     } else {
-        listed.join(", ")
+        format!("{} and {more} more", shown.join(", "))
+    }
+}
+
+/// A name as a message shows it: its first 64 characters.
+fn clipped(name: &str) -> &str {
+    match name.char_indices().nth(64) {
+        Some((end, _)) => &name[..end],
+        None => name,
     }
 }
 
@@ -360,24 +440,164 @@ fn text<'a>(bytes: &'a [u8], what: &str) -> Result<&'a str, String> {
     std::str::from_utf8(bytes).map_err(|_| format!("{what} is not UTF-8 text"))
 }
 
-/// `ModelProto.graph` (field 7).
+/// `ModelProto.graph` (field 7). Protobuf would merge a second `graph` field into the
+/// first; a model file has one, and a file with two is refused rather than read as
+/// either.
 fn graph_of(model: &[u8]) -> Result<&[u8], String> {
     let mut graph = None;
     for field in fields(model, "the model") {
         if let (7, Wire::Bytes(bytes)) = field? {
+            if graph.is_some() {
+                return Err("it holds more than one graph".into());
+            }
             graph = Some(bytes);
         }
     }
     graph.ok_or_else(|| "it holds no graph: not an ONNX model file".to_string())
 }
 
+/// The one graph input that is not an initializer and the one graph output
+/// (`GraphProto`: initializer 5, input 11, output 12).
+fn graph_tensors(graph: &[u8]) -> Result<(ValueInfo<'_>, ValueInfo<'_>), String> {
+    let mut inputs: Vec<ValueInfo<'_>> = Vec::new();
+    let mut outputs: Vec<ValueInfo<'_>> = Vec::new();
+    for field in fields(graph, "the graph") {
+        let (list, role, info) = match field? {
+            (11, Wire::Bytes(info)) => (&mut inputs, "inputs", info),
+            (12, Wire::Bytes(info)) => (&mut outputs, "outputs", info),
+            _ => continue,
+        };
+        if list.len() == MAX_GRAPH_TENSORS {
+            return Err(format!(
+                "the graph lists more than {MAX_GRAPH_TENSORS} {role}; an encoder has one"
+            ));
+        }
+        list.push(ValueInfo::parse(info)?);
+    }
+    // Old exporters list initializers among the inputs: those are not inputs.
+    let mut is_initializer = vec![false; inputs.len()];
+    for field in fields(graph, "the graph") {
+        if let (5, Wire::Bytes(tensor)) = field? {
+            let name = Initializer::name(tensor)?;
+            for (input, flag) in inputs.iter().zip(&mut is_initializer) {
+                *flag |= input.name == name;
+            }
+        }
+    }
+    let mut real = inputs
+        .into_iter()
+        .zip(is_initializer)
+        .filter_map(|(input, is_initializer)| (!is_initializer).then_some(input));
+    let (Some(input), None) = (real.next(), real.next()) else {
+        let (names, count) = graph_tensor_names(graph, 11)?;
+        return Err(format!(
+            "the graph does not have exactly one input that is not an initializer (it lists \
+             {count} inputs, initializers among them: {}); an encoder has one",
+            listed(&names, count)
+        ));
+    };
+    let mut outputs = outputs.into_iter();
+    let (Some(output), None) = (outputs.next(), outputs.next()) else {
+        let (names, count) = graph_tensor_names(graph, 12)?;
+        return Err(format!(
+            "the graph has {count} outputs ({}), an encoder has one",
+            listed(&names, count)
+        ));
+    };
+    Ok((input, output))
+}
+
+/// The first names of the graph's inputs (field 11) or outputs (field 12) and their
+/// number, for a refusal.
+fn graph_tensor_names(graph: &[u8], which: u64) -> Result<(Vec<&str>, usize), String> {
+    let mut names = Vec::new();
+    let mut count = 0;
+    for field in fields(graph, "the graph") {
+        if let (found, Wire::Bytes(info)) = field?
+            && found == which
+        {
+            count += 1;
+            if names.len() < LISTED_NAMES {
+                names.push(ValueInfo::parse(info)?.name);
+            }
+        }
+    }
+    Ok((names, count))
+}
+
+/// What the reader needs of a node (`NodeProto`: input 1, output 2, op_type 4): its
+/// operator, its first three inputs and its first output (an absent one is empty), and
+/// whether it reads or produces the tensors asked about. Nothing is allocated.
+#[derive(Clone, Copy)]
 struct Node<'a> {
     op: &'a str,
-    inputs: Vec<&'a str>,
-    outputs: Vec<&'a str>,
+    inputs: [&'a str; 3],
+    output: &'a str,
+    reads: bool,
+    writes: bool,
+}
+
+impl<'a> Node<'a> {
+    fn parse(node: &'a [u8], read: &str, written: &str) -> Result<Self, String> {
+        let mut parsed = Node {
+            op: "",
+            inputs: [""; 3],
+            output: "",
+            reads: false,
+            writes: false,
+        };
+        let (mut inputs, mut outputs) = (0usize, 0usize);
+        for field in fields(node, "a node") {
+            match field? {
+                (1, Wire::Bytes(bytes)) => {
+                    let name = text(bytes, "a node input")?;
+                    if let Some(slot) = parsed.inputs.get_mut(inputs) {
+                        *slot = name;
+                    }
+                    inputs += 1;
+                    parsed.reads |= name == read;
+                }
+                (2, Wire::Bytes(bytes)) => {
+                    let name = text(bytes, "a node output")?;
+                    if outputs == 0 {
+                        parsed.output = name;
+                    }
+                    outputs += 1;
+                    parsed.writes |= name == written;
+                }
+                (4, Wire::Bytes(bytes)) => parsed.op = text(bytes, "a node's operator")?,
+                _ => {}
+            }
+        }
+        Ok(parsed)
+    }
+}
+
+/// The nodes that read the input, or that produce the output: how many, the only one
+/// when there is exactly one, and the operators of the first few for a refusal.
+#[derive(Default)]
+struct Tally<'a> {
+    count: usize,
+    only: Option<Node<'a>>,
+    first_ops: [&'a str; LISTED_NAMES],
+}
+
+impl<'a> Tally<'a> {
+    fn add(&mut self, node: Node<'a>) {
+        if let Some(slot) = self.first_ops.get_mut(self.count) {
+            *slot = node.op;
+        }
+        self.count += 1;
+        self.only = (self.count == 1).then_some(node);
+    }
+
+    fn listed(&self) -> String {
+        listed(&self.first_ops, self.count)
+    }
 }
 
 /// An initializer, without its values: only what a scalar needs is kept.
+#[derive(Clone)]
 struct Initializer<'a> {
     data_type: i64,
     /// The product of the dimensions; none when it does not fit.
@@ -388,76 +608,21 @@ struct Initializer<'a> {
     external: bool,
 }
 
-enum Dim {
-    Fixed(i64),
-    Named(String),
-    Unknown,
-}
-
-struct ValueInfo<'a> {
-    name: &'a str,
-    /// None when the value is not a tensor.
-    element_type: Option<i64>,
-    /// None when the tensor has no shape.
-    shape: Option<Vec<Dim>>,
-}
-
-struct Graph<'a> {
-    nodes: Vec<Node<'a>>,
-    initializers: HashMap<&'a str, Initializer<'a>>,
-    inputs: Vec<ValueInfo<'a>>,
-    outputs: Vec<ValueInfo<'a>>,
-}
-
-impl<'a> Graph<'a> {
-    /// `GraphProto`: node 1, initializer 5, input 11, output 12.
-    fn parse(graph: &'a [u8]) -> Result<Self, String> {
-        let mut parsed = Graph {
-            nodes: Vec::new(),
-            initializers: HashMap::new(),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        };
-        for field in fields(graph, "the graph") {
-            match field? {
-                (1, Wire::Bytes(bytes)) => parsed.nodes.push(Node::parse(bytes)?),
-                (5, Wire::Bytes(bytes)) => {
-                    let (name, initializer) = Initializer::parse(bytes)?;
-                    parsed.initializers.insert(name, initializer);
-                }
-                (11, Wire::Bytes(bytes)) => parsed.inputs.push(ValueInfo::parse(bytes)?),
-                (12, Wire::Bytes(bytes)) => parsed.outputs.push(ValueInfo::parse(bytes)?),
-                _ => {}
-            }
-        }
-        Ok(parsed)
-    }
-}
-
-impl<'a> Node<'a> {
-    /// `NodeProto`: input 1, output 2, op_type 4.
-    fn parse(node: &'a [u8]) -> Result<Self, String> {
-        let mut parsed = Node {
-            op: "",
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        };
-        for field in fields(node, "a node") {
-            match field? {
-                (1, Wire::Bytes(bytes)) => parsed.inputs.push(text(bytes, "a node input")?),
-                (2, Wire::Bytes(bytes)) => parsed.outputs.push(text(bytes, "a node output")?),
-                (4, Wire::Bytes(bytes)) => parsed.op = text(bytes, "a node's operator")?,
-                _ => {}
-            }
-        }
-        Ok(parsed)
-    }
-}
-
 impl<'a> Initializer<'a> {
+    /// Only the name (`TensorProto.name`, field 8).
+    fn name(tensor: &'a [u8]) -> Result<&'a str, String> {
+        let mut name = "";
+        for field in fields(tensor, "an initializer") {
+            if let (8, Wire::Bytes(bytes)) = field? {
+                name = text(bytes, "an initializer's name")?;
+            }
+        }
+        Ok(name)
+    }
+
     /// `TensorProto`: dims 1, data_type 2, float_data 4, int32_data 5, name 8,
     /// raw_data 9, external_data 13, data_location 14. Repeated numbers come packed or
-    /// one per field.
+    /// one per field. Nothing is allocated.
     fn parse(tensor: &'a [u8]) -> Result<(&'a str, Self), String> {
         let mut name = "";
         let mut parsed = Initializer {
@@ -509,6 +674,20 @@ impl<'a> Initializer<'a> {
     }
 }
 
+enum Dim<'a> {
+    Fixed(i64),
+    Named(&'a str),
+    Unknown,
+}
+
+struct ValueInfo<'a> {
+    name: &'a str,
+    /// None when the value is not a tensor.
+    element_type: Option<i64>,
+    /// None when the tensor has no shape.
+    shape: Option<Vec<Dim<'a>>>,
+}
+
 impl<'a> ValueInfo<'a> {
     /// `ValueInfoProto`: name 1, type 2; `TypeProto.tensor_type` 1 with elem_type 1 and
     /// shape 2; `TensorShapeProto.dim` 1 with dim_value 1 or dim_param 2.
@@ -548,18 +727,23 @@ impl<'a> ValueInfo<'a> {
         Ok(parsed)
     }
 
-    fn shape(shape: &[u8]) -> Result<Vec<Dim>, String> {
+    fn shape(shape: &'a [u8]) -> Result<Vec<Dim<'a>>, String> {
         let mut dims = Vec::new();
         for field in fields(shape, "a shape") {
             let (1, Wire::Bytes(one)) = field? else {
                 continue;
             };
+            if dims.len() == MAX_TENSOR_DIMS {
+                return Err(format!(
+                    "a graph input or output has more than {MAX_TENSOR_DIMS} dimensions"
+                ));
+            }
             let mut dim = Dim::Unknown;
             for field in fields(one, "a dimension") {
                 match field? {
                     (1, Wire::Varint(value)) => dim = Dim::Fixed(value as i64),
                     (2, Wire::Bytes(name)) => {
-                        dim = Dim::Named(text(name, "a dimension's name")?.to_string());
+                        dim = Dim::Named(text(name, "a dimension's name")?);
                     }
                     _ => {}
                 }
@@ -571,35 +755,41 @@ impl<'a> ValueInfo<'a> {
 
     /// The tensor as the package records it; a tensor without a fixed shape is refused.
     fn spec(&self) -> Result<TensorSpec, String> {
+        let name = clipped(self.name);
+        if self.name.len() > MAX_TENSOR_NAME_BYTES {
+            return Err(format!(
+                "the tensor `{name}`... has a name of {} bytes, more than \
+                 {MAX_TENSOR_NAME_BYTES}",
+                self.name.len()
+            ));
+        }
         let element_type = self
             .element_type
-            .ok_or_else(|| format!("`{}` is not a tensor", self.name))?;
+            .ok_or_else(|| format!("`{name}` is not a tensor"))?;
         let dims = self
             .shape
             .as_ref()
-            .ok_or_else(|| format!("the tensor `{}` has no shape", self.name))?;
+            .ok_or_else(|| format!("the tensor `{name}` has no shape"))?;
         let mut shape = Vec::with_capacity(dims.len());
         for (at, dim) in dims.iter().enumerate() {
             match dim {
                 Dim::Fixed(value) if *value > 0 => shape.push(*value),
                 Dim::Fixed(value) => {
                     return Err(format!(
-                        "dimension {at} of the tensor `{}` is {value}, not a positive number",
-                        self.name
+                        "dimension {at} of the tensor `{name}` is {value}, not a positive number"
                     ));
                 }
-                Dim::Named(name) => {
+                Dim::Named(variable) => {
                     return Err(format!(
-                        "dimension {at} of the tensor `{}` is the variable `{name}`; an encoder \
+                        "dimension {at} of the tensor `{name}` is the variable `{}`; an encoder \
                          model has a fixed shape",
-                        self.name
+                        clipped(variable)
                     ));
                 }
                 Dim::Unknown => {
                     return Err(format!(
-                        "dimension {at} of the tensor `{}` is not stated; an encoder model has \
-                         a fixed shape",
-                        self.name
+                        "dimension {at} of the tensor `{name}` is not stated; an encoder model \
+                         has a fixed shape"
                     ));
                 }
             }

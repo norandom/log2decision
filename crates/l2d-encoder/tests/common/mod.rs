@@ -234,6 +234,12 @@ pub struct Model {
     /// Number of 32-bit weights.
     pub weights: usize,
     pub seed: u8,
+    /// Nodes beside the encoder's own, each a few bytes: `Relu` nodes that read the
+    /// tensor `h` (or the graph input, with `extra_read_input`) and write `z`.
+    pub extra_nodes: usize,
+    pub extra_read_input: bool,
+    /// How many times the `graph` field is written into the model (a model has one).
+    pub graphs: usize,
 }
 
 impl Model {
@@ -254,6 +260,9 @@ impl Model {
             quantized: true,
             weights: 64,
             seed: 0,
+            extra_nodes: 0,
+            extra_read_input: false,
+            graphs: 1,
         }
     }
 
@@ -285,6 +294,14 @@ impl Model {
         };
         for one in &nodes {
             bytes_field(&mut graph, 1, one);
+        }
+        let extra = node(
+            "Relu",
+            &[if self.extra_read_input { x } else { "h" }],
+            &["z"],
+        );
+        for _ in 0..self.extra_nodes {
+            bytes_field(&mut graph, 1, &extra);
         }
         bytes_field(&mut graph, 2, b"tiny");
         let initializers = [
@@ -323,7 +340,9 @@ impl Model {
         let mut model = Vec::new();
         varint_field(&mut model, 1, 8);
         bytes_field(&mut model, 2, b"l2d-test");
-        bytes_field(&mut model, 7, &graph);
+        for _ in 0..self.graphs {
+            bytes_field(&mut model, 7, &graph);
+        }
         bytes_field(&mut model, 8, &opset);
         model
     }

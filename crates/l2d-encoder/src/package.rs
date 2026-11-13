@@ -38,6 +38,16 @@
 //! hashed. What `encoder.json` says about the model (tensor names, shapes, element
 //! types, quantization) is not hashed either: it is read from the model file, which is.
 //!
+//! The `/1` in the first line stands for everything in the tool's code that shapes a
+//! vector and is not among the hashed bytes: the padding byte (0), the truncation rule
+//! (the first `input_bytes` bytes of the part the mode selects), how a NUL byte in a text
+//! is read (as padding), the layout of the input tensor
+//! (`x[n, c, 0, t] = table[byte[n, t]][c]`), and the L2 normalisation of the output after
+//! the graph (task 2.6). A change to any of them gives other vectors from the same
+//! files, so it must raise that number, which changes every revision. If the tool ever
+//! feeds quantized 8-bit input to the model itself (task 2.12), its rounding rule joins
+//! this list.
+//!
 //! # Verification
 //!
 //! [`EncoderPackage::open`] checks, before it hands anything out and without writing:
@@ -54,10 +64,12 @@
 //! (`.<name>-<rev12>.writing-<process>-<count>`), each file synced, `encoder.json` last,
 //! and renames the directory into place. A package directory therefore appears complete
 //! or not at all, and an existing package is never written into: the same package again
-//! is found and returned, anything else in the place is a refusal. A process that dies
-//! on the way leaves its temporary directory behind; it does not open as a package and
-//! is in nobody's way, and it is not removed by a later write (it could belong to a
-//! process that is still writing).
+//! is found and returned, the same encoder with another training record is found,
+//! returned and reported as such ([`WriteOutcome`]), and anything else in the place is a
+//! refusal. A process that dies on the way leaves its temporary directory behind; it
+//! does not open as a package, it is not removed by a later write (it could belong to a
+//! process that is still writing), and a later write whose temporary name is taken by
+//! such a leftover takes the next count.
 
 use std::fs;
 use std::io::Write as _;
@@ -101,9 +113,13 @@ pub const MAX_ENCODER_JSON_BYTES: u64 = 1024 * 1024;
 
 /// The buffer a file is hashed through when it is not kept ([`sha256_of`]).
 const HASH_BUFFER_BYTES: u64 = 1024 * 1024;
-/// Memory of an open besides the files: paths, the parsed description, the model's
-/// node and initializer lists (names and positions, not values).
-const OPEN_FIXED_BYTES: u64 = 64 * 1024;
+/// Memory of an open besides the files: paths, the parsed description, and what the
+/// model reader keeps, which has a ceiling of its own (under 200 KiB: at most 256 graph
+/// inputs and outputs each with at most 8 dimensions; nodes and initializers are not
+/// kept, see [`crate::onnx`]).
+const OPEN_FIXED_BYTES: u64 = 256 * 1024;
+/// How many temporary names a write tries before it gives up.
+const TEMPORARY_TRIES: u32 = 64;
 const OPERATION: &str = "opening the encoder package";
 
 /// The architecture description of an encoder: the shape of the model input
@@ -433,7 +449,27 @@ fn require_resolved(paths: &ProjectPaths, dir: &Path) -> Result<(), L2dError> {
     let resolve =
         |path: &Path| fs::canonicalize(path).map_err(|error| io_failure("resolving", path, &error));
     let (real, real_encoders) = (resolve(dir)?, resolve(&encoders)?);
-    if real.parent() != Some(real_encoders.as_path()) || real.file_name() != dir.file_name() {
+    let same_place = real.parent() == Some(real_encoders.as_path());
+    if let (true, Some(on_disk), Some(asked)) = (same_place, real.file_name(), dir.file_name())
+        && on_disk != asked
+        && on_disk
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&asked.to_string_lossy())
+    {
+        // A file system that does not tell upper case from lower case: the directory
+        // that answers to this name is another encoder's.
+        return Err(L2dError::Refused {
+            reason: format!(
+                "{} is the directory `{}` on this file system, which does not tell upper \
+                 case from lower case in names: it belongs to the encoder of that spelling. \
+                 Open it under its own name, or give the new encoder a name that differs by \
+                 more than the case of its letters",
+                dir.display(),
+                on_disk.to_string_lossy()
+            ),
+        });
+    }
+    if !same_place || real.file_name() != dir.file_name() {
         return Err(L2dError::Refused {
             reason: format!(
                 "encoder packages are read and written only directly below the project's model \
@@ -502,6 +538,70 @@ fn interface_of(bytes: &[u8], arch: &EncoderArch) -> Result<ModelInterface, Stri
 
 /// Makes temporary directory names of one process distinct.
 static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// Makes the temporary sibling directory of a write,
+/// `.<stem>.writing-<process id>-<count>`. A name that is taken (the leftover of an
+/// interrupted write of a process that had this process id) is passed over for the next
+/// count, [`TEMPORARY_TRIES`] times at most. The baseline scorer and the calibration
+/// name their temporary directories by the same scheme, without the retry.
+fn create_temporary(encoders: &Path, stem: &str, counter: &AtomicU64) -> Result<PathBuf, L2dError> {
+    let mut taken = Vec::new();
+    for _ in 0..TEMPORARY_TRIES {
+        let temporary = encoders.join(format!(
+            ".{stem}.writing-{}-{}",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&temporary) {
+            Ok(()) => return Ok(temporary),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                taken.push(temporary);
+            }
+            Err(error) => return Err(io_failure("creating", &temporary, &error)),
+        }
+    }
+    Err(L2dError::Runtime {
+        detail: format!(
+            "no temporary directory could be made in {}: the {TEMPORARY_TRIES} names from {} \
+             to {} are taken, by what interrupted writes left behind; remove the \
+             `.{stem}.writing-*` directories there when no other write is running",
+            encoders.display(),
+            taken
+                .first()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            taken
+                .last()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        ),
+    })
+}
+
+/// What a write found and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Nothing was in the place; the package was written.
+    Written,
+    /// The very same package was there already; nothing was written.
+    Unchanged,
+    /// The same encoder (same name and revision, so the same model, table, architecture
+    /// and input mode) was there already with other content in the files the revision
+    /// does not cover. Nothing was written or overwritten: the package that was there is
+    /// the one returned, and the new training record (or float model) was not stored.
+    ExistsWithOtherRecord {
+        /// The files that differ: `training-record.json`, `model.f32.onnx` or both.
+        differing: Vec<&'static str>,
+    },
+}
+
+/// The result of [`EncoderPackage::write`]: the package that is in the place now, and
+/// how it got there.
+#[derive(Debug, Clone)]
+pub struct WrittenPackage {
+    pub package: EncoderPackage,
+    pub outcome: WriteOutcome,
+}
 
 /// Where a write stands; told to the observer of [`EncoderPackage::write_observed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,15 +684,29 @@ impl EncoderPackage {
     /// is not an 8-bit encoder model of the architecture's shapes, or a place that is
     /// not the project's own `models/encoders/` is [`L2dError::Refused`].
     ///
-    /// The directory appears complete or not at all (see the module documentation). When
-    /// it exists already and holds this very package, nothing is written and it is
-    /// returned; when it holds anything else (another training record or float model
-    /// under the same revision, a damaged package, something that is no package), the
-    /// write is [`L2dError::Refused`] and the directory is left unchanged.
+    /// A float model, when given, must have the input and output of the 8-bit model
+    /// (names, 32-bit float, shapes), or the write is refused.
+    ///
+    /// The directory appears complete or not at all (see the module documentation). What
+    /// happened is in the result ([`WriteOutcome`]), with the package that is now in the
+    /// place, opened and verified:
+    /// - nothing was there: the package was written ([`WriteOutcome::Written`]);
+    /// - this very package was there: nothing was written ([`WriteOutcome::Unchanged`]);
+    /// - the same encoder (same revision and name) was there with another training
+    ///   record or float model: nothing was written or overwritten, the existing package
+    ///   is returned, and the caller should say that the new record was not stored
+    ///   ([`WriteOutcome::ExistsWithOtherRecord`]). A training run does not fail on it:
+    ///   the encoder it produced is the one that is there.
+    ///
+    /// Anything else in the place (a damaged package, something that is no package) is
+    /// [`L2dError::Refused`] and left unchanged.
     ///
     /// Memory: the caller holds the parts; the write adds the parsed table and, for the
     /// final verification, the model and the table once more.
-    pub fn write(paths: &ProjectPaths, parts: &PackageParts<'_>) -> Result<Self, L2dError> {
+    pub fn write(
+        paths: &ProjectPaths,
+        parts: &PackageParts<'_>,
+    ) -> Result<WrittenPackage, L2dError> {
         Self::write_observed(paths, parts, &mut |_| Ok(()))
     }
 
@@ -602,7 +716,7 @@ impl EncoderPackage {
         paths: &ProjectPaths,
         parts: &PackageParts<'_>,
         observer: &mut dyn FnMut(Progress) -> Result<(), L2dError>,
-    ) -> Result<Self, L2dError> {
+    ) -> Result<WrittenPackage, L2dError> {
         let name = parts.name;
         if !usable_name(name) {
             return Err(L2dError::InvalidInput {
@@ -622,6 +736,26 @@ impl EncoderPackage {
         table_of(parts.table, &parts.arch)?;
         let model = interface_of(parts.model_int8, &parts.arch)
             .map_err(|reason| L2dError::Refused { reason })?;
+        if let Some(float) = parts.model_f32 {
+            // The float model is the source of the 8-bit one: the same input and output.
+            let (input, output) =
+                crate::onnx::tensors(float).map_err(|reason| L2dError::Refused {
+                    reason: format!(
+                        "{MODEL_F32_FILE} is not usable as the float model of the encoder: \
+                         {reason}"
+                    ),
+                })?;
+            if input != model.input || output != model.output {
+                return Err(L2dError::Refused {
+                    reason: format!(
+                        "{MODEL_F32_FILE} is not the float model of {MODEL_INT8_FILE}: its \
+                         input is {input} and its output {output}, the 8-bit model has {} and \
+                         {}",
+                        model.input, model.output
+                    ),
+                });
+            }
+        }
 
         let revision =
             Self::revision_of(&parts.arch, parts.input_mode, parts.table, parts.model_int8);
@@ -661,13 +795,11 @@ impl EncoderPackage {
         fs::create_dir_all(&encoders).map_err(|error| io_failure("creating", &encoders, &error))?;
         // Again, now that the directories exist: none of them may have become a link.
         require_location(paths, &dir)?;
-        let temporary = encoders.join(format!(
-            ".{name}-{}.writing-{}-{}",
-            short_revision(&revision),
-            std::process::id(),
-            WRITES.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&temporary).map_err(|error| io_failure("creating", &temporary, &error))?;
+        let temporary = create_temporary(
+            &encoders,
+            &format!("{name}-{}", short_revision(&revision)),
+            &WRITES,
+        )?;
 
         let mut files: Vec<(&'static str, &[u8])> = vec![
             (MODEL_INT8_FILE, parts.model_int8),
@@ -704,12 +836,21 @@ impl EncoderPackage {
             return Err(io_failure("completing", &dir, &error));
         }
         sync_dir(&encoders)?;
-        Self::open_checked(paths, &dir, Budget::Unchecked)
+        Ok(WrittenPackage {
+            package: Self::open_checked(paths, &dir, Budget::Unchecked)?,
+            outcome: WriteOutcome::Written,
+        })
     }
 
-    /// The package that is already in the place of the one to be written, when it is the
-    /// same; a refusal otherwise. Nothing is written.
-    fn existing(paths: &ProjectPaths, dir: &Path, wanted: &Manifest) -> Result<Self, L2dError> {
+    /// What is already in the place of the package to be written: the same package
+    /// ([`WriteOutcome::Unchanged`]), the same encoder with another training record or
+    /// float model ([`WriteOutcome::ExistsWithOtherRecord`]), or something that is a
+    /// refusal. Nothing is written.
+    fn existing(
+        paths: &ProjectPaths,
+        dir: &Path,
+        wanted: &Manifest,
+    ) -> Result<WrittenPackage, L2dError> {
         let found = match Self::open_checked(paths, dir, Budget::Unchecked) {
             Ok(found) => found,
             Err(error) => {
@@ -726,9 +867,12 @@ impl EncoderPackage {
         };
         let wanted_files = wanted.files.list();
         if found.files == wanted_files {
-            return Ok(found);
+            return Ok(WrittenPackage {
+                package: found,
+                outcome: WriteOutcome::Unchanged,
+            });
         }
-        let mut differing: Vec<&str> = Vec::new();
+        let mut differing: Vec<&'static str> = Vec::new();
         for name in [
             MODEL_INT8_FILE,
             TABLE_FILE,
@@ -740,12 +884,21 @@ impl EncoderPackage {
                 differing.push(name);
             }
         }
+        // The same encoder: the revision covers the model, the table, the architecture and
+        // the input mode. Only what the revision does not cover can differ.
+        if differing
+            .iter()
+            .all(|name| [TRAINING_RECORD_FILE, MODEL_F32_FILE].contains(name))
+        {
+            return Ok(WrittenPackage {
+                package: found,
+                outcome: WriteOutcome::ExistsWithOtherRecord { differing },
+            });
+        }
         Err(L2dError::Refused {
             reason: format!(
-                "{} already holds revision {} of the encoder `{}` with other content in {}; \
-                 it was left unchanged. The revision covers the model, the table, the \
-                 architecture and the input mode; a package with another training record or \
-                 float model needs another name",
+                "{} already holds revision {} of the encoder `{}` with other content in {}, \
+                 which the revision covers; it was left unchanged",
                 dir.display(),
                 wanted.identity.revision,
                 wanted.identity.name,
@@ -784,9 +937,12 @@ impl EncoderPackage {
     /// The memory an open of this directory needs at its peak, from the sizes of the
     /// files: the 8-bit model once (it is hashed and read for its interface in memory,
     /// then dropped), the table twice (its bytes and the parsed table), `encoder.json`
-    /// three times, the 1 MiB buffer the other files are hashed through, and 64 KiB.
-    /// For architecture v1 and the science gate's model that is about 2.2 MiB. What stays
-    /// after the open is [`EncoderPackage::held_bytes`].
+    /// three times, the 1 MiB buffer the other files are hashed through, and 256 KiB for
+    /// what does not depend on the file sizes: the paths, the parsed description and what
+    /// the model reader keeps, which is bounded whatever the model holds (at most 256
+    /// graph inputs and outputs each, see [`crate::onnx`]; a model file of very many
+    /// nodes costs no more). For architecture v1 and the science gate's model that is
+    /// about 2.3 MiB. What stays after the open is [`EncoderPackage::held_bytes`].
     pub fn open_bytes(dir: &Path) -> Result<u64, L2dError> {
         let size = |file: &str| file_metadata(dir, file).map(|found| found.len());
         let (json, model, table) = (
@@ -821,8 +977,12 @@ impl EncoderPackage {
         }
         let refused = |why: String| not_a_package(dir, why);
 
-        // The description.
-        let json_size = file_metadata(dir, ENCODER_JSON)?.len();
+        // The description: a plain file of a size worth reading.
+        let json_file = file_metadata(dir, ENCODER_JSON)?;
+        if !json_file.file_type().is_file() {
+            return Err(refused(format!("{ENCODER_JSON} is not a plain file")));
+        }
+        let json_size = json_file.len();
         if json_size > MAX_ENCODER_JSON_BYTES {
             return Err(refused(format!(
                 "{ENCODER_JSON} has {json_size} bytes, more than the {MAX_ENCODER_JSON_BYTES} \
@@ -966,11 +1126,37 @@ impl EncoderPackage {
         drop(model_bytes);
         let expected = manifest.clone().with_model(&model);
         if expected.to_bytes()? != manifest_bytes {
+            // The first statement about the model that is not the model's own.
+            let stated_and_read = [
+                (
+                    "the input",
+                    manifest.model.input.to_string(),
+                    expected.model.input.to_string(),
+                ),
+                (
+                    "the output",
+                    manifest.model.output.to_string(),
+                    expected.model.output.to_string(),
+                ),
+                (
+                    "the quantized input",
+                    manifest.quantization.input.to_string(),
+                    expected.quantization.input.to_string(),
+                ),
+                (
+                    "the quantized output",
+                    manifest.quantization.output.to_string(),
+                    expected.quantization.output.to_string(),
+                ),
+            ];
             if expected != manifest {
+                let (what, stated, read) = stated_and_read
+                    .iter()
+                    .find(|(_, stated, read)| stated != read)
+                    .unwrap_or(&stated_and_read[0]);
                 return Err(refused(format!(
-                    "{ENCODER_JSON} states {:?} and {:?}, but {MODEL_INT8_FILE} has {:?} and \
-                     {:?}",
-                    manifest.model, manifest.quantization, expected.model, expected.quantization
+                    "{ENCODER_JSON} states {what} as {stated}, but in {MODEL_INT8_FILE} it is \
+                     {read}; the description was altered or does not belong to this model"
                 )));
             }
             return Err(refused(format!(
@@ -1068,7 +1254,10 @@ impl EncoderPackage {
         Ok(bytes)
     }
 
-    /// The key for the provider's compilation cache: the revision (40 characters).
+    /// The package's part of the key for the provider's compilation cache: the revision
+    /// (40 characters). It is not the whole key. The provider compiles a model for one
+    /// release of the runtime and under its options, so the session (task 2.6) adds the
+    /// runtime release and a digest of the provider options that change compilation.
     pub fn cache_key(&self) -> &str {
         &self.identity.revision
     }
@@ -1225,6 +1414,8 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(first.outcome, WriteOutcome::Written);
+        let first = first.package;
         assert_eq!(seen, STEPS);
         let completed = snapshot(&paths.models_dir());
 
@@ -1270,7 +1461,9 @@ mod tests {
             training_record: b"{}",
             model_f32: None,
         };
-        let first = EncoderPackage::write(&paths, &parts("first", InputMode::Whole)).unwrap();
+        let first = EncoderPackage::write(&paths, &parts("first", InputMode::Whole))
+            .unwrap()
+            .package;
         let completed = snapshot(first.dir());
 
         // A panic in the observer unwinds through the write as a kill would stop it: the
@@ -1330,10 +1523,128 @@ mod tests {
 
         // The next run writes the package beside the leftovers and leaves them alone.
         let second = EncoderPackage::write(&paths, &parts("second", InputMode::Payload)).unwrap();
-        assert_eq!(second.identity().name, "second");
+        assert_eq!(second.outcome, WriteOutcome::Written);
+        assert_eq!(second.package.identity().name, "second");
         assert_eq!(entries(&paths.encoders_dir()).len(), 2 + leftovers.len());
         assert_eq!(snapshot(first.dir()), completed);
         EncoderPackage::open(&paths, first.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_temporary_name_taken_by_a_leftover_is_passed_over() {
+        let project = Project::new("temporary");
+        let encoders = project.root.join("models").join("encoders");
+        fs::create_dir_all(&encoders).unwrap();
+        let name = |count: u64| {
+            encoders.join(format!(
+                ".enc-0123456789ab.writing-{}-{count}",
+                std::process::id()
+            ))
+        };
+        // A process that had this process id died at counts 0, 1 and 2; one leftover is
+        // a file, which is in the way just the same.
+        fs::create_dir(name(0)).unwrap();
+        fs::create_dir(name(1)).unwrap();
+        fs::write(name(2), b"").unwrap();
+        let counter = AtomicU64::new(0);
+        let made = create_temporary(&encoders, "enc-0123456789ab", &counter).unwrap();
+        assert_eq!(made, name(3));
+        assert!(made.is_dir());
+        assert_eq!(counter.load(Ordering::Relaxed), 4);
+        // The leftovers were not touched.
+        assert!(name(0).is_dir() && name(1).is_dir() && name(2).is_file());
+
+        // Bounded: with every name of the next tries taken, the write ends with what to
+        // remove, and makes nothing.
+        for count in 4..4 + u64::from(TEMPORARY_TRIES) {
+            fs::create_dir(name(count)).unwrap();
+        }
+        let before = entries(&encoders).len();
+        match create_temporary(&encoders, "enc-0123456789ab", &counter) {
+            Err(L2dError::Runtime { detail }) => {
+                assert!(detail.contains(".enc-0123456789ab.writing-*"), "{detail}");
+                assert!(detail.contains(&name(4).display().to_string()), "{detail}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert_eq!(entries(&encoders).len(), before);
+        // The count went on, so the next write is past the leftovers.
+        let made = create_temporary(&encoders, "enc-0123456789ab", &counter).unwrap();
+        assert_eq!(made, name(4 + u64::from(TEMPORARY_TRIES)));
+    }
+
+    /// Makes `link` a directory link to `target`: a symbolic link, or on Windows, where
+    /// that needs a privilege, a junction.
+    fn link_dir(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return;
+            }
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "no directory link could be made");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// The comparison of resolved paths on its own, without the check for links that
+    /// runs before it in `open` and `write`.
+    #[test]
+    fn a_directory_that_resolves_elsewhere_is_refused_by_the_resolved_path() {
+        let project = Project::new("resolved");
+        let paths = ProjectPaths::new(&project.root);
+        let encoders = paths.encoders_dir();
+        fs::create_dir_all(encoders.join("real-0123456789ab")).unwrap();
+        require_resolved(&paths, &encoders.join("real-0123456789ab")).unwrap();
+
+        // A link in `models/encoders/` to a directory outside it.
+        let outside = project.root.join("elsewhere").join("linked-0123456789ab");
+        fs::create_dir_all(&outside).unwrap();
+        let link = encoders.join("linked-0123456789ab");
+        link_dir(&link, &outside);
+        match require_resolved(&paths, &link) {
+            Err(L2dError::Refused { reason }) => {
+                assert!(reason.contains("resolves to"), "{reason}");
+                assert!(reason.contains("elsewhere"), "{reason}");
+                assert!(reason.contains(&encoders.display().to_string()), "{reason}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // A link to a sibling package: the same parent, another name.
+        let alias = encoders.join("alias-0123456789ab");
+        link_dir(&alias, &encoders.join("real-0123456789ab"));
+        match require_resolved(&paths, &alias) {
+            Err(L2dError::Refused { reason }) => {
+                assert!(reason.contains("resolves to"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // `models/` reached through a link resolves to the same place on both sides:
+        // that case is the link check's, not this one's.
+        let other_root = project.root.join("other-root");
+        fs::create_dir_all(&other_root).unwrap();
+        link_dir(&other_root.join("models"), &paths.models_dir());
+        let through = ProjectPaths::new(&other_root);
+        require_resolved(&through, &through.encoders_dir().join("real-0123456789ab")).unwrap();
+
+        // Where the file system does not tell upper case from lower case, the other
+        // spelling is the existing directory, and the refusal says so.
+        let shouted = encoders.join("REAL-0123456789ab");
+        if shouted.is_dir() {
+            match require_resolved(&paths, &shouted) {
+                Err(L2dError::Refused { reason }) => {
+                    assert!(reason.contains("`real-0123456789ab`"), "{reason}");
+                    assert!(reason.contains("upper case"), "{reason}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
     }
 
     fn entries_name(package: &EncoderPackage) -> String {

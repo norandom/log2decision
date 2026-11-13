@@ -24,5 +24,7 @@ pub mod runtime;
 pub use codec::{ByteCodec, ByteTable, InputArch, InputBatch, InputMode, TextInput};
 pub use npu::{ComputeAccelerator, NpuMatch, NpuStatus};
 pub use onnx::{ModelInterface, QuantSpec, TensorSpec};
-pub use package::{EncoderArch, EncoderPackage, PackageFile, PackageParts};
+pub use package::{
+    EncoderArch, EncoderPackage, PackageFile, PackageParts, WriteOutcome, WrittenPackage,
+};
 pub use runtime::{CheckDepth, RecordRefresh, RecordState, RuntimeFiles, RuntimeManifest};
