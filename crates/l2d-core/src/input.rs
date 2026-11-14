@@ -106,7 +106,7 @@ const PARALLEL_PARSE_BYTES: usize = 4 * 1024 * 1024;
 /// What a skipped record is counted as besides its reason, in bytes: the record three
 /// times over, because its list doubles when it is full and holds the old and the new
 /// room for a moment, and the bookkeeping of the allocation of its reason.
-const SKIPPED_RECORD_BYTES: u64 = 3 * size_of::<SkippedRecord>() as u64 + 16;
+pub(crate) const SKIPPED_RECORD_BYTES: u64 = 3 * size_of::<SkippedRecord>() as u64 + 16;
 
 /// What merging costs per row besides the frames, in bytes: see [`Dedup::held_bytes`].
 ///
@@ -168,7 +168,7 @@ pub fn content_sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
-fn hex(digest: &[u8]) -> String {
+pub(crate) fn hex(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -508,6 +508,8 @@ pub fn row_digest(text: &str, label: Label, group: Option<&str>) -> u64 {
 #[derive(Debug, Default)]
 pub struct Accepted {
     raw: Vec<u8>,
+    /// Whether a byte-order mark was put in front of `raw` for Polars to drop.
+    guarded: bool,
     positions: Vec<u64>,
     digests: Vec<u64>,
     good: u64,
@@ -533,11 +535,27 @@ impl Accepted {
 
     /// Appends raw source bytes for Polars to parse. The caller adds the record
     /// terminator.
+    ///
+    /// Polars takes U+FEFF at the start of a buffer it parses for a byte-order mark and
+    /// drops it, once. Here it is text: the byte-order mark of a source is dropped
+    /// where the source is opened, so a record that starts with U+FEFF means it. When
+    /// the first record of the batch starts with one, a second one is put in front of
+    /// it for Polars to drop. This does not depend on how the bytes are cut into
+    /// calls.
     pub fn push_raw(&mut self, bytes: &[u8]) {
+        let at_start = !self.guarded && self.raw.len() < BYTE_ORDER_MARK.len();
         self.raw.extend_from_slice(bytes);
+        if at_start && self.raw.starts_with(BYTE_ORDER_MARK) {
+            self.raw
+                .splice(..0, BYTE_ORDER_MARK.iter().copied())
+                .for_each(drop);
+            self.guarded = true;
+        }
     }
 
-    /// The raw bytes of the accepted records.
+    /// The bytes for Polars to parse: the raw bytes of the accepted records, behind a
+    /// byte-order mark when the first record starts with U+FEFF (see
+    /// [`Accepted::push_raw`]).
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }
@@ -555,7 +573,12 @@ impl Accepted {
     /// and the validation pass agree. The result has the columns `text`,
     /// `first_position`, `occurrences`, `group`, `seen_good` and `seen_bad`, one row per
     /// accepted record.
-    fn rows(self, text: Column, label: Column, group: Column) -> Result<DataFrame, L2dError> {
+    pub(crate) fn rows(
+        self,
+        text: Column,
+        label: Column,
+        group: Column,
+    ) -> Result<DataFrame, L2dError> {
         let disagree = |what: String| L2dError::Runtime {
             detail: format!("Polars and the validation pass disagree: {what}"),
         };
@@ -631,6 +654,10 @@ pub fn csv_field_name(index: usize) -> String {
 /// Every record must hold `fields` fields. Only the fields listed in `used` are
 /// materialized; their columns are named by [`csv_field_name`]. An empty field is a
 /// null. Polars infers nothing: no header, no types, no dates.
+///
+/// Polars drops one U+FEFF at the start of `raw` as a byte-order mark. A caller whose
+/// first record starts with one as text puts a second one in front;
+/// [`Accepted::push_raw`] does.
 pub fn parse_csv_records(
     raw: &[u8],
     fields: usize,
@@ -709,7 +736,7 @@ pub fn string_column<'a>(
         .map_err(|error| frame_error("reading a parsed column", &error))
 }
 
-fn frame_error(doing: &str, error: &PolarsError) -> L2dError {
+pub(crate) fn frame_error(doing: &str, error: &PolarsError) -> L2dError {
     L2dError::Runtime {
         detail: format!("{doing} failed: {error}"),
     }
@@ -1124,7 +1151,7 @@ fn held_for(frame: &DataFrame) -> u64 {
 /// The columns of a parsed batch point into the buffers of the parse, which are larger
 /// than the strings they hold and stay allocated as long as one string is in use.
 /// Copying the strings of the deduplicated batch lets go of those buffers.
-fn own_strings(mut frame: DataFrame) -> Result<DataFrame, L2dError> {
+pub(crate) fn own_strings(mut frame: DataFrame) -> Result<DataFrame, L2dError> {
     let failed = |error: PolarsError| frame_error("copying the strings of a batch", &error);
     for name in [LogsFrame::TEXT, LogsFrame::GROUP] {
         let strings = frame.column(name).and_then(Column::str).map_err(failed)?;
@@ -1150,7 +1177,7 @@ fn append(rows: Option<DataFrame>, batch: DataFrame) -> Result<DataFrame, L2dErr
 
 /// One row per distinct text in order of first occurrence: the smallest position, the
 /// sum of the occurrences, the first group key, and whether any row was good or bad.
-fn combine(rows: DataFrame) -> Result<DataFrame, L2dError> {
+pub(crate) fn combine(rows: DataFrame) -> Result<DataFrame, L2dError> {
     rows.lazy()
         .group_by_stable([col(LogsFrame::TEXT)])
         .agg([

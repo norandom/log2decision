@@ -271,7 +271,7 @@ fn human(bytes: u64) -> String {
 }
 
 /// `bytes` for a message that must state the figure: readable and exact.
-fn exact(bytes: u64) -> String {
+pub(crate) fn exact(bytes: u64) -> String {
     format!("{} ({bytes} bytes)", human(bytes))
 }
 
@@ -816,6 +816,11 @@ impl<'b> Batcher<'b> {
             max_bytes: ((left as f64 / self.cost.expansion) as u64).max(1),
             limit_bytes: self.budget.limit_bytes(),
         }
+    }
+
+    /// The budget the batches are cut within, as it stands now.
+    pub fn budget(&self) -> &MemoryBudget {
+        self.budget
     }
 
     /// The rows of the batches processed so far.

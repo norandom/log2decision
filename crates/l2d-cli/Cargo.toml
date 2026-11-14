@@ -20,6 +20,11 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Write the archives `tests/archive.rs` gives to the binary.
+[dev-dependencies]
+zip.workspace = true
+flate2.workspace = true
+
 [features]
 # Measurements only: a counting allocator and, with L2D_HEAP_REPORT set, one line with
 # the heap peak on standard error (src/heap.rs). Off by default.

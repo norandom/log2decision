@@ -79,6 +79,38 @@ thiserror = "2"
 # Only the call that reports the free physical memory (requirement 12.1). The crate is
 # already in the dependency tree through Polars; no other feature is enabled here.
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+# Zip archives as input (requirement 13, task 1.16).
+#
+# What the tool links for it (normal dependencies of `l2d-core`, `zip_input.rs` and
+# `zip_directory.rs`):
+# - `flate2` with the pure-Rust backend only: inflating deflated entries and gzip
+#   entries, and the CRC-32 of an entry. It brings `miniz_oxide`, `crc32fast`, `adler2`
+#   and `simd-adler32`.
+# - `glob`: the entry patterns (`glob::Pattern` matching on the entry name; the crate's
+#   file-system walk is not used). It was in `Cargo.lock` already.
+#
+# `zip` is a dev-dependency only (of `l2d-core` and `l2d-cli`): it writes the archives
+# the tests read and reads them as a second opinion. The archive directory is read by
+# own code, not by the crate (deviation from the task text, recorded in the task notes
+# of 1.16): `zip::ZipArchive::new` reads the whole directory into memory before the
+# caller sees an entry, allocates for the entry count the archive declares, and falls
+# back to earlier end records, none of which can be held to a memory limit from outside.
+# Default features are off; `deflate` alone is on (no `aes-crypto`, `bzip2`, `deflate64`,
+# `lzma`, `time`, `xz`, `zstd`). With it come `zopfli` (its compressor), `bumpalo` and
+# `log`, for the tests only.
+#
+# Checked on 2026-11-13 (`cargo tree -p l2d-core -e normal`, `cargo tree -i zip -e all`,
+# `cargo tree -i arbitrary -e all --target all`): `Cargo.lock` grows by ten packages,
+# from 253 to 263: `flate2` 1.1.11, `miniz_oxide` 0.9.1, `crc32fast` 1.5.5, `adler2`
+# 2.0.1, `simd-adler32` 0.3.10 (linked into the tool); `zip` 2.6.1, `zopfli` 0.8.4,
+# `log` 0.4.35 (tests only); `arbitrary` 1.5.0 and `derive_arbitrary` 1.5.0 (a
+# dependency of `zip` for fuzzing builds only, not compiled). None of them opens a
+# network connection; the guard test over `Cargo.lock` stays green. `zip` 2.6.1 is the
+# release the amendment of 2026-11-12 checked; newer major releases exist (9.5.1) and
+# were not evaluated.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+glob = "0.3"
 
 # Numerical solver of the baseline logistic regression (requirement 2.7). `argmin` is the
 # optimizer `linfa-logistic` itself is built on; it is used directly because

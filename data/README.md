@@ -46,6 +46,10 @@ not part of the repository and keep their own terms.
   `curl` (MD5 compared by hand), the other seven with `aria2c` through
   `aria2-resume.ps1` in the dataset directory, which checks each file against
   its MD5 sum; all seven passed, and `santos.zip` was hashed again by hand.
-- The archives are not unpacked. `russellmitchell.zip` holds 11,992 entries,
-  13.95 GB unpacked; most entries are not logs (configuration and scripts),
-  the largest are packet captures of about 1 GB, and 108 are nested archives.
+- The archives are not unpacked. The directory of `russellmitchell.zip` lists
+  14,911 entries: 2,696 directories and 12,215 files, of which 11,992 are not
+  empty; 14,975,678,744 bytes (13.95 GiB) unpacked. Most files are not logs
+  (configuration and scripts), the largest are packet captures of about 1 GB.
+  Read with the tool (task 1.16): 11,870 files are text and are read, 218 are
+  not text and 127 are nested archives other than gzip (the 108 counted earlier
+  by file name were not reproduced).

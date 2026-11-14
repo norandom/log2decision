@@ -16,6 +16,11 @@
 //! the last line of its own, so the last line of standard output is always one whole
 //! JSON document: the result, or the envelope. When standard output itself is closed
 //! the envelope cannot be written and only the exit code and standard error say so.
+//!
+//! `l2d ingest` on a zip archive with a damaged entry is the one case of a whole result
+//! followed by a failure (requirement 13.6): the report with the records of the other
+//! entries is printed to its end, then the command fails. With `--json` standard output
+//! then holds the report on one line and the envelope on the last.
 //! Nothing here panics on a closed stream: every write to standard output and standard
 //! error is a write whose failure is handled or ignored.
 

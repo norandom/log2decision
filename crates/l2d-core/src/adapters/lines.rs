@@ -13,7 +13,7 @@ use crate::types::{InputSummary, Label, LogsFrame};
 /// The field separator given to Polars for line-based input. The byte `0xFF` cannot
 /// occur in valid UTF-8, and only valid UTF-8 lines are accepted, so every accepted
 /// line is one field.
-const NO_SEPARATOR: u8 = 0xFF;
+pub(crate) const NO_SEPARATOR: u8 = 0xFF;
 
 /// Reads a plain text file with one log per line.
 ///

@@ -461,6 +461,8 @@ pub enum AdapterChoice {
     Jsonl,
     /// The HTTP CSIC 2010 dataset (data/csic-2010/csic_database.csv unless --input)
     Csic2010,
+    /// A zip archive of text logs, one log per line in every entry; read by `ingest`
+    Zip,
 }
 
 /// The options that name an input; on every command that reads one.
@@ -545,29 +547,39 @@ fn locate_input(paths: &ProjectPaths, given: &Path) -> Result<PathBuf, L2dError>
     })
 }
 
-/// Reads the input the options name, in batches within `budget`.
-pub fn read_input(
-    paths: &ProjectPaths,
-    args: &InputArgs,
-    budget: &mut MemoryBudget,
-) -> Result<Input, L2dError> {
-    let required = || invalid("`--input` is required: the file to read");
+fn input_required() -> L2dError {
+    invalid("`--input` is required: the file to read")
+}
+
+/// The adapter that reads the input: the one the analyst chose, or the one the file
+/// extension says (.zip in any case: a zip archive). Options that apply to the csv and
+/// jsonl adapters alone are an analyst error with any other adapter.
+fn chosen_adapter(args: &InputArgs) -> Result<AdapterChoice, L2dError> {
     let by_extension = |path: &Path| match LabelledFormat::from_path(path) {
         Ok(LabelledFormat::Csv) => AdapterChoice::Csv,
         Ok(LabelledFormat::Jsonl) => AdapterChoice::Jsonl,
-        Err(_) => AdapterChoice::Lines,
+        Err(_) => {
+            let zip = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
+            if zip {
+                AdapterChoice::Zip
+            } else {
+                AdapterChoice::Lines
+            }
+        }
     };
     let adapter = match (args.adapter, &args.input) {
         (AdapterChoice::Auto, Some(path)) => by_extension(path),
-        (AdapterChoice::Auto, None) => return Err(required()),
+        (AdapterChoice::Auto, None) => return Err(input_required()),
         (chosen, _) => chosen,
     };
     let labelled = matches!(adapter, AdapterChoice::Csv | AdapterChoice::Jsonl);
     if !labelled {
-        let name = if adapter == AdapterChoice::Lines {
-            "lines"
-        } else {
-            "csic2010"
+        let name = match adapter {
+            AdapterChoice::Lines => "lines",
+            AdapterChoice::Zip => "zip",
+            _ => "csic2010",
         };
         for (option, given) in [
             ("--text-column", args.text_column.is_some()),
@@ -583,11 +595,42 @@ pub fn read_input(
             }
         }
     }
+    Ok(adapter)
+}
+
+/// Where the zip archive is that the options name; `None` when they name another kind
+/// of input (requirement 13.1). An archive is read with `ZipInput`, in batches that are
+/// not kept, so it does not come through [`read_input`].
+pub fn archive_input(paths: &ProjectPaths, args: &InputArgs) -> Result<Option<PathBuf>, L2dError> {
+    if chosen_adapter(args)? != AdapterChoice::Zip {
+        return Ok(None);
+    }
+    match &args.input {
+        Some(path) => locate_input(paths, path).map(Some),
+        None => Err(input_required()),
+    }
+}
+
+/// Reads the input the options name, in batches within `budget`.
+pub fn read_input(
+    paths: &ProjectPaths,
+    args: &InputArgs,
+    budget: &mut MemoryBudget,
+) -> Result<Input, L2dError> {
+    let adapter = chosen_adapter(args)?;
     let located = |given: &Option<PathBuf>| match given {
         Some(path) => locate_input(paths, path),
-        None => Err(required()),
+        None => Err(input_required()),
     };
     let (name, (logs, summary, plan)) = match adapter {
+        // The other commands need all logs at once; an archive is read in batches that
+        // are not kept. `l2d baseline score` on an archive is task 1.17.
+        AdapterChoice::Zip => {
+            return Err(refused(
+                "this command does not read zip archives yet; `l2d ingest` reads one and \
+                 reports its entries and records",
+            ));
+        }
         AdapterChoice::Csic2010 => {
             let path = match &args.input {
                 Some(path) if path.exists() => Csic2010Adapter::locate(paths, Some(path))?,

@@ -50,7 +50,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 - ONNX Runtime with AMD's Vitis AI provider, as native DLLs loaded at run time from `runtime/ryzenai/`.
 - Rust crates: `ort` (pinned `=2.0.0-rc.15`, default features off because they download a runtime; features `std`, `load-dynamic`, `vitis`, `api-30`), `rusqlite` 0.32 (feature `bundled`; release 0.32 has no `fts5` feature, the bundled SQLite 3.46.0 is compiled with FTS5), `faer` 0.24, `linfa` 0.8 family (including `linfa-logistic`, `linfa-clustering`), `bhtsne` 0.5, `clap`, `serde`, `serde_json`, `csv`, `sha2`, `thiserror`, `windows-sys` (free memory, process times, device query).
 - `polars` for data frames, pinned to `=0.52.0` with default features off: facade features `lazy` and `ndarray` only, and the CSV and JSON readers enabled on `polars-io` directly. The facade's own `csv` and `json` features, and releases from 0.53 on, link network client crates and are not used. Other crates import Polars only through `l2d_core::polars`. Its cloud and HTTP features stay disabled. Numeric fits run outside Polars' thread pool so that results stay bit-identical.
-- For zip input and result parts (requirement 13): `zip` 2.x with default features off and the feature `deflate` only, `flate2` (arrives with `zip`) for gzip entries, and the `polars-io` features `parquet` and `zstd`. Checked on 2026-11-12 in a scratch copy: the resolved lock file names no network crate. The check is repeated when the task adds them.
+- For zip input (requirement 13, as built by task 1.16): the tool reads the archive directory with own code (`l2d-core/src/zip_directory.rs`) and links `flate2` (feature `rust_backend` only) to inflate entries and gzip entries, and `glob` for entry patterns. `zip` 2.6.1 (default features off, feature `deflate`) is a dev-dependency of `l2d-core` and `l2d-cli`: it writes the test archives and reads them as a second opinion (owner decision of 2026-11-13). For result parts (task 1.17): the `polars-io` features `parquet` and `zstd`. Checked on 2026-11-12 in a scratch copy and again by task 1.16: the resolved lock file names no network crate. The check is repeated when task 1.17 adds its features.
 - No crate for the conformal calibration layer: the method is a few lines and is written in `l2d-decide` (owner decision of 2026-11-12, which replaces the adoption of `conformal-prediction`; task 1.18 removes the crate).
 - `argmin` and `ndarray`, the optimizer and array types underneath `linfa-logistic`, used directly where `linfa-logistic` cannot take sparse input.
 - `burn` 0.22.1 (confined to optional training module `l2d-train`).
@@ -446,7 +446,9 @@ Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (
 **Reading**
 - `ZipInput` opens the archive, reads the central directory, and walks the entries in central-directory order. That order is the record order, so results do not depend on timing. Entries are read one at a time; reading entries in parallel is a later task (1.19).
 - Each selected entry is read as a stream: decompressor, then the line splitting and byte-order-mark handling of the input adapters. Nothing is written to disk for reading. Zip64 archives are supported.
-- Entry selection: glob patterns over the entry path (`--entry`, repeatable). Without a pattern every entry is tried.
+- Entry selection: glob patterns over the entry path (`--entry`, repeatable). Without a pattern every entry is tried. Patterns are case-sensitive, and `*` and `?` also match `/`, so `*.log` selects the logs of every directory. Directories and symbolic links are not read.
+- A damaged entry (owner decision of 2026-11-13): the lines read from an entry before its damage is found are kept and counted, and the entry is reported as damaged. A run with a damaged entry prints its whole report and then exits with code 2. A failed read of the archive file itself is an input/output error (code 5), not damage.
+- A byte-order mark (U+FEFF) at the very start of an entry (for a gzip entry, of its content) is dropped once; anywhere else it is text. The same rule holds for the file adapters.
 - Text check on the first 8 KiB of an entry: a NUL byte or invalid UTF-8 marks the entry as not text.
 - A gzip entry (by magic bytes, not by name) is read through a second decompressor. Every other nested archive (`.zip`, `.bz2`, `.xz`, `.tar`) is skipped and reported (owner decision).
 - Maximum record length: default 64 KiB (owner decision of 2026-11-12), option `--max-record-bytes`, at most the 1 MiB the store accepts. The default follows from the store's charge of 192 times the longest text: an add then holds about 28 MiB, against about 208 MiB at 1 MiB.
@@ -454,7 +456,7 @@ Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (
 
 **Batches and memory**
 - Batches come from the `Batcher`. The cost of a batch is estimated from the uncompressed bytes of its records. Held for the whole run: the decompressor window and buffers, and the deduplication state.
-- Deduplication state: a set of 128-bit text hashes with occurrence counts, held against the budget and grown batch by batch. Task 1.16 refuses when it no longer fits. Task 1.17 then writes records to parts partitioned by hash prefix and deduplicates each partition on its own, with results identical to the in-memory path.
+- Deduplication state: a set of 128-bit text hashes with occurrence counts, held against the budget and grown batch by batch. The room for the set's next growth is held before the batch is read, because the old and the new table exist together while it grows. Task 1.16 refuses when it no longer fits and names every part in the refusal. Task 1.17 then writes records to parts partitioned by hash prefix and deduplicates each partition on its own, with results identical to the in-memory path.
 
 **Result parts**
 - An operation that produces per-log results for a batched input writes one Parquet part (zstd) per batch into a run directory, with a manifest that lists the parts, their row counts and their hashes.
@@ -464,20 +466,30 @@ Added on 2026-11-12. Why this shape: Polars' streaming engine is not available (
 ```rust
 pub struct ZipInputSettings { pub entries: Vec<String>, pub max_record_bytes: u64 }
 
-pub enum EntrySkip { NotText, Encrypted, UnsupportedMethod(u16), NestedArchive, NoPatternMatch, Damaged(String) }
+pub enum EntrySkip {
+    NotText, Encrypted, UnsupportedMethod(u16), NestedArchive, NoPatternMatch,
+    Damaged(String), Directory, Link, NotReached,
+}
 
 pub struct EntryReport { pub path: String, pub records: u64, pub skipped: Option<EntrySkip> }
 
 pub struct ArchiveSummary { pub input: InputSummary, pub entries: Vec<EntryReport> }
 
+// Entry index in the upper 24 bits of a position, 1-based line in the lower 40.
+pub struct ArchivePosition { pub entry: u32, pub line: u64 }
+
 impl ZipInput {
-    pub fn open(path: &Path, settings: &ZipInputSettings) -> Result<Self, L2dError>;
-    // Yields frames of at most the planned batch rows; the position names entry and line.
-    pub fn batches<'a>(&'a mut self, budget: &'a mut MemoryBudget) -> impl Iterator<Item = Result<LogsFrame, L2dError>> + 'a;
+    // Checks the settings, hashes the file, reads the directory; the directory is charged to the budget.
+    pub fn open(path: &Path, settings: &ZipInputSettings, budget: &MemoryBudget) -> Result<Self, L2dError>;
+    // An Iterator<Item = Result<LogsFrame, L2dError>> that ends after its first error.
+    // A frame holds the texts first seen in that batch; the position names entry and line.
+    pub fn batches(&mut self, budget: &mut MemoryBudget) -> ZipBatches<'_>;
+    pub fn occurrences(&self, text: &str) -> u64;
+    pub fn held_bytes(&self) -> u64;
     pub fn finish(self) -> ArchiveSummary;
 }
 ```
-- This is a sketch; the implementing task settles the exact signatures and records deviations.
+- As built by task 1.16; the task's implementation notes hold the details and the deviations.
 
 #### ProjectPaths, RunRecord, errors
 
@@ -1123,9 +1135,9 @@ As built by task 1.12 (the baseline side; the encoder side, the cost types above
 - Errors print one line naming what failed and exit with the code from the error mapping.
 - As built by task 1.11 (`ingest`, `baseline fit`, `baseline score`, `calibrate`, `triage`; the other commands are stubs):
   - Global options: `--json`, `--project <DIR>` (the project root, default the current directory), `--batch-rows`, `--memory-limit`, `--memory-share` (share of free memory used as the limit, default 0.5) and `--reserve-share` (share kept free, default 0.25). A share must lie in (0, 1). When one share is typed and the sum with the other's default exceeds 1, the other is lowered to what is left of 1 and the output says so; both typed above 1 is a usage error. A share cannot be combined with `--memory-limit`.
-  - Exit codes: 0 success; 2 usage and option values; 3 something missing, with where it was expected; 4 a refusal (too few labels, an input the scorer was fitted on, too few calibration logs, a calibration for another scorer, every memory refusal, stubs); 5 input/output, including a closed output pipe.
+  - Exit codes: 0 success; 2 usage and option values, and `ingest` on an archive with a damaged entry, after its report; 3 something missing, with where it was expected; 4 a refusal (too few labels, an input the scorer was fitted on, too few calibration logs, a calibration for another scorer, every memory refusal, stubs); 5 input/output, including a closed output pipe and a failed read of an archive file.
   - `--input` is the path as given, else the same relative path below `<project>/data/`. A model is named by its name or its directory name; two revisions under one name are a usage error that lists them.
-  - JSON is one document per run, written as it is produced. A consumer checks the exit code: when a run fails after output has begun, the error envelope follows on a line of its own, so the last line of standard output is always one whole document. Large outputs are streamed; `--limit` bounds the rows per list.
+  - JSON is one document per run, written as it is produced. A consumer checks the exit code: when a run fails after output has begun, the error envelope follows on a line of its own, so the last line of standard output is always one whole document. `ingest` on an archive with a damaged entry is such a run: it prints the whole report and then the error envelope, two documents. Large outputs are streamed; `--limit` bounds the rows per list.
   - Text output escapes control characters and invisible or direction-changing characters in log text and cuts it at 120 characters; JSON keeps the text as it is.
   - Every command that loads a dataset observes the memory budget first and reports the free memory, the limit, the reserve and the batches planned; loading a scorer and a calibration is asked of the budget before it happens.
   - Held-out check per log: a fit saves the first 16 bytes of the SHA-256 of each text it was fitted on (`fitted-texts.bin`, saved-form `format` 2; the scorer's revision does not change, so calibrations stay valid). `l2d calibrate` drops calibration logs with those texts and reports how many. A scorer saved without hashes falls back to the whole-file check, and a scorer whose hash set is incomplete (hashes merged into a directory saved without them) gives a partial check; both are said in the output. The text is hashed as read, before routing, so a trailing space defeats the check by design.

@@ -16,6 +16,15 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# Zip archives as input (`zip_input.rs`): inflating entries and gzip entries, entry
+# patterns.
+flate2.workspace = true
+glob.workspace = true
+
+# Writes the archives the tests read, and reads them as a second opinion. The tool
+# itself does not link it: see the entry in the workspace manifest.
+[dev-dependencies]
+zip.workspace = true
 
 # Free physical memory of the host (`GlobalMemoryStatusEx`), for batch sizing.
 [target.'cfg(windows)'.dependencies]

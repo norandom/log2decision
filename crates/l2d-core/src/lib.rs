@@ -19,6 +19,8 @@ pub mod memory;
 pub mod paths;
 pub mod runrecord;
 pub mod types;
+mod zip_directory;
+pub mod zip_input;
 
 pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
@@ -32,3 +34,6 @@ pub use error::{
 pub use paths::ProjectPaths;
 pub use runrecord::{BATCH_PLAN_KEY, Device, Placement, PlacementSource, RunKind, RunRecord};
 pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, LogsFrame, SkippedRecord};
+pub use zip_input::{
+    ArchivePosition, ArchiveSummary, EntryReport, EntrySkip, ZipInput, ZipInputSettings,
+};
