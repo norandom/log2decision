@@ -17,6 +17,34 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+
+def _memory_limit() -> None:
+    """Task 2.17 (requirement 15): with `L2D_MEMORY_GIB` set, the script runs under that
+    process memory limit (a Windows job object, `tools/science/memguard.py`) and appends
+    its peak memory to `L2D_RUNS_FILE`."""
+    import atexit
+    import os
+    import sys
+
+    gib = os.environ.get("L2D_MEMORY_GIB")
+    if not gib:
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "science"))
+    import memguard
+
+    memguard.limit(float(gib))
+
+    def record() -> None:
+        runs = os.environ.get("L2D_RUNS_FILE")
+        if runs:
+            with open(runs, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"step": " ".join(sys.argv), "memory": memguard.peaks()}) + "\n")
+
+    atexit.register(record)
+
+
+_memory_limit()
+
 SEED = 20261114
 INPUT_BYTES = 256
 # How the encoder under test reads a text, set by `arguments()`: `payload` (the published
