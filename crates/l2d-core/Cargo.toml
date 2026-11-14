@@ -10,7 +10,8 @@ build = "build.rs"
 [dependencies]
 csv.workspace = true
 polars.workspace = true
-# Only switches the CSV and JSON-lines readers on; the code imports through `polars`.
+# Only switches the CSV and JSON-lines readers and the Parquet writer and reader (zstd)
+# on; the code imports through `polars`.
 polars-io.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +27,7 @@ glob.workspace = true
 [dev-dependencies]
 zip.workspace = true
 
-# Free physical memory of the host (`GlobalMemoryStatusEx`), for batch sizing.
+# Free physical memory of the host (`GlobalMemoryStatusEx`), for batch sizing, and the
+# free space of a volume (`GetDiskFreeSpaceExW`), for the work directory.
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

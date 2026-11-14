@@ -4,9 +4,11 @@
 //! the project's model directory. `score` loads a saved scorer and prints a bad/good
 //! ratio for every distinct text of an input, in input order; the texts are scored in
 //! batches sized by the memory budget and printed as they are scored, so the ratios of
-//! an input are never in memory as a whole.
+//! an input are never in memory as a whole. A zip archive is scored into result parts
+//! on disk ([`super::baseline_archive`]).
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use l2d_baseline::scorer::{SCORER_KIND, SCORES_NO_FEATURES, SCORES_RATIO};
@@ -17,9 +19,9 @@ use l2d_decide::Scorer;
 use serde::Serialize;
 
 use super::common::{
-    Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, MemoryReport, Operation, ScorerReport,
-    TEXT_CHARS, check_name, find_model, load_scorer, longest_text, output_bytes, read_input,
-    required,
+    ArchiveArgs, Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, MemoryReport, Operation,
+    ScorerReport, TEXT_CHARS, archive_input, check_name, find_model, load_scorer, longest_text,
+    output_bytes, read_input, required,
 };
 use crate::output::{JsonOut, output_failed, shown_text};
 
@@ -88,9 +90,18 @@ pub struct ScoreArgs {
     #[arg(long, value_name = "NAME")]
     pub baseline: Option<String>,
 
-    /// Most logs printed [default: 20 in the text output, all in JSON]
+    /// Most logs printed [default: 20 in the text output, all in JSON; for a zip
+    /// archive 20 in both, the result parts hold all]
     #[arg(long, value_name = "N")]
     pub limit: Option<u64>,
+
+    #[command(flatten)]
+    pub archive: ArchiveArgs,
+
+    /// zip: the directory the result parts are written into; it must be empty or
+    /// absent [default: work/baseline-score-<UTC time>/ below the project]
+    #[arg(long, value_name = "DIR")]
+    pub work_dir: Option<PathBuf>,
 }
 
 /// Runs one `l2d baseline` operation.
@@ -319,6 +330,12 @@ fn score(context: &Context, args: &ScoreArgs) -> Result<(), L2dError> {
         "the saved scorer to score with",
     )?;
     let paths = context.paths()?;
+    // A zip archive is scored batch by batch into result parts (task 1.17).
+    if let Some(archive) = archive_input(&paths, &args.input)? {
+        return super::baseline_archive::score(context, args, &archive);
+    }
+    args.archive
+        .refuse_for_other_input(&[("--work-dir", args.work_dir.is_some())])?;
     let mut budget = context.budget()?;
     let directory = find_model(
         &paths.baselines_dir(),

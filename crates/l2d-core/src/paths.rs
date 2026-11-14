@@ -126,6 +126,12 @@ impl ProjectPaths {
         self.runtime_dir().join("cache")
     }
 
+    /// `work/` — below it every run that writes result parts gets a directory of its
+    /// own (`work/<run>/`), unless the analyst names one. Untracked.
+    pub fn work_dir(&self) -> PathBuf {
+        self.root.join("work")
+    }
+
     /// `reports/`
     pub fn reports_dir(&self) -> PathBuf {
         self.root.join("reports")

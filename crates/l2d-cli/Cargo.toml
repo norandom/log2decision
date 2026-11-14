@@ -24,6 +24,8 @@ serde_json.workspace = true
 [dev-dependencies]
 zip.workspace = true
 flate2.workspace = true
+# The on-request check of the parts of a run hashes every part and every text.
+sha2.workspace = true
 
 [features]
 # Measurements only: a counting allocator and, with L2D_HEAP_REPORT set, one line with

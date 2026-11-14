@@ -70,15 +70,35 @@ csv = "1"
 #   this feature set links `tokio` with its `net` feature (`mio`, `socket2`), and from
 #   0.54 on `polars-core` itself depends on it, whatever the features.
 # With this entry neither the dependency tree nor `Cargo.lock` names a network crate.
+#
+# Result parts (requirement 13.11, task 1.17): the `polars-io` features `parquet` and
+# `zstd`, again on `polars-io` and not through the facade. `parquet` brings `polars-parquet` with its feature `compression`, which is all
+# five codecs at once (zstd, gzip, snappy, lz4, brotli); parts are written with zstd.
+# Checked on 2026-11-14 (`cargo tree -p l2d-core -e normal`, `cargo tree -p l2d-cli -e
+# normal,build`, `cargo tree -i <crate> -e normal,build` for the new ones): `Cargo.lock`
+# grows by 21 packages, from 263 to 284: `polars-parquet` 0.52.0,
+# `polars-parquet-format` 0.1.0, `polars-arrow-format` 0.2.1 with `planus` 1.1.1,
+# `array-init-cursor`, `foldhash` and a fourth `hashbrown` (0.15.5);
+# `streaming-decompression`, `base64` 0.22.1; `zstd` 0.13.4 with `zstd-safe` 7.4.0 and
+# `zstd-sys` 2.1.2 (the zstd 1.5.7 C source, compiled by `cc` with its `jobserver`);
+# `lz4` 1.28.1 with `lz4-sys` 1.11.1 (the lz4 1.10.0 C source); `brotli` 8.0.4 with
+# `brotli-decompressor`, `alloc-no-stdlib`, `alloc-stdlib`; `snap` 1.1.2; `zlib-rs`
+# 0.6.8. None opens a network connection; the guard test over `Cargo.lock` stays
+# green. The two C sources build on the reference host (MSVC).
+# A side effect: `polars-parquet` asks `flate2` for its `zlib-rs` backend, and features
+# are unified, so the tool's own inflating of zip and gzip entries (`zip_input.rs`) now
+# runs on `zlib-rs` (pure Rust) in place of `miniz_oxide`.
 polars = { version = "=0.52.0", default-features = false, features = ["lazy", "polars-io", "ndarray"] }
-polars-io = { version = "=0.52.0", default-features = false, features = ["csv", "json"] }
+polars-io = { version = "=0.52.0", default-features = false, features = ["csv", "json", "parquet", "zstd"] }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# Only the call that reports the free physical memory (requirement 12.1). The crate is
-# already in the dependency tree through Polars; no other feature is enabled here.
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+# Only the call that reports the free physical memory (requirement 12.1) and the call
+# that reports the free space of a volume (the check before result parts are written,
+# requirement 13.11). The crate is already in the dependency tree through Polars; no
+# other feature is enabled here.
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_Storage_FileSystem"] }
 # Zip archives as input (requirement 13, task 1.16).
 #
 # What the tool links for it (normal dependencies of `l2d-core`, `zip_input.rs` and

@@ -7,8 +7,9 @@
 //! directory. [`ZipInput::batches`] then walks the entries in directory order, which
 //! is the record order, so the result does not depend on timing. One entry is open at
 //! a time and is read as a stream: the file, the inflater, for a gzip entry a second
-//! inflater, then lines. Nothing is written anywhere, and an entry name is only ever a
-//! name in a report: it is never used as a path.
+//! inflater, then lines. Nothing is written anywhere unless a directory for
+//! deduplication on disk is named, and then only there, under names the tool makes up;
+//! an entry name is only ever a name in a report: it is never used as a path.
 //!
 //! An entry is read when it is a file, matches an entry pattern (when patterns are
 //! given), is stored or deflated, is not encrypted, and its first 8 KiB are text: no
@@ -74,7 +75,24 @@
 //! table. The room for the next growth is taken off what a batch may use before the
 //! batch is read. When the set, the skipped records or the directory no longer fit, the
 //! read is refused with the memory needed and available (requirement 13.12, refusal
-//! branch); deduplication on disk is task 1.17.
+//! branch).
+//!
+//! # Deduplication on disk
+//!
+//! With a directory for it ([`ZipInput::spill_into`]) a set that can no longer grow
+//! does not end the read (requirement 13.12, the branch that continues): the set is
+//! frozen, the rows whose text it does not hold are written to disk, partitioned by
+//! their key, and deduplicated there after the last entry (`zip_spill.rs` has the
+//! method). The set is frozen when its next growth, the fixed memory of a batch and
+//! the smallest batch no longer fit together. The rows handed out are the same as
+//! without it, in the same order: the texts of the set during the read, the texts on
+//! disk after it, each group in order of first occurrence, and every text of the set
+//! was first seen before any text on disk. A frame from disk carries the occurrence
+//! counts over the archive; for every row, [`ZipInput::occurrence_counts`] gives them
+//! afterwards. What the caller holds beside the archive ([`ZipInput::hold_beside`])
+//! counts as held from the first batch on. Still refused, with the figures: skipped
+//! records or a directory that do not fit, a frozen set that leaves no room for the
+//! smallest batch, and a partition on disk whose keys do not fit.
 //!
 //! # What a hostile archive can and cannot do
 //!
@@ -116,6 +134,9 @@ use crate::types::{InputSummary, Label, LogsFrame, SkippedRecord};
 use crate::zip_directory::{
     DataFault, DirectoryEntry, EntryKind, locate_data, read_directory, unreadable,
 };
+use crate::zip_spill::{CountFile, Merge, Spill, WRITERS_HELD};
+
+pub use crate::zip_spill::DiskDedup;
 
 pub use crate::zip_directory::MAX_ENTRIES;
 
@@ -632,7 +653,7 @@ fn text_key(text: &str) -> [u8; 16] {
 
 /// The bytes of a hash table that holds `capacity` keys: its slots are a power of two
 /// and at most seven eighths full.
-fn table_bytes(capacity: usize) -> u64 {
+pub(crate) fn table_bytes(capacity: usize) -> u64 {
     let slots: u64 = match capacity as u64 {
         0 => return 0,
         1..4 => 4,
@@ -671,6 +692,10 @@ pub struct ZipInput {
     plan: Option<BatchPlan>,
     /// The line buffer of the entry read last, for the next one.
     spare: Vec<u8>,
+    /// Deduplication on disk, when a directory was named for it.
+    spill: Option<Spill>,
+    /// What the caller holds beside the archive for the whole read.
+    beside: u64,
 }
 
 impl fmt::Debug for ZipInput {
@@ -763,6 +788,8 @@ impl ZipInput {
             records: 0,
             plan: None,
             spare: Vec::new(),
+            spill: None,
+            beside: 0,
         })
     }
 
@@ -789,11 +816,17 @@ impl ZipInput {
             line: Vec::new(),
             started: false,
             ended: false,
+            budget: None,
+            merge: None,
         }
     }
 
     /// How often `text` occurred in the records read so far; 0 when it did not. The
     /// count stops at `u32::MAX`, the largest count a logs frame holds.
+    ///
+    /// With deduplication on disk this answers for the texts of the set in memory
+    /// only (0 for a text on disk): [`ZipInput::occurrence_counts`] gives the counts
+    /// of all rows.
     pub fn occurrences(&self, text: &str) -> u64 {
         self.counts
             .get(&text_key(text))
@@ -808,6 +841,102 @@ impl ZipInput {
             + self.readers_held()
             + table_bytes(self.counts.capacity())
             + self.skipped_held
+            + self.spill_held()
+            + self.beside
+    }
+
+    /// Names the directory for deduplication on disk (requirement 13.12): when the set
+    /// of distinct texts can no longer grow within the memory limit, the read goes on
+    /// there instead of being refused. Call it before [`ZipInput::batches`].
+    ///
+    /// The directory must be absent or empty; it is created, and removed with the
+    /// files in it when the archive is finished or dropped. The file names are made up
+    /// by the tool.
+    ///
+    /// The rows handed out are the same with and without it, in the same order. With
+    /// it, the rows on disk are handed out after the last entry was read, in frames of
+    /// their own, with their occurrence counts over the archive; and
+    /// [`ZipInput::occurrence_counts`] gives the counts of all rows.
+    ///
+    /// `max_set_texts` is the most distinct texts the set in memory may take before
+    /// the read goes on on disk; `None` leaves that to the memory limit.
+    ///
+    /// [`L2dError::Refused`] when the directory holds something, [`L2dError::Runtime`]
+    /// when it cannot be created.
+    pub fn spill_into(&mut self, dir: &Path, max_set_texts: Option<u64>) -> Result<(), L2dError> {
+        self.spill = Some(Spill::create(dir, max_set_texts)?);
+        Ok(())
+    }
+
+    /// Tells the archive what the caller holds in memory beside it for the whole read
+    /// (a loaded model, an output buffer): it counts as held from the first batch on.
+    pub fn hold_beside(&mut self, bytes: u64) {
+        self.beside = bytes;
+    }
+
+    /// What the entries that will be opened declare, by the directory alone: their
+    /// number, their bytes in the archive and their bytes unpacked. A gzip entry
+    /// declares the size of its compressed content.
+    pub fn selected_bytes(&self) -> SelectedBytes {
+        let mut selected = SelectedBytes::default();
+        for (entry, report) in self.directory.iter().zip(&self.reports) {
+            if self.selected(entry, &report.path).is_ok() {
+                selected.entries += 1;
+                selected.packed = selected.packed.saturating_add(entry.compressed_size);
+                selected.unpacked = selected.unpacked.saturating_add(entry.size);
+            }
+        }
+        selected
+    }
+
+    /// What deduplication on disk did; `None` when no directory was named for it or
+    /// the set in memory took every text.
+    pub fn disk_dedup(&self) -> Option<DiskDedup> {
+        self.spill.as_ref().and_then(Spill::report)
+    }
+
+    /// The occurrence counts over the archive of the rows handed out so far, in the
+    /// order they were handed out, in chunks. Needs a directory for deduplication on
+    /// disk ([`ZipInput::spill_into`]): without one the single item is an error.
+    pub fn occurrence_counts(&mut self) -> OccurrenceCounts<'_> {
+        let files = match &mut self.spill {
+            Some(spill) => spill.count_readers(),
+            None => Err(L2dError::Runtime {
+                detail: "the occurrence counts of the rows are read from the directory for \
+                         deduplication on disk, and none was named"
+                    .into(),
+            }),
+        };
+        let (keys, counts, failed) = match files {
+            Ok((keys, counts)) => (Some(keys), counts, None),
+            Err(error) => (None, None, Some(error)),
+        };
+        OccurrenceCounts {
+            set: &self.counts,
+            keys,
+            counts,
+            failed,
+        }
+    }
+
+    /// Whether the set in memory takes no new text any more.
+    fn frozen(&self) -> bool {
+        self.spill.as_ref().is_some_and(Spill::frozen)
+    }
+
+    /// Freezes the set in memory, when a directory for deduplication on disk was
+    /// named.
+    fn freeze(&mut self) {
+        if let Some(spill) = &mut self.spill {
+            spill.freeze(self.counts.len() as u64);
+        }
+    }
+
+    fn spill_held(&self) -> u64 {
+        match self.spill {
+            Some(_) => WRITERS_HELD,
+            None => 0,
+        }
     }
 
     /// The batch plan of the read, once [`ZipInput::batches`] has been iterated to its
@@ -825,7 +954,8 @@ impl ZipInput {
             input: InputSummary {
                 source_path: self.path,
                 records: self.records,
-                distinct_texts: self.counts.len() as u64,
+                distinct_texts: self.counts.len() as u64
+                    + self.spill.as_ref().map_or(0, Spill::spilled_distinct),
                 content_sha256: self.content_sha256,
                 skipped: self.skipped,
                 label_conflicts: 0,
@@ -841,6 +971,9 @@ impl ZipInput {
     /// The table the set must grow to before it can take `rows` more texts, in bytes;
     /// 0 when they fit as it is.
     fn growth_bytes(&self, rows: u64) -> u64 {
+        if self.frozen() {
+            return 0;
+        }
         let wanted = self.counts.len() as u64 + rows;
         if wanted <= self.counts.capacity() as u64 {
             return 0;
@@ -867,9 +1000,18 @@ impl ZipInput {
     ///
     /// [`L2dError::Refused`] otherwise, with the memory needed and available
     /// (requirement 13.12).
-    fn require_held(&self, budget: &MemoryBudget) -> Result<u64, L2dError> {
+    fn require_held(&mut self, budget: &MemoryBudget, smallest: u64) -> Result<u64, L2dError> {
         let rows = self.next_rows(budget);
-        let held = self.held_with_growth(rows);
+        let mut held = self.held_with_growth(rows);
+        if held + PARSE_BATCH_BYTES + smallest > budget.usable_bytes()
+            && self.growth_bytes(rows) > 0
+        {
+            // The set cannot grow for the next batch and leave room for the smallest
+            // batch (`smallest` bytes): with a directory for it, the deduplication
+            // goes on on disk and the set stays as it is.
+            self.freeze();
+            held = self.held_with_growth(rows);
+        }
         let needed = held + PARSE_BATCH_BYTES;
         if needed <= budget.usable_bytes() {
             return Ok(held);
@@ -906,7 +1048,16 @@ impl ZipInput {
             exact(self.directory_held),
             self.max_record_bytes,
             exact(self.readers_held()),
-        )
+        ) + &match &self.spill {
+            Some(_) => format!(
+                ", the buffers of deduplication on disk {}",
+                exact(WRITERS_HELD)
+            ),
+            None => String::new(),
+        } + &match self.beside {
+            0 => String::new(),
+            beside => format!(", held beside the archive {}", exact(beside)),
+        }
     }
 
     /// A refusal of the batcher, with what the archive holds added to it.
@@ -1020,6 +1171,7 @@ impl ZipInput {
         &mut self,
         accepted: Accepted,
         budget: &MemoryBudget,
+        smallest: u64,
     ) -> Result<Option<LogsFrame>, L2dError> {
         let failed = |error| frame_error("reading a batch of the archive", &error);
         let text = parse_csv_records(accepted.raw(), 1, &[0], NO_SEPARATOR, None)?
@@ -1053,6 +1205,49 @@ impl ZipInput {
             .iter()
             .filter(|key| !self.counts.contains_key(*key))
             .count();
+        if let Some(spill) = &self.spill
+            && !spill.frozen()
+        {
+            let over_most = spill
+                .max_set_texts
+                .is_some_and(|most| (self.counts.len() + new) as u64 > most);
+            let growth = self.growth_bytes(new as u64);
+            // While it grows the old and the new table exist together; after it the
+            // smallest batch must still fit.
+            let over_memory = growth > 0
+                && self.held_bytes() + growth + PARSE_BATCH_BYTES + smallest
+                    > budget.usable_bytes();
+            if over_most || over_memory {
+                self.freeze();
+            }
+        }
+        if let Some(spill) = &mut self.spill
+            && spill.frozen()
+        {
+            // The set takes no new text: the rows it does not hold go to disk.
+            let positions = batch
+                .column(LogsFrame::FIRST_POSITION)
+                .and_then(Column::u64)
+                .map_err(failed)?;
+            let rows = keys
+                .iter()
+                .zip(texts.iter())
+                .zip(positions.iter().zip(occurrences.iter()));
+            for ((key, text), (position, count)) in rows {
+                let (Some(text), Some(position), Some(count)) = (text, position, count) else {
+                    return Err(L2dError::Runtime {
+                        detail: "a batch of the archive holds a row without text, position or \
+                                 count"
+                            .into(),
+                    });
+                };
+                match self.counts.get_mut(key) {
+                    Some(seen) => *seen = seen.saturating_add(count),
+                    None => spill.spill(key, position, count, text)?,
+                }
+            }
+            return Ok(None);
+        }
         self.grow_for(new as u64, budget)?;
         let mut is_new = Vec::with_capacity(batch.height());
         for (key, count) in keys.into_iter().zip(occurrences.iter()) {
@@ -1067,6 +1262,10 @@ impl ZipInput {
                     is_new.push(false);
                 }
                 Entry::Vacant(new) => {
+                    // For the counts over the archive, read out in row order later.
+                    if let Some(spill) = &mut self.spill {
+                        spill.note_key(new.key())?;
+                    }
                     new.insert(count);
                     is_new.push(true);
                 }
@@ -1092,6 +1291,59 @@ impl ZipInput {
         .map_err(failed)?;
         // The texts point into the buffers of the parse; own copies let go of them.
         LogsFrame::new(own_strings(frame)?).map(Some)
+    }
+
+    /// Deduplicates the rows on disk, partition by partition, and opens the result
+    /// for merging; `None` without a directory for it.
+    fn deduplicate_on_disk(
+        &mut self,
+        budget: &mut MemoryBudget,
+    ) -> Result<Option<Merge>, L2dError> {
+        let held = self.held_bytes();
+        budget.hold(held.saturating_add(PARSE_BATCH_BYTES));
+        let room = budget.left_bytes();
+        match &mut self.spill {
+            Some(spill) => {
+                spill.deduplicate(room, table_bytes)?;
+                spill.merge().map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The next frame of the rows on disk, in order of first occurrence, with their
+    /// occurrence counts over the archive; `None` at their end.
+    ///
+    /// A frame is cut like a batch: at most the largest batch of rows, and no more
+    /// text than a batch of that text would be allowed to hold.
+    fn merged_frame(
+        &mut self,
+        merge: &mut Merge,
+        budget: &mut MemoryBudget,
+    ) -> Result<Option<LogsFrame>, L2dError> {
+        let held = self.require_held(budget, 0)?;
+        budget.hold(held.saturating_add(PARSE_BATCH_BYTES));
+        let room = budget.left_bytes();
+        let max_rows = budget.max_batch_rows().min(room / PARSE_ROW_BYTES);
+        let max_bytes = (room as f64 / PARSE_EXPANSION) as u64;
+        let Some((texts, positions, counts)) = merge.next_rows(max_rows, max_bytes)? else {
+            return Ok(None);
+        };
+        if let Some(spill) = &mut self.spill {
+            spill.note_counts(&counts)?;
+        }
+        let rows = texts.len();
+        let text = Column::new(LogsFrame::TEXT.into(), &texts);
+        drop(texts);
+        let frame = DataFrame::new(vec![
+            text,
+            Column::new(LogsFrame::LABEL.into(), vec![Label::Unknown.as_str(); rows]),
+            Column::full_null(LogsFrame::GROUP.into(), rows, &DataType::String),
+            Column::new(LogsFrame::FIRST_POSITION.into(), positions),
+            Column::new(LogsFrame::OCCURRENCES.into(), counts),
+        ])
+        .map_err(|error| frame_error("reading the rows deduplicated on disk", &error))?;
+        LogsFrame::new(frame).map(Some)
     }
 
     /// Makes room in the set for `rows` more texts.
@@ -1145,6 +1397,74 @@ fn hash_file(file: &mut File) -> std::io::Result<String> {
     Ok(hex(&hasher.finalize()))
 }
 
+// --- Occurrence counts ---------------------------------------------------------------------
+
+/// What the entries that will be opened declare: see [`ZipInput::selected_bytes`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectedBytes {
+    pub entries: u64,
+    /// Their bytes in the archive.
+    pub packed: u64,
+    /// Their bytes unpacked, as the directory declares them.
+    pub unpacked: u64,
+}
+
+/// The occurrence counts of the rows handed out: see [`ZipInput::occurrence_counts`].
+pub struct OccurrenceCounts<'a> {
+    set: &'a HashMap<[u8; 16], u32>,
+    /// The keys of the rows handed out during the read.
+    keys: Option<CountFile>,
+    /// The counts of the rows handed out from disk.
+    counts: Option<CountFile>,
+    failed: Option<L2dError>,
+}
+
+impl Iterator for OccurrenceCounts<'_> {
+    type Item = Result<Vec<u32>, L2dError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(error) = self.failed.take() {
+            return Some(Err(error));
+        }
+        let set = self.set;
+        let from_keys = self.keys.as_mut().map(|keys| {
+            keys.next_chunk().map(|chunk| {
+                chunk
+                    .as_chunks::<16>()
+                    .0
+                    .iter()
+                    .map(|key| set.get(key).copied().unwrap_or(0))
+                    .collect::<Vec<u32>>()
+            })
+        });
+        let from_counts = |file: &mut CountFile| {
+            file.next_chunk().map(|chunk| {
+                chunk
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|count| u32::from_le_bytes(*count))
+                    .collect::<Vec<u32>>()
+            })
+        };
+        let chunk = match from_keys {
+            Some(Ok(counts)) if !counts.is_empty() => return Some(Ok(counts)),
+            Some(Err(error)) => Err(error),
+            _ => {
+                self.keys = None;
+                match self.counts.as_mut().map(from_counts) {
+                    Some(Ok(counts)) if !counts.is_empty() => return Some(Ok(counts)),
+                    Some(Err(error)) => Err(error),
+                    _ => Ok(()),
+                }
+            }
+        };
+        self.keys = None;
+        self.counts = None;
+        chunk.err().map(Err)
+    }
+}
+
 // --- The batches ---------------------------------------------------------------------------
 
 /// The batches of an archive: see [`ZipInput::batches`].
@@ -1158,6 +1478,10 @@ pub struct ZipBatches<'a> {
     line: Vec<u8>,
     started: bool,
     ended: bool,
+    /// The budget, back from the batcher, while the rows on disk are handed out.
+    budget: Option<&'a mut MemoryBudget>,
+    /// The rows on disk, merged by position, once the last entry was read.
+    merge: Option<Merge>,
 }
 
 impl Iterator for ZipBatches<'_> {
@@ -1183,16 +1507,25 @@ impl Iterator for ZipBatches<'_> {
 }
 
 impl ZipBatches<'_> {
+    /// The path of the entry with the index `entry` in the directory, as a position
+    /// names it ([`ArchivePosition::entry`]).
+    pub fn entry_path(&self, entry: u32) -> Option<&str> {
+        self.input
+            .reports
+            .get(entry as usize)
+            .map(|report| report.path.as_str())
+    }
+
     /// Reads on until a batch with new texts is complete; `None` at the end of the
     /// archive.
     fn advance(&mut self) -> Result<Option<LogsFrame>, L2dError> {
         let Some(batcher) = &mut self.batcher else {
-            return Ok(None);
+            return self.merged();
         };
         if !self.started {
             self.started = true;
             // What the archive holds counts from the first batch on.
-            let held = self.input.require_held(batcher.budget())?;
+            let held = self.input.require_held(batcher.budget(), 0)?;
             batcher
                 .processed(held)
                 .map_err(|error| self.input.explained(error, batcher.budget()))?;
@@ -1309,12 +1642,14 @@ impl ZipBatches<'_> {
         let batch = if accepted.is_empty() {
             None
         } else {
-            self.input.merge(accepted, batcher.budget())?
+            self.input
+                .merge(accepted, batcher.budget(), batcher.smallest_batch_bytes())?
         };
         let held = if last {
             self.input.held_bytes()
         } else {
-            self.input.require_held(batcher.budget())?
+            self.input
+                .require_held(batcher.budget(), batcher.smallest_batch_bytes())?
         };
         batcher
             .processed(held)
@@ -1322,9 +1657,9 @@ impl ZipBatches<'_> {
         Ok(batch)
     }
 
-    /// The last, partial batch, and the plan of the read.
+    /// The last, partial batch, and the plan of the read. With rows on disk, their
+    /// deduplication, and their first frame when the last batch has no new text.
     fn end(&mut self) -> Result<Option<LogsFrame>, L2dError> {
-        self.ended = true;
         let Some(batcher) = &mut self.batcher else {
             return Ok(None);
         };
@@ -1333,9 +1668,25 @@ impl ZipBatches<'_> {
             .map_err(|error| self.input.explained(error, batcher.budget()))?;
         let batch = if last { self.process(true)? } else { None };
         if let Some(batcher) = self.batcher.take() {
-            self.input.plan = Some(batcher.into_plan()?);
+            let (plan, budget) = batcher.finish()?;
+            self.input.plan = Some(plan);
+            if self.input.frozen() {
+                self.merge = self.input.deduplicate_on_disk(budget)?;
+                self.budget = Some(budget);
+            }
         }
-        Ok(batch)
+        match batch {
+            Some(batch) => Ok(Some(batch)),
+            None => self.merged(),
+        }
+    }
+
+    /// The next frame of the rows on disk; `None` when there are none, or no more.
+    fn merged(&mut self) -> Result<Option<LogsFrame>, L2dError> {
+        match (&mut self.merge, &mut self.budget) {
+            (Some(merge), Some(budget)) => self.input.merged_frame(merge, budget),
+            _ => Ok(None),
+        }
     }
 }
 

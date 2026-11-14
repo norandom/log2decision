@@ -12,10 +12,11 @@ use l2d_core::input::PARSE_COST;
 use l2d_core::memory::PROCESS_BASELINE_BYTES;
 use l2d_core::polars::prelude::Column;
 use l2d_core::types::SHORT_REVISION_LEN;
+use l2d_core::zip_input::{DEFAULT_MAX_RECORD_BYTES, MAX_RECORD_BYTES};
 use l2d_core::{
     BatchPlan, Csic2010Adapter, InputAdapter, InputSummary, L2dError, LabelledAdapter,
     LabelledFormat, LinesAdapter, LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
-    SkippedRecord,
+    SkippedRecord, ZipInputSettings,
 };
 use l2d_decide::ConformalCalibrator;
 use serde::Serialize;
@@ -462,6 +463,7 @@ pub enum AdapterChoice {
     /// The HTTP CSIC 2010 dataset (data/csic-2010/csic_database.csv unless --input)
     Csic2010,
     /// A zip archive of text logs, one log per line in every entry; read by `ingest`
+    /// and `baseline score`
     Zip,
 }
 
@@ -491,6 +493,62 @@ pub struct InputArgs {
     /// csv, jsonl: the column or key with the group key [default: no groups]
     #[arg(long, value_name = "NAME")]
     pub group_column: Option<String>,
+}
+
+/// The options that say how a zip archive is read; on the commands that read one.
+#[derive(Debug, Clone, Default, Args)]
+pub struct ArchiveArgs {
+    /// zip: read only the entries whose path matches this pattern; may be given
+    /// several times. `*` and `?` also match `/`, so `*.log` selects the logs of every
+    /// directory [default: every entry]
+    #[arg(long = "entry", value_name = "PATTERN")]
+    pub entries: Vec<String>,
+
+    /// zip: skip records longer than this, in bytes or as 64KB, 1MB (multiples of
+    /// 1,024) [default: 64KB, at most 1MB]
+    #[arg(long, value_name = "SIZE", value_parser = record_bytes)]
+    pub max_record_bytes: Option<u64>,
+}
+
+/// Reads the value of `--max-record-bytes`.
+fn record_bytes(text: &str) -> Result<u64, String> {
+    let bytes = l2d_core::memory::parse_memory_size(text).map_err(|error| match error {
+        L2dError::InvalidInput { detail } => detail,
+        other => other.to_string(),
+    })?;
+    if bytes == 0 || bytes > MAX_RECORD_BYTES {
+        return Err(format!(
+            "the maximum record length is 1 to {MAX_RECORD_BYTES} bytes (1MB)"
+        ));
+    }
+    Ok(bytes)
+}
+
+impl ArchiveArgs {
+    /// How the archive is read.
+    pub fn settings(&self) -> ZipInputSettings {
+        ZipInputSettings {
+            entries: self.entries.clone(),
+            max_record_bytes: self.max_record_bytes.unwrap_or(DEFAULT_MAX_RECORD_BYTES),
+        }
+    }
+
+    /// The analyst error of an option for archives on an input that is not read as
+    /// one. `further` are the command's own options for archives and whether each was
+    /// given.
+    pub fn refuse_for_other_input(&self, further: &[(&str, bool)]) -> Result<(), L2dError> {
+        let own = [
+            ("--entry", !self.entries.is_empty()),
+            ("--max-record-bytes", self.max_record_bytes.is_some()),
+        ];
+        match own.iter().chain(further).find(|(_, given)| *given) {
+            None => Ok(()),
+            Some((option, _)) => Err(invalid(format!(
+                "`{option}` applies to zip archives; this input is not read as one (a file \
+                 named .zip is, and any file with `--adapter zip`)"
+            ))),
+        }
+    }
 }
 
 /// An input as it was read.
@@ -624,11 +682,12 @@ pub fn read_input(
     };
     let (name, (logs, summary, plan)) = match adapter {
         // The other commands need all logs at once; an archive is read in batches that
-        // are not kept. `l2d baseline score` on an archive is task 1.17.
+        // are not kept. `l2d ingest` and `l2d baseline score` read one that way.
         AdapterChoice::Zip => {
             return Err(refused(
                 "this command does not read zip archives yet; `l2d ingest` reads one and \
-                 reports its entries and records",
+                 reports its entries and records, and `l2d baseline score` scores one into \
+                 result parts",
             ));
         }
         AdapterChoice::Csic2010 => {

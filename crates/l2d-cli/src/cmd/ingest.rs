@@ -28,13 +28,12 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use clap::Args;
-use l2d_core::zip_input::{DEFAULT_MAX_RECORD_BYTES, MAX_RECORD_BYTES};
-use l2d_core::{ArchiveSummary, EntryReport, EntrySkip, L2dError, ZipInput, ZipInputSettings};
+use l2d_core::{ArchiveSummary, EntryReport, EntrySkip, L2dError, ZipInput};
 use serde::{Serialize, Serializer};
 
 use super::common::{
-    Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, LabelCounts, MemoryReport, Operation,
-    TEXT_CHARS, archive_input, read_input,
+    ArchiveArgs, Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, LabelCounts, MemoryReport,
+    Operation, TEXT_CHARS, archive_input, read_input,
 };
 use crate::output::{JsonOut, output_failed, shown_text};
 
@@ -49,30 +48,8 @@ pub struct IngestArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<u64>,
 
-    /// zip: read only the entries whose path matches this pattern; may be given
-    /// several times. `*` and `?` also match `/`, so `*.log` selects the logs of every
-    /// directory [default: every entry]
-    #[arg(long = "entry", value_name = "PATTERN")]
-    pub entries: Vec<String>,
-
-    /// zip: skip records longer than this, in bytes or as 64KB, 1MB (multiples of
-    /// 1,024) [default: 64KB, at most 1MB]
-    #[arg(long, value_name = "SIZE", value_parser = record_bytes)]
-    pub max_record_bytes: Option<u64>,
-}
-
-/// Reads the value of `--max-record-bytes`.
-fn record_bytes(text: &str) -> Result<u64, String> {
-    let bytes = l2d_core::memory::parse_memory_size(text).map_err(|error| match error {
-        L2dError::InvalidInput { detail } => detail,
-        other => other.to_string(),
-    })?;
-    if bytes == 0 || bytes > MAX_RECORD_BYTES {
-        return Err(format!(
-            "the maximum record length is 1 to {MAX_RECORD_BYTES} bytes (1MB)"
-        ));
-    }
-    Ok(bytes)
+    #[command(flatten)]
+    pub archive: ArchiveArgs,
 }
 
 /// Runs `l2d ingest`.
@@ -82,19 +59,7 @@ pub fn run(context: &Context, args: &IngestArgs) -> Result<(), L2dError> {
     if let Some(archive) = archive_input(&paths, &args.input)? {
         return run_archive(context, args, &archive);
     }
-    for (option, given) in [
-        ("--entry", !args.entries.is_empty()),
-        ("--max-record-bytes", args.max_record_bytes.is_some()),
-    ] {
-        if given {
-            return Err(L2dError::InvalidInput {
-                detail: format!(
-                    "`{option}` applies to zip archives; this input is not read as one (a \
-                     file named .zip is, and any file with `--adapter zip`)"
-                ),
-            });
-        }
-    }
+    args.archive.refuse_for_other_input(&[])?;
     let input = read_input(&paths, &args.input, &mut budget)?;
     let report = InputReport::of(&input.logs, &input.summary, input.adapter, &budget)?;
     let memory = context.memory_report(
@@ -145,11 +110,7 @@ fn text(
 /// Reads the archive at `archive` to its end and prints its report.
 fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(), L2dError> {
     let mut budget = context.budget()?;
-    let settings = ZipInputSettings {
-        entries: args.entries.clone(),
-        max_record_bytes: args.max_record_bytes.unwrap_or(DEFAULT_MAX_RECORD_BYTES),
-    };
-    let mut input = ZipInput::open(archive, &settings, &budget)?;
+    let mut input = ZipInput::open(archive, &args.archive.settings(), &budget)?;
     for batch in input.batches(&mut budget) {
         // Only the summary is wanted: the rows of a batch are let go at once.
         batch?;
@@ -179,9 +140,12 @@ fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(
         )
     };
     written.map_err(output_failed)?;
+    fail_when_damaged(&summary, archive)
+}
 
-    // Requirement 13.6: the records of the other entries are reported, and the command
-    // fails.
+/// Requirement 13.6: the records of the other entries are reported, and then the
+/// command fails when an entry is damaged.
+pub(crate) fn fail_when_damaged(summary: &ArchiveSummary, archive: &Path) -> Result<(), L2dError> {
     let mut damaged = summary.damaged();
     match damaged.next() {
         None => Ok(()),
@@ -283,7 +247,7 @@ impl Serialize for SkippedRecords<'_> {
 /// `input` object of the JSON output. It has the fields of an ordinary input and, on
 /// top, the entries.
 #[derive(Serialize)]
-struct ArchiveReport<'a> {
+pub(crate) struct ArchiveReport<'a> {
     source_path: String,
     adapter: &'static str,
     /// Records read from all entries, the skipped ones included.
@@ -310,7 +274,7 @@ struct ArchiveReport<'a> {
 }
 
 impl<'a> ArchiveReport<'a> {
-    fn of(summary: &'a ArchiveSummary) -> Self {
+    pub(crate) fn of(summary: &'a ArchiveSummary) -> Self {
         let mut not_read = SkipCounts::default();
         for skip in summary
             .entries
@@ -356,9 +320,7 @@ fn skip_words(kind: usize) -> &'static str {
     ][kind]
 }
 
-/// The text form of an archive's report; at most `limit` entries read, entries not
-/// read and skipped records are listed. Entries that match no pattern and directories
-/// are counted, not listed.
+/// The text form of an archive's report, and the memory report.
 fn archive_text(
     out: impl Write,
     report: &ArchiveReport<'_>,
@@ -366,8 +328,21 @@ fn archive_text(
     limit: u64,
 ) -> io::Result<()> {
     let mut out = io::BufWriter::new(out);
+    archive_report_text(&mut out, report, limit)?;
+    memory.write_text(&mut out)?;
+    out.flush()
+}
+
+/// The text form of an archive's report; at most `limit` entries read, entries not
+/// read and skipped records are listed. Entries that match no pattern and directories
+/// are counted, not listed.
+pub(crate) fn archive_report_text(
+    out: &mut dyn Write,
+    report: &ArchiveReport<'_>,
+    limit: u64,
+) -> io::Result<()> {
     let listed = limit as usize;
-    let more = |out: &mut io::BufWriter<_>, count: u64| match count.saturating_sub(limit) {
+    let more = |out: &mut dyn Write, count: u64| match count.saturating_sub(limit) {
         0 => Ok(()),
         rest => writeln!(out, "    ... {rest} more"),
     };
@@ -408,7 +383,7 @@ fn archive_text(
         for entry in read.take(listed) {
             writeln!(out, "    {}: {} records", name(&entry.path), entry.records)?;
         }
-        more(&mut out, report.entries_read)?;
+        more(&mut *out, report.entries_read)?;
     }
     let reported = |entry: &&EntryReport| {
         !matches!(
@@ -432,7 +407,7 @@ fn archive_text(
                 records => writeln!(out, " ({records} records were read before that)")?,
             }
         }
-        more(&mut out, reported_count)?;
+        more(&mut *out, reported_count)?;
     }
     if report.skipped_count > 0 {
         writeln!(out, "  skipped records: {}", report.skipped_count)?;
@@ -445,8 +420,7 @@ fn archive_text(
                 shown_text(record.reason, 2 * TEXT_CHARS)
             )?;
         }
-        more(&mut out, report.skipped_count)?;
+        more(&mut *out, report.skipped_count)?;
     }
-    memory.write_text(&mut out)?;
-    out.flush()
+    Ok(())
 }
