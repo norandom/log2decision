@@ -14,7 +14,9 @@
 //!
 //! - before anything is read, for the parts: the bytes the selected entries take in the
 //!   archive (text compressed by zstd in place of deflate), plus 16 bytes per 64 bytes
-//!   of unpacked text for the numbers of a row;
+//!   of unpacked text for the numbers of a row; and for the key file of the occurrence
+//!   counts, written from the first batch, the most it can take under the memory limit
+//!   (16 bytes per slot of 21 the limit holds; a bound, review round 2 of task 1.20);
 //! - when the set of distinct texts is frozen and the read goes on on disk (task 1.20,
 //!   remediation), for deduplication on disk, what [`super::archive_run`] states (the
 //!   unpacked bytes of the selected entries, and the 32 bytes of a row on disk for as
@@ -69,7 +71,7 @@ use l2d_core::parts::{PartTable, PartWriter, write_manifest};
 use l2d_core::polars::prelude::{Column, DataFrame, PolarsError};
 use l2d_core::{
     ArchivePosition, ArchiveSummary, EntryReport, L2dError, LogsFrame, MemoryBudget, ZipInput,
-    ZipInputSettings,
+    ZipInputSettings, most_key_file_bytes,
 };
 use serde::Serialize;
 
@@ -224,6 +226,7 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         "baseline-score-<UTC time>",
         args.work_dir.as_deref(),
         parts_estimate,
+        most_key_file_bytes(budget.limit_bytes()),
     )?;
 
     let limit = args.limit.unwrap_or(DEFAULT_TEXT_LIMIT);

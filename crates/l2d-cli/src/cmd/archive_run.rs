@@ -28,7 +28,9 @@
 //! `baseline score` writes parts from its first batch, so its directory is made and the
 //! disk is checked for the parts before the read ([`ArchiveRun::prepare`]); the key of
 //! every row is written to `dedup/` from the start, because the occurrence counts of
-//! the parts are read out by them. The disk for deduplication on disk is checked at the
+//! the parts are read out by them, so the check before the read also counts the most
+//! that key file can take ([`l2d_core::most_key_file_bytes`]; review round 2 of task
+//! 1.20). The disk for deduplication on disk is checked at the
 //! freeze, as for `ingest`, together with the whole estimate of the parts again: a run
 //! that stays in memory is not refused for the disk deduplication on disk would need.
 //!
@@ -151,7 +153,8 @@ pub(crate) struct ArchiveRun {
 
 impl ArchiveRun {
     /// Makes the work directory of the run, checks the free space of its volume
-    /// against what the result parts are estimated to need (`parts`), and names the
+    /// against what the result parts are estimated to need (`parts`) and the most the
+    /// key file of the occurrence counts can take (`keys`), and names the
     /// directory for deduplication on disk to the archive. The disk for deduplication
     /// on disk is checked when the set is frozen, with `parts` again beside it. Nothing
     /// of the archive's entries is read.
@@ -168,9 +171,13 @@ impl ArchiveRun {
         name: &str,
         given: Option<&Path>,
         parts: u64,
+        keys: u64,
     ) -> Result<Self, L2dError> {
         let dir = RunDir(WorkDir::create(&run_directory(context, name, given)?)?);
-        let disk_free = dir.work().require_free(&[("the result parts", parts)])?;
+        let disk_free = dir.work().require_free(&[
+            ("the result parts", parts),
+            ("the keys of the occurrence counts", keys),
+        ])?;
         input.spill_into(&dir.work().path().join("dedup"), None)?;
         input.check_disk_at_freeze(FreezeDiskCheck {
             beside: vec![("the result parts".to_string(), parts)],
@@ -180,7 +187,7 @@ impl ArchiveRun {
             input,
             dir,
             disk_free,
-            disk_estimated: parts,
+            disk_estimated: parts.saturating_add(keys),
         })
     }
 

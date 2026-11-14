@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use l2d_core::most_key_file_bytes;
 use l2d_core::parts::read_part;
 use l2d_core::polars::prelude::Column;
 use serde_json::Value;
@@ -512,13 +513,17 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_scored_with_deduplication_
     );
     assert_eq!(roomy["parts"]["deduplication"]["on_disk"], false);
     // The disk for deduplication is asked for at the freeze, and only then: the run in
-    // memory was checked for its parts alone (remediation of task 1.20).
+    // memory was checked for its parts and the most its key file can take under its
+    // memory limit (remediation and review round 2 of task 1.20); the run on disk, at
+    // its freeze, for deduplication with the parts again beside it.
     let unpacked = (forward.len() + backward.len()) as u64;
     let dedup_estimate = unpacked + 32 * (unpacked / 6);
     let estimated = |document: &Value| document["parts"]["disk_estimated_bytes"].as_u64().unwrap();
+    let parts = estimated(&short) - dedup_estimate;
+    let roomy_limit = roomy["memory"]["limit_bytes"].as_u64().unwrap();
     assert_eq!(
-        estimated(&short) - estimated(&roomy),
-        dedup_estimate,
+        estimated(&roomy),
+        parts + most_key_file_bytes(roomy_limit),
         "{} {}",
         short["parts"],
         roomy["parts"]

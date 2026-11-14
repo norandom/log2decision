@@ -666,6 +666,15 @@ fn text_key(text: &str) -> [u8; 16] {
     key
 }
 
+/// The most bytes the key file of deduplication on disk can take under a memory limit
+/// of `limit_bytes` (a read that keeps occurrence counts, [`ZipInput::spill_into`]).
+/// A key (16 bytes) is written for every text the set in memory takes, and none after
+/// the set is frozen; every text takes a slot of [`SLOT_BYTES`], and the set never
+/// holds more than the memory limit. A bound, not an estimate (task 1.20, review round 2).
+pub fn most_key_file_bytes(limit_bytes: u64) -> u64 {
+    (limit_bytes / SLOT_BYTES).saturating_mul(16)
+}
+
 /// The bytes of a hash table that holds `capacity` keys: its slots are a power of two
 /// and at most seven eighths full.
 pub(crate) fn table_bytes(capacity: usize) -> u64 {
@@ -1921,6 +1930,24 @@ impl ZipBatches<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The key file's bound covers a set that fills the whole limit: one 16-byte key
+    /// per slot the limit can hold, and a full table never holds more texts than slots.
+    #[test]
+    fn the_key_file_bound_covers_a_set_that_fills_the_limit() {
+        assert_eq!(most_key_file_bytes(0), 0);
+        assert_eq!(most_key_file_bytes(21 * 1000), 16 * 1000);
+        for limit in [1u64 << 20, 50_000_000, 2_000_000_000] {
+            // The most texts a table within `limit` holds: seven eighths of its slots.
+            let mut capacity = 1usize;
+            while table_bytes(capacity * 2) <= limit {
+                capacity *= 2;
+            }
+            let texts = (table_bytes(capacity) - 32) / SLOT_BYTES * 7 / 8;
+            assert!(16 * texts <= most_key_file_bytes(limit), "{limit}");
+        }
+        assert_eq!(most_key_file_bytes(u64::MAX), u64::MAX / SLOT_BYTES * 16);
+    }
 
     /// Gives out `good`, then fails as a disk would.
     struct Failing {
