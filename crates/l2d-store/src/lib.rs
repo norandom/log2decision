@@ -6,6 +6,15 @@
 //! produced the vectors it is given and refuses another one, naming both
 //! ([`StoreError::IdentityMismatch`]).
 //!
+//! Beside the identity a store records the release of the AMD runtime its vectors were
+//! made under (task 2.7): the provider compiles the model per release and the vectors
+//! differ between releases. Whoever hands vectors to a store, to add or to compare, says
+//! where they are from ([`VectorOrigin`]: the identity, and the release if they were made
+//! by the AMD runtime); vectors of another release are refused, naming both
+//! ([`StoreError::ReleaseMismatch`]), and encoding the logs again under one release is
+//! the way out. Vectors without a release (made elsewhere) and vectors with one are kept
+//! apart in both directions.
+//!
 //! Everything is synchronous and in this process: SQLite is compiled in, there is no
 //! background service and no asynchronous runtime. At rest a store is its one file.
 //!
@@ -99,7 +108,9 @@ pub use query::{
     Matching, PHRASE_BYTE_BYTES, QUERY, READ_FIXED_BYTES, READ_ROW_BYTES, SEARCH_FIXED_BYTES,
     TEXT_READ_FACTOR, fold, fold_char, hits_schema, index_folds_alike, stored_schema,
 };
-pub use sqlite::{APPLICATION_ID, CACHE_BYTES, SCHEMA_VERSION};
+pub use sqlite::{
+    APPLICATION_ID, CACHE_BYTES, MAX_RELEASE_BYTES, OLDEST_SCHEMA_VERSION, SCHEMA_VERSION,
+};
 pub use vector::{NEAREST_ROW_BYTES, Nearest};
 
 /// The longest store name, in bytes.
@@ -248,6 +259,20 @@ pub enum StoreError {
         store: EncoderIdentity,
         given: EncoderIdentity,
     },
+    /// The vectors given were made under another release of the AMD runtime than the
+    /// store's, or one of the two has no release (task 2.7).
+    #[error(
+        "the store holds vectors made under {}, but the vectors given were made under {}; \
+         the AMD runtime compiles the model per release and the vectors differ between \
+         releases, so vectors of different releases are never stored together or compared; \
+         encode the logs again under one release, into a new store",
+        describe_release(.store),
+        describe_release(.given)
+    )]
+    ReleaseMismatch {
+        store: Option<String>,
+        given: Option<String>,
+    },
     /// There is no store of that name.
     #[error("missing store {name}: expected at {}", .expected_at.display())]
     Missing { name: String, expected_at: PathBuf },
@@ -287,6 +312,45 @@ fn describe(identity: &EncoderIdentity) -> String {
     )
 }
 
+fn describe_release(release: &Option<String>) -> String {
+    match release {
+        Some(release) => format!("the AMD runtime release {release}"),
+        None => "no recorded AMD runtime release".to_string(),
+    }
+}
+
+/// Where vectors are from: the encoder that produced them and, for vectors made by the
+/// AMD runtime through this tool, the release of that runtime.
+///
+/// A reference to an [`EncoderIdentity`] converts into the origin without a release,
+/// which is what vectors made elsewhere have (the synthetic vectors of tests, vectors
+/// brought in from another tool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorOrigin<'a> {
+    pub identity: &'a EncoderIdentity,
+    pub runtime_release: Option<&'a str>,
+}
+
+impl<'a> VectorOrigin<'a> {
+    /// Vectors of the encoder `identity`, made under the AMD runtime release `release`
+    /// (`SessionInfo::runtime_release` of the encoder session).
+    pub fn made_under(identity: &'a EncoderIdentity, release: &'a str) -> Self {
+        Self {
+            identity,
+            runtime_release: Some(release),
+        }
+    }
+}
+
+impl<'a> From<&'a EncoderIdentity> for VectorOrigin<'a> {
+    fn from(identity: &'a EncoderIdentity) -> Self {
+        Self {
+            identity,
+            runtime_release: None,
+        }
+    }
+}
+
 impl From<StoreError> for L2dError {
     fn from(error: StoreError) -> Self {
         match error {
@@ -294,7 +358,9 @@ impl From<StoreError> for L2dError {
                 item: format!("store {name}"),
                 expected_at,
             },
-            StoreError::IdentityMismatch { .. } | StoreError::Exists { .. } => L2dError::Refused {
+            StoreError::IdentityMismatch { .. }
+            | StoreError::ReleaseMismatch { .. }
+            | StoreError::Exists { .. } => L2dError::Refused {
                 reason: error.to_string(),
             },
             StoreError::InvalidName { .. }
@@ -491,6 +557,25 @@ fn validate_identity(identity: &EncoderIdentity) -> Result<(), StoreError> {
     })
 }
 
+/// A release is 1 to [`MAX_RELEASE_BYTES`] visible ASCII characters (`1.9.0`).
+fn validate_release(release: Option<&str>) -> Result<(), StoreError> {
+    match release {
+        Some(release)
+            if release.is_empty()
+                || release.len() > MAX_RELEASE_BYTES
+                || !release.bytes().all(|byte| byte.is_ascii_graphic()) =>
+        {
+            Err(StoreError::InvalidIdentity {
+                detail: format!(
+                    "the runtime release {release:?} is not 1 to {MAX_RELEASE_BYTES} visible \
+                     ASCII characters"
+                ),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 fn failed(what: &str, path: &Path, detail: impl std::fmt::Display) -> StoreError {
     StoreError::Failed {
         detail: format!("{what} {}: {detail}", path.display()),
@@ -510,12 +595,15 @@ pub struct Store {
 }
 
 impl Store {
-    /// Creates the store `name` for vectors of the encoder `identity`, as
-    /// `stores/<name>.db` below the project root.
+    /// Creates the store `name` for vectors of `origin`, as `stores/<name>.db` below the
+    /// project root: the encoder identity, and the release of the AMD runtime the vectors
+    /// are made under ([`VectorOrigin::made_under`]). A reference to an identity alone
+    /// creates a store for vectors without a release.
     ///
     /// - A name that is not 1 to [`MAX_NAME_BYTES`] letters, digits, `.`, `_` or `-`, or
     ///   that starts with a dot, is [`StoreError::InvalidName`].
-    /// - An identity with an empty name or revision or the dimension 0 is
+    /// - An identity with an empty name or revision or the dimension 0, and a release
+    ///   that is not 1 to [`MAX_RELEASE_BYTES`] visible ASCII characters, is
     ///   [`StoreError::InvalidIdentity`].
     /// - When the file exists, whatever it holds, the result is [`StoreError::Exists`]
     ///   and the file is left unchanged.
@@ -524,13 +612,18 @@ impl Store {
     /// there first; tables and identity are then written in one transaction. After a
     /// failure the file is removed again. A process that is killed in between leaves an
     /// empty file, which [`Store::open`] reports as such.
-    pub fn create(
+    pub fn create<'a>(
         paths: &ProjectPaths,
         name: &str,
-        identity: &EncoderIdentity,
+        origin: impl Into<VectorOrigin<'a>>,
     ) -> Result<Self, StoreError> {
+        let VectorOrigin {
+            identity,
+            runtime_release,
+        } = origin.into();
         validate_name(name)?;
         validate_identity(identity)?;
+        validate_release(runtime_release)?;
         let directory = paths.stores_dir();
         let path = paths.store_path(name);
         fs::create_dir_all(&directory).map_err(|error| failed("creating", &directory, error))?;
@@ -548,7 +641,7 @@ impl Store {
             }
             Err(error) => return Err(failed("creating", &path, error)),
         }
-        match sqlite::create(&path, identity, env!("CARGO_PKG_VERSION")) {
+        match sqlite::create(&path, identity, runtime_release, env!("CARGO_PKG_VERSION")) {
             Ok((connection, meta)) => Ok(Self {
                 connection,
                 name: name.to_string(),
@@ -567,8 +660,11 @@ impl Store {
     /// Opens the store `name`.
     ///
     /// A file that is not there is [`StoreError::Missing`], naming the store and where
-    /// it was expected. A file that is not a store of this tool and of this format
-    /// ([`SCHEMA_VERSION`]) is [`StoreError::Failed`]; it is not changed.
+    /// it was expected. A file that is not a store of this tool and of a format from
+    /// [`OLDEST_SCHEMA_VERSION`] to [`SCHEMA_VERSION`] is [`StoreError::Failed`]; it is
+    /// not changed. A store of format 1, written before the runtime release was
+    /// recorded, opens as a store without a release and is not migrated (see
+    /// [`sqlite`]).
     pub fn open(paths: &ProjectPaths, name: &str) -> Result<Self, StoreError> {
         validate_name(name)?;
         let path = paths.store_path(name);
@@ -613,6 +709,13 @@ impl Store {
     /// The one encoder identity of the store's vectors.
     pub fn identity(&self) -> &EncoderIdentity {
         &self.meta.identity
+    }
+
+    /// The release of the AMD runtime the store's vectors were made under; none for a
+    /// store of vectors that were not made by it through this tool, and for a store
+    /// written before the release was recorded (format 1).
+    pub fn runtime_release(&self) -> Option<&str> {
+        self.meta.runtime_release.as_deref()
     }
 
     /// When the store was created: UTC, `YYYY-MM-DDTHH:MM:SSZ`.
@@ -689,8 +792,9 @@ impl Store {
         }
         let say = |meta: &sqlite::Meta| {
             format!(
-                "the encoder {}, created at {} by version {} of the tool",
+                "the encoder {} with {}, created at {} by version {} of the tool",
                 describe(&meta.identity),
+                describe_release(&meta.runtime_release),
                 meta.created_at,
                 meta.tool_version
             )
@@ -743,6 +847,37 @@ impl Store {
         }
     }
 
+    /// Unless vectors of `origin` belong in this store: [`StoreError::IdentityMismatch`]
+    /// for another encoder identity (checked first), [`StoreError::ReleaseMismatch`] for
+    /// another release of the AMD runtime, or when only one of the two has a release.
+    /// Both sides are named. Every add and every search by vector starts with this; a
+    /// caller that encodes for a store asks it before it encodes.
+    pub fn require_origin<'a>(
+        &self,
+        origin: impl Into<VectorOrigin<'a>>,
+    ) -> Result<(), StoreError> {
+        let origin = origin.into();
+        self.require_identity(origin.identity)?;
+        if origin.runtime_release == self.runtime_release() {
+            Ok(())
+        } else {
+            Err(StoreError::ReleaseMismatch {
+                store: self.meta.runtime_release.clone(),
+                given: origin.runtime_release.map(str::to_string),
+            })
+        }
+    }
+
+    /// What an add of rows whose longest text has `longest_text_bytes` bytes would hold
+    /// of the budget for the store itself ([`AddReport::held_bytes`]):
+    /// [`ADD_FIXED_BYTES`] and [`ADD_TEXT_FACTOR`] times that text, or times a longer
+    /// text that an earlier add indexed on this open store and whose table the text
+    /// index still holds. For callers that have to know before they do work that only
+    /// the add makes useful (encoding).
+    pub fn add_share_bytes(&self, longest_text_bytes: u64) -> u64 {
+        ADD_FIXED_BYTES + ADD_TEXT_FACTOR * longest_text_bytes.max(self.indexed_text_bytes)
+    }
+
     /// [`Store::add_with`] under a budget observed now with the default settings.
     ///
     /// That budget is fresh: nothing is held in it, so the frame `rows` itself and
@@ -750,20 +885,25 @@ impl Store {
     /// for callers whose frame is small. A caller that read its logs under a budget, or
     /// holds a frame of any size that matters, passes that budget to
     /// [`Store::add_with`], so that the frame counts against the same limit.
-    pub fn add(
+    pub fn add<'a>(
         &mut self,
         rows: &DataFrame,
-        identity: &EncoderIdentity,
+        origin: impl Into<VectorOrigin<'a>>,
     ) -> Result<AddReport, StoreError> {
         let mut budget =
             MemoryBudget::observe(&MemorySettings::default()).map_err(StoreError::Memory)?;
-        self.add_with(rows, identity, &mut budget)
+        self.add_with(rows, origin, &mut budget)
     }
 
     /// Adds the logs of the store rows frame `rows` (see the crate description), whose
-    /// vectors were produced by the encoder `identity`.
+    /// vectors are of `origin`: the encoder that produced them and, if they were made by
+    /// the AMD runtime, its release (a reference to an identity alone stands for vectors
+    /// without a release).
     ///
     /// - Another identity than the store's is [`StoreError::IdentityMismatch`].
+    /// - Another runtime release than the store's, or a release where the store has
+    ///   none, or none where it has one, is [`StoreError::ReleaseMismatch`]. Both are
+    ///   named, and nothing is written.
     /// - A frame with other columns, or a row with an unknown label, no occurrence, or
     ///   a vector that is not `dimension` finite values, is [`StoreError::InvalidRows`];
     ///   the message names the row, counted from 1.
@@ -789,13 +929,13 @@ impl Store {
     /// outcome, the budget holds afterwards what it held before, the store has given
     /// back what the add took of SQLite's memory ([`Store::retained_bytes`]), and after
     /// anything but success the stored rows are as they were.
-    pub fn add_with(
+    pub fn add_with<'a>(
         &mut self,
         rows: &DataFrame,
-        identity: &EncoderIdentity,
+        origin: impl Into<VectorOrigin<'a>>,
         budget: &mut MemoryBudget,
     ) -> Result<AddReport, StoreError> {
-        self.require_identity(identity)?;
+        self.require_origin(origin)?;
         check_rows(rows)?;
         let longest = longest_text(rows)?;
         if longest.bytes > MAX_TEXT_BYTES {
@@ -812,7 +952,7 @@ impl Store {
         // connection, so that text counts when it is longer than any of this frame.
         let counted = longest.bytes.max(self.indexed_text_bytes);
         let text_share = ADD_TEXT_FACTOR * counted;
-        let own = ADD_FIXED_BYTES + text_share;
+        let own = self.add_share_bytes(longest.bytes);
         let left = budget.left_bytes();
         if left < own {
             let which = if counted == longest.bytes {

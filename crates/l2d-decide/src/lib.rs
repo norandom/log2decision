@@ -4,14 +4,20 @@
 //! - [`scorer`]: the contract every scorer meets and the scores frame it returns.
 //! - [`conformal`]: from a scorer's ratio to a label set with a stated error rate.
 //! - [`triage`]: every log of a set ranked for review, scored down, or abstained on.
+//! - [`fill`]: logs encoded on the NPU and added, with their vectors, to a store.
 
 pub mod conformal;
+pub mod fill;
 pub mod scorer;
 pub mod triage;
 
 pub use conformal::{
     Calibrated, CalibrationError, CalibrationPoint, CalibrationSettings, ConformalCalibrator,
     LabelSet, Stratum, StratumCount,
+};
+pub use fill::{
+    FILL_ROW_BYTES, FillCause, FillError, FillReport, LogEncoder, STORE_KEY, encode_into_store,
+    fill_row_bytes,
 };
 pub use scorer::{Scorer, ScoringCost};
 pub use triage::{

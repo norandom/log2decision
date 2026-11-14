@@ -523,7 +523,8 @@ fn the_schema_has_the_tables_columns_and_indexes_of_the_task() {
             "encoder_revision",
             "encoder_dimension",
             "created_at",
-            "tool_version"
+            "tool_version",
+            "runtime_release"
         ]
     );
 
