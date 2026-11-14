@@ -1,10 +1,10 @@
 # Handover: npu-log-decision
 
-Written 2026-11-13, end of day. Branch `main`, pushed at `51aa056`. Remote:
+Written 2026-11-14, end of day. Branch `main`, pushed at `15ee402`. Remote:
 https://github.com/norandom/log2decision
 
 This file describes the state as it is now. It replaces the handover of
-2026-11-12.
+2026-11-13.
 
 ## Where things stand
 
@@ -12,15 +12,17 @@ The spec `npu-log-decision` is in implementation
 (`.kiro/specs/npu-log-decision/`). Each finished task was implemented by one
 agent, checked by an independent reviewer, then committed and pushed.
 
-Tests on `main` at `51aa056`: 563 passing, 0 failing, 28 ignored. `cargo fmt`
-and `clippy` are clean.
+Tests on `main` at `15ee402`: 711 passing, 0 failing, 47 ignored, in 69 test
+binaries. `cargo fmt` and `clippy` are clean.
 
-A file of logs can be read, scored, calibrated and triaged from the command
-line with the simple scorer. The encoder runs on the NPU as tested library
-code; no command uses it yet.
+What works from the command line: a file or a zip archive of logs is read,
+scored, calibrated and triaged with the baseline scorer; `baseline score` on an
+archive writes Parquet parts with a manifest. The encoder runs on the NPU as a
+tested session, and logs can be encoded into the store (2.7, library code); no
+command uses the encoder yet.
 
-**Two tasks are open in the middle of their review. Read "Open at the end of
-the day" before doing anything else.**
+**One gate is running: 2.17, alone on the machine. Read "Open at the end of the
+day" before doing anything else.**
 
 ### Finished tasks
 
@@ -49,107 +51,86 @@ the day" before doing anything else.**
 | 2.4 | Encoder package with a verified revision; the 1.8.0 build switch removed | `150cef6` |
 | 1.12 | Baseline gate: grouped evaluation on CSIC in `l2d-eval` | `775b08a` |
 | 2.12 | Rows right and fast on the NPU: the texts as rows of one image | `51aa056` |
-| 2.1 | Science gate: decided by the owner on 2026-11-13, see below | `51aa056` |
+| 2.1 | Science gate: decided by the owner on 2026-11-13 | `51aa056` |
+| 1.16 | Zip archives read in batches under the memory limit | `8ba2e95` |
+| 2.6 | Encoder session on the NPU, NPU only by evidence | `0491f8d` |
+| 2.15 | Gate: embedding qualification with diagrams (did not pass for the published encoder) | `a713fd8` |
+| 1.17 | Results in Parquet parts on disk, deduplication on disk | `e7cbbce` |
+| 2.16 | Gate: hierarchical byte encoder, entropy patches against two controls (record) | `acb9767` |
+| 2.7 | Encode logs and store the vectors, one transaction, release recorded | `7e1bc77` |
+| 1.20 | `l2d ingest` deduplicates on disk only when needed; partition room by distinct keys | `15ee402` |
+
+Also on 2026-11-14, documentation only: requirement 15 (resource management on
+a busy machine, `a49e4d2`), the design section "Operating Criteria: Field
+Machines, Not Labs" (`d2dece8`) and the host's 92 % memory guard in it
+(`f0769df`).
 
 ## Open at the end of the day
 
-No agent is running. Two pieces of work are unfinished.
+### Gate 2.17, running alone
 
-### Task 1.16, zip input: uncommitted in the main checkout
+- **What it is:** task 2.17 in `tasks.md`. The question is why a classifier
+  fitted on the entropy-patch encoder's vectors does not carry over to
+  endpoints it has not seen. In order: (a) rule out randomness, (b) the same
+  cuts and vectors in float, 8 bits and on the NPU (pass: median cosine at
+  least 0.99, cuts identical for at least 99 % of lines), (c) an objective
+  that keeps local detail (masked-patch or next-byte prediction), (d)
+  evaluation over five folds grouped by endpoint and at least three seeds,
+  beside the published encoder and the baseline scorer. Then NPU throughput
+  with nothing else running and a dated document.
+- **State:** one implementer agent, in the worktree
+  `.claude/worktrees/agent-a0c9e82b9927f0853` (branch
+  `worktree-agent-a0c9e82b9927f0853`, locked). Its first commit is `8fa23cc`
+  (stability gate scripts). Outputs in `D:\BuildArtifacts\log2decision\task-2.17\`,
+  build folder `task-2.17-target`. It has a memory limit of 6 GiB per run and
+  records the peak. The owner handed over the whole laptop for it.
+- **It runs alone.** No other build, agent, training or measurement while it
+  runs (requirement 15; see "Things that will bite").
+- **Its instructions:** leave 2.17 unticked, add `- 2.17:` notes, do not amend
+  requirements, design or tasks 2.4 to 2.7. If the vectors still do not
+  classify on unseen endpoints, stop and bring the measurements to the owner.
+- **Next, when it reports:** an independent reviewer checks it (code, figures,
+  the memory record of each run). Then merge with `git merge --no-ff
+  --no-commit worktree-agent-a0c9e82b9927f0853`, run the checks, and bring the
+  conclusion to the owner as a menu with a recommendation. The owner decides
+  whether 2.17 passes and what the spec takes from it.
+- **If the session was lost:** look at the worktree's commits and at
+  `D:\BuildArtifacts\log2decision\task-2.17\` before restarting anything. Do not
+  resume a run around a host kill; no figure comes from a resumed run.
 
-- **State:** implemented, reviewed once, rejected on one finding, and the
-  implementer finished the fix after this handover was first written. The
-  working tree of the main checkout holds the work uncommitted and complete.
-  The fix has **not** been re-reviewed. The implementer reports 608 passed,
-  0 failed, 30 ignored, fmt and clippy clean; run the checks again before
-  trusting that.
-- **The fix as reported:** `Accepted::push_raw` in `input.rs` puts a second
-  mark in front when a batch buffer starts with one, for Polars to drop. The
-  lines and CSV adapters had the same fault and are fixed by it; JSONL was not
-  affected. A mark at the very start of a file or entry is dropped once;
-  anywhere else it is text. All advisory items were done, including a test
-  over 1,500 mutated archives (none panicked, heap growth under 1 MiB) and a
-  read failure of the archive file now giving exit code 5. `data/README.md`
-  was corrected.
-- **Files:** new `crates/l2d-core/src/{zip_input.rs,zip_directory.rs}`,
-  `crates/l2d-core/tests/{zip_input.rs,zip_memory.rs,byte_order_mark.rs}`,
-  `crates/l2d-cli/tests/archive.rs`; changed `Cargo.toml`, `Cargo.lock`,
-  `crates/l2d-core/{Cargo.toml,src/lib.rs,src/input.rs,src/memory.rs,src/adapters/lines.rs}`,
-  `crates/l2d-cli/{Cargo.toml,src/cmd/ingest.rs,src/cmd/common.rs,src/output.rs}`,
-  `README.md` (one row), `tasks.md` (`1.16:` notes).
-- **The blocking finding:** a log line that starts with a byte-order mark
-  (U+FEFF) and is the first record of a batch aborts the whole read, and the
-  result depends on the batch size. Polars drops a mark at the start of the
-  buffer it parses. The cause is in the shared path in `input.rs`, so the
-  lines adapter on a plain file fails the same way. The fix belongs in the
-  shared place, with tests for both adapters at batch sizes 1 and default and
-  for a double mark at an entry start.
-- **Advisory items sent with it:** wording of the 128-bit key comment; README
-  figures that have no log; the entry count in `data/README.md` (14,911
-  directory entries, 2,696 directories, 12,215 files, 11,992 of them
-  non-empty); the parser's known differentials in the notes; a real I/O error
-  mid-entry reported as damage; JSON `position` above 2^53; `grow_for`
-  reserving one step early; design lines 1126 and 1128 in the stale list; a
-  property test over mutated archives.
-- **Next:** run the checks, have an independent reviewer confirm the fix,
-  write the owner's three zip decisions into the notes and design.md, bring
-  design.md in line (stale lines 53, 449, 457, 464-478, 1126, 1128), tick,
-  commit, push.
-- **What held up in the review:** the own zip reader survived every hostile
-  archive the reviewer built; the memory accounting is exact; the AIT figures
-  reproduce. Measured on `russellmitchell.zip` (7.1 GB) with `*.log` under
-  512 MB: 272 entries, 22,880,272 records, 5,642,082 distinct, heap peak
-  334.4 MiB, about 27 s to read plus 5 to 9 s to open. Reading every entry
-  under 512 MB is refused at about 7.3 million distinct texts; that is the
-  limit task 1.17 removes.
+### The label and classifier question (state of knowledge)
 
-### Task 2.6, encoder session: committed on a branch, rejected once
+Not solved, narrowed down. Do not report it as solved or as a myth.
 
-- **State:** implemented and committed as `6b929bb` on local branch `task-2.6`
-  in the worktree `.claude/worktrees/agent-a46f05b739bed075d` (not pushed).
-  Reviewed once and rejected on two small findings. The findings have **not**
-  been sent back yet.
-- **Blocking 1:** `ExecutedNodes::npu_only`
-  (`crates/l2d-encoder/src/session.rs` about 375-393) is looser than the
-  notes say. Any operator through the Vitis provider other than the quantize
-  pair counts as a compiled part, and the two ends are accepted on any other
-  provider. Fix: through the Vitis provider accept only the two ends and
-  nodes named `vitis_ai_ep_*`, with at least one of the latter; elsewhere
-  accept only `CPUExecutionProvider` with at most one `QuantizeLinear` and one
-  `DequantizeLinear`; refuse everything else. Add default tests for `Conv`
-  through Vitis and for an unknown provider. Correct the note that says a new
-  node name would be refused.
-- **Blocking 2:** the `2.6:` throughput note explains the gap to 2.12's
-  16,636 logs/s by host load. That is not supported: 16,636 was 2.12's
-  quieter run, and process CPU per million logs fell from 33 s to 11 to 15 s.
-  State the range (medians 27,044 to 42,217 logs/s over ten runs, the
-  reviewer's included) and note the owner's reading of 2026-11-13: the host
-  is a laptop with power management, the difference is related to the system
-  itself, it was not measured and is not pursued.
-- **Advisory:** stale lines missing from the list (design.md 15, 295, 296;
-  tasks.md 267 and 419); the comment in `tests/npu_session.rs` that no CPU
-  provider runs anywhere, while `tests/npu_gate.rs` still has one from task
-  2.2 (removing it is a follow-up); try `session.disable_cpu_ep_fallback=1`;
-  no check for a zero or non-finite model output; device and driver are not
-  in the cache key; `plain()` breaks a path on a network share; the dropped
-  `deviceStat` cross-check.
-- **Next:** a new implementer in that worktree gets these findings; the
-  reviewer re-checks; then merge with `git merge --no-ff --no-commit
-  task-2.6`, checks, design.md in line, tick, README, push, remove the
-  worktree and the target directory
-  `D:\BuildArtifacts\log2decision\task-2.6-target`.
-- **What held up, on the committed code, run by the reviewer on the NPU:**
-  every vector is identical whatever row a text is in (0 of 2,708 differ);
-  cold start 3.0 s, warm 0.6 s; a damaged cache folder is refused; 587 tests
-  pass. A finding beyond the brief: with a damaged `context.json` in the
-  provider's cache the provider opens without error and runs on the CPU while
-  its report still says 33 of 35 nodes on the NPU. The session therefore
-  profiles its first run and refuses on that evidence.
+- The label information is in the vectors: with every endpoint seen in
+  fitting, boosted trees on the entropy encoder's 8-bit vectors reach ROC AUC
+  0.922, a linear model 0.799.
+- The failure is transfer to unseen endpoints: 0.57 to 0.59 in 8 bits, about
+  0.70 in float. The published encoder reaches 0.94 there, the baseline scorer
+  0.989.
+- Within one model and one precision the vectors are deterministic (NPU rows
+  bit-identical in 1,118 comparisons).
+- Measured contributor: quantization moves the entropy model's patch cuts
+  (median cosine float to 8 bits 0.24; 8 bits to NPU 0.97). The good/bad
+  direction keeps its sign on unseen endpoints for 76 % of its weight in float,
+  34 % in 8 bits. Float alone still fails, so this is not the only cause.
+- Open: the training objective (it trained the vector to ignore any single
+  blanked patch, which is where an attack sits; from the construction, not
+  measured), run-to-run randomness (not yet tested across processes or
+  repeated training) and evaluation noise (three held-out CSIC endpoints,
+  mostly one seed; two seeds differed by up to 0.27).
+- Diagnostic scripts used: `diag_classify.py` and `diag_eigen.py` in the
+  session scratchpad
+  `D:\BuildArtifacts\Temp\claude\f993b7fd18aae7a9\ebba0a50-bc4e-4b97-95b0-e1d9f89c4987\scratchpad\`;
+  logs under `D:\BuildArtifacts\log2decision\task-2.16\logs\`. Gate 2.17
+  replaces these figures.
 
 ## Decisions waiting for the owner
 
-None. Everything put to the owner on 2026-11-13 was answered; see the next
-section.
+- **Requirement 15 wording** (resource management on a busy machine, 12
+  acceptance criteria) is written into `requirements.md` and is with the owner
+  for review.
+- **Gate 2.17** outcome, when it reports.
 
 ## Decisions in force
 
@@ -192,73 +173,90 @@ From 2026-11-13:
 - **Decide on measured metrics, not estimates.** The AMD release is 1.9.0,
   "always forward"; the 1.8.0 build switch is gone.
 - **NPU only.** There is no CPU fallback and no comparison of NPU against CPU
-  vectors. Requirement 4.5 is withdrawn; 4.6 now asks for the same vector for
-  the same text whatever its place in a batch. The aim on the NPU is
-  end-to-end throughput. A host without an NPU uses the baseline scorer.
+  vectors. Requirement 4.5 is withdrawn; 4.6 asks for the same vector for the
+  same text whatever its place in a batch. A host without an NPU uses the
+  baseline scorer.
 - **Science gate (2.1): passed, with the encoder as the vector source.** The
-  encoder does not clearly beat the baseline, so the baseline stays the first
-  scorer. The encoder goes ahead because search, the linear head and the
-  Venn-style decision part need vectors.
-- **Baseline gate figure: pooled,** as the design says: all held-out
-  predictions as one ranking. The mean over the folds is reported beside it.
-- **The baseline's L2 penalty stays at 1.** The comparison of penalties is
-  repeated on the AIT data before anything is changed.
-- **NPU input stays float.** 8-bit input gave bit-identical vectors and 27 %
-  to 48 % more throughput; it is a recorded option that needs the revision's
-  domain string to change.
-- **Requirement 1.5 has two flags:** the part the encoder reads was cut, and
-  the whole log text is longer than the encoder's input. Built in task 2.6.
-- **The store records the AMD runtime release** beside the encoder identity
-  and refuses vectors of another release. Planned into task 2.7.
-- **Zip input (1.16):** the own zip-directory reader stays, and the `zip`
-  crate is used in tests only. Lines read from an entry before its damage is
-  found are kept and the entry is reported as damaged. A run with a damaged
-  entry exits with code 2.
-- Memory shares: one typed share lowers the other automatically; both typed
-  above 1 in sum is exit code 2.
+  baseline stays the first scorer.
+- **Baseline gate figure: pooled.** The mean over the folds is reported beside
+  it. The baseline's L2 penalty stays at 1 until the comparison is repeated on
+  AIT.
+- **NPU input stays float.** 8-bit input is a recorded option.
+- **Requirement 1.5 has two flags** (the part the encoder reads was cut; the
+  whole text is longer than the encoder's input).
+- **Zip input (1.16):** own zip-directory reader; lines read before damage are
+  kept and the entry reported as damaged; exit code 2 for a run with a
+  damaged entry.
+
+From 2026-11-14:
+
+- **Encoder direction.** The convolutional architecture stays. Hierarchy:
+  bytes, then patches, then one vector per line. Entropy-based patches after
+  Meta's BLT (byte latent encoding). No cutting: cutting loses information.
+  n dimensions; the number of principal components for 95 % is not a goal in
+  itself, the features must carry meaning. The 2.16 result (12 to 32
+  components for 95 % instead of one) is read by the owner as a success of the
+  geometry; the classification question goes to 2.17.
+- **Qualification is information-based.** A vector set is qualified for
+  classification by distinct feature ablation; collapsed vectors lose
+  information (Shannon framing; log2ml charts in the research log).
+- **No `blaze`** in the project.
+- **Zip and parts (1.17):** `flate2` on the `zlib-rs` backend, accepted; the
+  five codecs the Parquet feature links, accepted; `zlib-rs` built at
+  `opt-level = 3` in the dev profile. The disk estimate stays (6 bytes per
+  row) until a second archive is measured. `statvfs` for other systems is a
+  later follow-up; until then an archive run stops at the disk check there.
+- **1.20:** `ingest` touches the disk only when the set of distinct texts
+  outgrows memory; the partition room is judged by distinct keys.
+  `baseline score` checks its parts and a bound for `keys.bin` (16 bytes per
+  21-byte slot the memory limit holds) before the read, and deduplication at
+  the freeze. Write buffers are sized at the freeze (32 KiB down to 4 KiB).
+- **Store (2.7):** both truncation flags plus "empty" per log; a fill is one
+  transaction; the store stays usable after a refused fill.
+- **Field machines (requirement 15 and the design's operating criteria):**
+  batching; datatypes with memory spilling and one global memory limit;
+  streaming where possible; a resource-aware process that runs one hungry
+  operation (a training or similar) at a time. The reference host kills
+  processes at 92 % of physical memory. Resource management is a key design
+  objective: the users have busy machines. Development pipelines (spikes,
+  trainings, measurements) follow the same rules.
 
 ## Order of the remaining work
 
-Two lanes, one implementer and one reviewer at a time in each.
+1. **Gate 2.17** (running). Its outcome decides how 2.8 onward use vectors.
+2. **1.19** entries read in parallel. Starts only after 2.17 has finished, so
+   that 2.17 has the machine alone.
+3. **2.8** neighbour scorer, **2.10** linear head, **2.11** outlier ranking,
+   then **2.9** command wiring for milestone 2; all after the owner's decision
+   on 2.17.
+4. Milestones 3 and 4: shift test, assessment, evaluation (3.7 and 3.9 reuse
+   `l2d-eval` and the pooled gate figure), end-to-end and hardware tests.
 
-- **Main lane, in the main checkout:**
-  1. finish 1.16 (see above)
-  2. 1.17 results in parts on disk, 1.19 entries read in parallel
-- **Second lane, in a worktree:**
-  1. finish 2.6 (see above)
-  2. 2.7 encode and store, with the runtime release in the store
-  3. **Qualify the embeddings before the Venn part** (owner, 2026-11-13; to
-     be added to tasks.md as a new task when 1.16 lands, since tasks.md holds
-     1.16's uncommitted notes). A one-time documentation task, not a tool
-     feature: small Python scripts run with `uv` that read the vectors the
-     NPU produced and write PNG diagrams (PCA and the like, clustering, by
-     label and by endpoint), after log2ml's ideas. The question it answers:
-     are the embeddings suitable, and do distinct features remain present.
-     The result is a dated document in `docs/` with the pictures. The Venn
-     scorers start only after it.
-     It is a gate, in the owner's words: if all vectors turn out to be
-     garbage or noise whatever strings go in, everything built on them is
-     blocked from being a proper ML implementation. So the document must
-     answer, with pictures and a few plain numbers: do different strings give
-     different vectors (not one collapsed point, as the random-weight spike
-     model gave); do similar strings land near each other and unrelated ones
-     apart; do good and bad logs, and the endpoints, show structure; how many
-     dimensions carry the variance. If the answer is noise, stop and bring it
-     to the owner before 2.8. It needs only vectors from the session, so it
-     can run straight after 2.6 and need not wait for 2.7.
-  4. 2.8 neighbour scorer, 2.10 linear head, 2.11 outlier ranking
-  5. 2.9 command wiring for milestone 2
-- **Then** milestones 3 and 4: shift test, assessment, evaluation (3.7 and 3.9
-  reuse `l2d-eval` and use the pooled gate figure), end-to-end and hardware
-  tests.
-- **Follow-ups noted, not yet tasks:** remove the CPU provider comparison from
-  `tests/npu_gate.rs`; repeat the penalty comparison on AIT; process CPU
-  seconds as the energy proxy (requirement 9.4); AIT labels (a separate
-  amendment later).
+The owner's order: the NPU encoder first, then the decision part after Venn.
+The baseline ratio and the vector scorers stay separate scorers.
 
-The owner's order: the NPU encoder first, then the decision part after Venn
-(neighbour scorer, linear head, outlier ranking, shift test). The baseline
-ratio and the vector scorers stay separate scorers.
+### Follow-ups, not yet tasks
+
+- `statvfs` free-disk query on systems other than Windows.
+- A measured disk check at the freeze (replaces the 6-byte estimate; would
+  also tighten the `keys.bin` bound, which under the default limit is about
+  three quarters of the limit and can refuse a `baseline score` on a nearly
+  full disk).
+- `"incomplete": true` in the JSON of `triage` and `baseline score` on plain
+  inputs.
+- `ingest` reads its frames back from disk although only their number is
+  needed.
+- The mid-batch freeze for lack of memory has no test.
+- The hungry-operation gate and an NPU lock in `l2d-core` (requirement 15.6,
+  15.7, 15.10): a project lock plus an NPU lock; trainers read batches.
+- The session's placement rule against the provider's duplicated dequantize
+  node (seen in 2.16): stated, not changed.
+- From the 2.7 review: the refusal message wording; `VectorOrigin`'s public
+  fields; the message of `Fill::store`; a free-disk check in 2.9; the
+  `npu_gate` cache directory under `L2D_NPU_WORK_DIR`.
+- Remove the CPU provider comparison from `tests/npu_gate.rs`; repeat the
+  penalty comparison on AIT; process CPU seconds as the energy proxy
+  (requirement 9.4); AIT labels (a separate amendment later).
 
 The task file's `## Implementation Notes` section holds what each finished task
 left for the next ones. Read the notes of the tasks a new task depends on
@@ -268,25 +266,26 @@ before starting it.
 
 Autonomous mode, review required:
 
-1. One task at a time per lane. Dispatch an implementer agent with the task
-   text, the spec sections, the implementation notes and the host rules. Tests
-   first; it does not commit in the main checkout.
+1. One heavy task at a time on this machine. Dispatch an implementer agent
+   with the task text, the spec sections, the implementation notes and the
+   host rules. Tests first.
 2. Dispatch an independent reviewer (`.claude/skills/kiro-review/SKILL.md`).
    Give it the code and the implementer's claims to verify, not the
-   conclusion. On a rejection, send the findings back to the same implementer,
-   then re-review. At most two remediation rounds.
+   conclusion. On a rejection, send the findings back, then re-review. At most
+   two remediation rounds.
 3. Re-run the checks yourself, mark the task `[x]`, bring stale design text in
    line, update the README status table.
-4. Commit only that task's files (`git add <paths>`, never `git add -A`) as
-   `feat(npu-log-decision): ...`, then push. The owner asked for a push after
-   each approved task.
+4. Commit only that task's files as `feat(npu-log-decision): ...`, then push.
+   The owner asked for a push after each approved task. Commit messages end
+   with the `Co-Authored-By` line.
 
 A task in a worktree commits on a local branch there. Merge it with
-`git merge --no-ff --no-commit <branch>`, run the checks in the main checkout,
-commit, push, then remove the worktree with `git worktree remove -f -f` and
-delete its branches.
+`git merge --no-ff --no-commit <branch>`; `tasks.md` usually conflicts in the
+notes section, resolved by keeping both sides. Run the checks in the main
+checkout, commit, push, then remove the worktree and delete its branch.
 
-Checks, from the repository root:
+Checks, from the repository root, with a target folder under
+`D:\BuildArtifacts\log2decision\`:
 
 ```
 cargo fmt --all -- --check
@@ -294,9 +293,8 @@ cargo test --workspace -j 4
 cargo clippy --workspace --all-targets -j 4 -- -D warnings
 ```
 
-Hardware tests are ignored by default and run on request, in release, one
-agent on the NPU at a time, with a reduced `PATH` to show that no Python is
-involved:
+Hardware tests are ignored by default and run on request, in release, one job
+on the NPU at a time, with a reduced `PATH` to show that no Python is involved:
 
 ```
 $env:PATH = 'C:\Windows\System32;C:\Windows;C:\Users\mariu\.cargo\bin'
@@ -304,125 +302,122 @@ $env:L2D_RUNTIME_DIR = 'D:\Source\log2decision\runtime\ryzenai'
 cargo test --release -j 4 -p l2d-encoder --test npu_rows -- --ignored --nocapture
 ```
 
-The other hardware tests are `npu_gate`, `npu_throughput`, `npu_quality` and,
-on the 2.6 branch, `npu_session`. The task notes name each on-request test.
+Others: `npu_gate`, `npu_throughput`, `npu_quality`, `npu_session`,
+`npu_embedding_export` (2.15). The task notes name each on-request test.
 
 With the owner: answer the question asked first and briefly, say plainly
-whether anything needs attention, and bring open decisions as choices with a
-recommendation.
+whether anything needs attention, and bring open decisions as a menu (choices
+with a recommendation first).
 
 ## Results worth remembering
 
 - **CSIC 2010:** 61,065 records, 25,608 distinct texts, 1,632 path groups, 8 of
   them with both labels.
-- **Baseline gate (1.12),** five folds by URL path, routing stripped, default
-  penalty: cross-endpoint ROC AUC 0.914 pooled, 0.919 as the mean over the
-  folds; bar 0.90. With the whole text kept: 0.897 pooled, below the bar. The
-  two endpoints that share one form (`registro.jsp`, `editar.jsp`) score
-  0.82, and 0.76 when both are held out; the others 0.97 to 0.99. Lighter
-  penalties score 0.953 to 0.956, mostly through transfer between those two
-  endpoints. The report is byte-reproducible
+- **Baseline gate (1.12):** cross-endpoint ROC AUC 0.914 pooled, 0.919 mean
+  over five folds by URL path, routing stripped; bar 0.90
   (`docs/2026-11-13-baseline-gate.md`).
-- **Calibration on CSIC:** the 5 % error rate is reached on endpoints the
-  calibration logs cover and missed for both labels on endpoints they do not.
-- **NPU, rows (2.12):** in the exported batch layout `[N, 64, 1, 256]` the NPU
-  gets every row but the first wrong under Ryzen AI 1.9.0, for any N above 1.
-  The pooling step is not the cause; what the provider computes there was not
-  established. With the texts as the rows of one image `[1, 64, rows, 256]`
-  (`onnx_edit::with_rows_as_height`) every row is bit-identical to the text
-  encoded alone.
-- **NPU, speed:** from log text to unit vector, one session at 64 rows:
-  16,000 to 17,000 logs/s in 2.12's runs and 27,000 to 42,000 in 2.6's runs
-  on the same host. The owner's reading: the host is a laptop with power
-  management, so the difference belongs to the system, not to the code. It
-  was not measured and is left as it is; figures are stated as ranges.
-  Four sessions: 35,000 to
-  40,000 in 2.12's runs. The requirement is 1,000. Ready in 3 to 5 s cold and
-  0.6 to 1 s warm; the requirement allows 30 s.
-- **NPU, quality:** the vectors off the NPU reproduce the science gate:
-  linear head 0.958 against 0.959 recorded, neighbour ratio at k = 11 0.899
-  against 0.893.
-- **NPU, traps:** registering the provider with `error_on_failure` does not
-  make a session NPU only; neither does the provider's placement report. The
-  provider's compiled-model cache trusts its key alone: a reused key gave a
-  failing run for another row count and silently wrong vectors for another
-  model of the same shape.
-- **Store:** CSIC's 25,608 logs are added in about 3.5 s into a 46 MiB file. A
-  nearest-vector search takes about 36 ms, the first 100 phrase matches about
-  1.5 ms.
-- **Commands on CSIC:** fit in about 2 s, triage of 8,644 logs in under half a
-  second.
-- **Runtime sources:** the five files of AMD's 1.9.0 NuGet package are the
-  wheel's builds signed separately, and the NPU output is bit-identical
-  between them.
+- **Calibration on CSIC:** the 5 % error rate holds on endpoints the
+  calibration logs cover, not on others.
+- **NPU, rows (2.12):** texts as the rows of one image `[1, 64, rows, 256]`;
+  every row bit-identical to the text encoded alone.
+- **NPU, speed:** 16,000 to 42,000 logs/s end to end over recorded runs on
+  this host (requirement 1,000); ready in 3 to 5 s cold, 0.6 to 1 s warm.
+  Figures are stated as ranges; the variation belongs to the laptop and is not
+  pursued.
+- **NPU session (2.6):** NPU only by evidence: the placement report plus a
+  profile of the first run, `disable_cpu_ep_fallback`, and an error on a zero
+  or non-finite output. A damaged provider cache can run on the CPU while its
+  report claims the NPU; the profile catches it.
+- **Embedding qualification (2.15):** the published encoder's vectors are
+  nearly one-dimensional: the first component carries 87.9 % of the variance,
+  participation ratio 1.3 of 128. Cause: a label-only training objective.
+  `docs/2026-11-14-embedding-qualification.md`.
+- **Hierarchical encoder (2.16):** bytes to patches to one vector per line,
+  entropy patches against fixed-stride and delimiter controls; 12 to 32
+  components for 95 % of the variance, a flat spectrum (23 eigenvalues above
+  1 %). Classification on unseen endpoints unsettled (see above).
+  `docs/2026-11-14-hierarchical-encoder-gate.md`, and the research log
+  `docs/2026-11-14-research-log-encoder-direction.md` (with log2ml charts and
+  the information view, `tools/embedding-qualification/q5_information.py`).
+- **AIT archive `russellmitchell.zip` (7.1 GB), limit 512 MB:** `ingest` of the
+  272 `*.log` entries (22.9 million lines, 5.6 million distinct) in memory in
+  about 40 s, peak 349 MiB; all entries (30.9 million lines, 8.3 million
+  distinct) on disk in 58 s, peak 374 MiB (1.20); `baseline score` of all
+  entries in about 8 minutes, peak 359 MiB, 273 MiB of parts. Single runs.
+- **Store:** CSIC's 25,608 logs added in about 3.5 s into a 46 MiB file;
+  nearest-vector search about 36 ms. Store format 2 records the vector origin
+  and the AMD runtime release and refuses another release.
+- **Runtime sources:** the five files of AMD's 1.9.0 NuGet package; NPU output
+  bit-identical to the wheel's builds.
 
 ## Things that will bite
 
-- **Memory.** A build can fail with "only metadata stub found", "required to
-  be available in rlib format", "The paging file is too small" or linker error
-  LNK1102, and a test run can end with exit code -1 and no failing test. The
-  cause is commit memory running out when several compilers run beside other
-  heavy work. Build with `-j 4` and rerun once.
+- **The host kills processes at 92 % of physical memory** (29.6 GiB). Exit
+  code -536870911 (0xE0000001) means killed for memory. A died process is
+  never a mystery: say which jobs ran together and how much each held. The
+  cures are batching and running one heavy job at a time. Earlier handovers
+  blamed "commit memory" for failed builds; that was never measured, do not
+  repeat it as a cause.
+- **One heavy job at a time.** One training, one measurement, one large build,
+  one job on the NPU. Several agents training or measuring in parallel on this
+  laptop gave killed processes on 2026-11-14. Builds use `-j 4`.
+- **Spike scripts must stream.** `tools/science/hg.py` (2.16) built
+  whole-dataset arrays (around lines 335 and 446) and its checkpoint saved the
+  numpy random state but not torch's. Gate 2.17 is to fix that; check before
+  reusing the 2.16 code.
 - **Shared build folder.** `CARGO_TARGET_DIR` is `D:\BuildArtifacts\cargo-target`
   for every Rust project on this machine. Worktrees, reviewers and scratch
-  copies must build with their own `--target-dir` under
-  `D:\BuildArtifacts\log2decision\`. The cure for wrong paths baked into test
-  binaries is `cargo clean -p` for the `l2d-*` crates.
-- **Left-over build folders** from today, safe to remove when nothing runs:
-  `task-2.12-target`, `review-2.12-target`, `review-1.12-target`,
-  `review-1.16-target`, `review-2.6-target` under
-  `D:\BuildArtifacts\log2decision\`. Keep `task-2.6-target` until 2.6 is
-  merged, and keep the `task-*` and `review-*` log folders as evidence.
-- **Debug builds are slow where it matters.** Run evaluations in release. The
-  full baseline evaluation is about 30 minutes.
-- **Timings on this host vary.** Fit times differed by 30 % to 50 % and NPU
-  throughput by a factor of two between runs. The host is a laptop with
-  power management; the owner attributes the variation to the system itself
-  and does not want it pursued. State ranges over recorded runs, and mark a
-  cause that was not measured as a reading, not a finding.
+  copies build with their own target under `D:\BuildArtifacts\log2decision\`.
+- **Left-over build folders,** safe to remove when nothing runs:
+  `task-1.20-target`, `review-1.20-target`, `task-1.20-review2-target`,
+  `review-2.12-probe-target` under `D:\BuildArtifacts\log2decision\`. Keep
+  `task-2.17-target` until 2.17 is merged, and keep the `task-*` and
+  `review-*` log folders as evidence.
+- **Debug builds are slow where it matters.** Run evaluations and large
+  archive cases in release.
+- **Timings on this host vary** (laptop power management). State ranges over
+  recorded runs; the owner does not want the variation investigated.
 - **Polars.** Import it only as `l2d_core::polars`. Do not enable its `csv`,
   `json`, `strings` or `streaming` facade features and do not upgrade it
   without checking `cargo tree` for network crates. It drops a byte-order
-  mark at the start of any buffer it parses (see task 1.16).
+  mark at the start of any buffer it parses (handled since 1.16).
 - **Runtime directory.** `runtime\ryzenai\` holds the five files of release
   1.9.0, provisioned from
   `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg` with
   `uv run --no-project --python 3.12 python tools/runtime/provision.py --nupkg <path>`.
   Do not provision or run hardware tests while another process has the DLLs
-  loaded. A missing DLL ends the process without an error, which is why the
-  file check runs before anything is loaded. Provisioning from AMD's package
-  index is outstanding and not needed.
+  loaded. A missing DLL ends the process without an error.
+- **NPU provider traps:** `error_on_failure` and the placement report do not
+  make a session NPU only; the compiled-model cache trusts its key alone.
 - **Store limits.** A log text may be at most 1 MiB and may not hold a NUL
-  byte. An add holds 16 MiB plus 192 times the longest text. A phrase search
-  holds up to about 59 MiB and is refused when that does not fit.
-- **Triage and evidence.** Triage keeps only the primary scorer's evidence and
-  takes text, yes/no and numeric columns only.
-- **What reviews reject.** Figures that were stated and not measured, causes
-  that were stated and not measured, and code that accepts input it cannot
-  handle. Every task that touched memory was rejected at least once on a case
-  the implementer had not measured.
+  byte.
+- **What reviews reject.** Figures and causes stated but not measured, and code
+  that accepts input it cannot handle. Every task that touched memory was
+  rejected at least once on a case the implementer had not measured.
 - **Host rules.** PowerShell only, no Git Bash, no `wsl`; containers through
-  `docker` and `docker compose`. Models go in `./models`, datasets in
-  `./data/<dataset>/`, documents in `./docs/` with a date prefix and a row in
-  the README.
+  `docker` and `docker compose`. Models go in `./models` (never C:), datasets
+  in `./data/<dataset>/`, documents in `./docs/` with a date prefix and a row
+  in the README. Caches and temp files under `D:\BuildArtifacts\`, never a
+  drive root.
 - **Large files.** A hook blocks reading a file of 150 lines or more in one
   go; read in ranges or through `smart_read`.
-- **Untracked on purpose.** `.openidea/` is IDE state. `log2ml/`, `models/`,
-  `reports/`, `runtime/ryzenai/`, `runtime/cache/` and the dataset files are
-  ignored.
+- **Untracked on purpose.** `.openidea/` is IDE state; `.claude/worktrees/`
+  holds agent worktrees. `log2ml/`, `models/`, `reports/`, `runtime/ryzenai/`,
+  `runtime/cache/` and the dataset files are ignored.
 
 ## Data and artifacts outside git
 
 - **AIT Log Data Set V2:** all eight testbeds, 121.7 GB, in
-  `data/ait-lds-v2/`, verified against their MD5 sums. Not unpacked. Task
-  1.16 reads `russellmitchell.zip` in place.
-- **Science gate:** all runs and models in
-  `D:\BuildArtifacts\log2decision\science-2.1\runs\`. The published model for
-  wiring is in `models/science-2.1/`; it is the weakest of three seeds and not
-  a model trained on all data.
+  `data/ait-lds-v2/`, verified against their MD5 sums, read in place.
+- **Science gate:** runs and models in
+  `D:\BuildArtifacts\log2decision\science-2.1\runs\`. The published model is in
+  `models/science-2.1/`; it is the weakest of three seeds.
+- **Encoder gates:** 2.15 vectors and logs in
+  `D:\BuildArtifacts\log2decision\task-2.15\`; 2.16 vectors, qualification and
+  logs in `task-2.16\`; 2.17 in `task-2.17\`.
 - **Baseline gate reports:** `reports/2026-11-13-csic-2010-baseline.{json,md,run.json}`.
-- **Evidence logs of today's tasks:** `D:\BuildArtifacts\log2decision\task-2.12\logs\`,
-  `task-2.6\logs\`, `task-1.16\`, and the reviewers' `review-*` folders.
+- **Evidence of the tasks:** the `task-*` and `review-*` folders under
+  `D:\BuildArtifacts\log2decision\`.
 - **AMD packages on the owner's machine:**
   `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg` and
   `C:\Users\mariu\Downloads\ryzen_ai_nuget_1.8.0 (1).zip`.
@@ -431,8 +426,9 @@ recommendation.
 
 - Session memory for agents: `mmhmem` project `log2decision` holds a
   checkpoint of the same state.
-- Research documents: `docs/`, indexed in `README.md`. New on 2026-11-13: the
-  baseline gate and the NPU throughput and row correctness document.
+- Research documents: `docs/`, indexed in `README.md`. New on 2026-11-14: the
+  embedding qualification (2.15), the research log on the encoder direction,
+  and the hierarchical encoder gate (2.16).
 - Amendment records: `.kiro/specs/npu-log-decision/amendment-2026-11-12-zip-batch.md`
   and `amendment-2026-11-12-vector-decision-heads.md`. Both are merged into the
   spec; where they differ from it, the spec wins.
