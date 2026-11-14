@@ -1292,7 +1292,7 @@ Where the design stands against them:
 | 3 Streaming | Zip entries, records, Parquet parts with a manifest (requirement 13) | Per-log results of the commands on plain files; vectors exported for qualification (one file written at the end) |
 | 4 One hungry process, resource-aware | Each command reads free memory and adapts or refuses (requirement 12.1, 12.7) | No gate between processes: nothing stops two trainings, or a training beside a measurement. The NPU is guarded by convention only |
 
-What follows for the design (not yet requirements; the owner approves the wording before requirements.md is amended):
+What follows for the design. The criteria are Requirement 15 since 2026-11-14 (resource management as a key design objective for an analyst with a busy machine); its wording is with the owner for review, and no task implements the gate yet:
 
 - **A gate for hungry processes** in `l2d-core`: a named lock for the project on the machine, taken by the commands and tests that count as hungry and by the development scripts through a small wrapper. A second process waits with a message that names the holder, or refuses when asked not to wait. The NPU gets a lock of its own, so that one session at a time is a property of the tool and not of the people running it. The run record states that the gate was held.
 - **The trainer reads batches from a source,** not a slice of all records, and its calibration texts are drawn from the stream. Its contract in the Training section is changed when the training task is specified.

@@ -11,6 +11,11 @@ the log text so that both similarity search and text search work. The tool also
 measures the vectors themselves, so that a smaller or faster encoder can be
 judged by evidence.
 
+The tool is written for an analyst whose machine is busy: other programs run
+beside it, and memory, the NPU and the disk are shared with them. Managing
+those resources is a key design objective, not a tuning step (owner,
+2026-11-14; Requirements 12, 13 and 15).
+
 Background, measurements and decisions are in `brief.md` and in
 `docs/2026-11-11-embedding-speed-benchmark.md`. Two results shape these
 requirements: a general text-embedding model on the NPU managed 2.3 logs per
@@ -241,3 +246,22 @@ Added on 2026-11-12 (owner approval of `amendment-2026-11-12-vector-decision-hea
 12. If the store holds fewer logs than the outlier ranking needs, then the Log Triage Tool shall refuse and state the number stored and the number needed.
 13. When evidence is reported for a neighbour-based decision, the Log Triage Tool shall report, for each label, the number of neighbours used and their mean distance.
 14. The Log Triage Tool shall keep fitting a head and ranking outliers within the memory limit of Requirement 12, refusing before loading when the vectors needed do not fit.
+
+### Requirement 15: Resource management on a busy machine
+**Objective:** As a log analyst whose laptop is busy with other work, I want every pipeline of the tool to manage memory, disk and the NPU as shared resources, so that it finishes its work or refuses with a reason, and never brings the machine or its own run down.
+
+Added on 2026-11-14 on the owner's direction: the target audience has a busy machine, and resource management is a key design objective. The reference host ends processes when the use of physical memory reaches 92 %. Requirements 12 and 13 state the rules for batches and for archives; this requirement states the four criteria that hold for every pipeline, including training and the development pipelines that train and qualify encoders (design.md, "Operating Criteria: Field Machines, Not Labs").
+
+#### Acceptance Criteria
+1. The Log Triage Tool shall process every dataset in batches and shall not hold a whole dataset in memory as one object, except in an operation that states this need and is refused under criterion 4 when it does not fit.
+2. The Log Triage Tool shall apply one memory limit to the whole process and shall count against it everything an operation holds.
+3. When a structure that grows with the data no longer fits within the memory limit, the Log Triage Tool shall move it to disk and continue, and shall produce the same results as when the structure is held in memory.
+4. If a structure that grows with the data has no form on disk and does not fit within the memory limit, then the Log Triage Tool shall refuse before the operation starts and state the memory it needs and the memory available.
+5. Where an input can be read as a stream and a result can be written as it is produced, the Log Triage Tool shall do so, so that its memory use follows the batch and not the size of the input.
+6. When a resource-hungry operation is about to start, the Log Triage Tool shall observe the free memory of the host, whether the NPU is in use, and whether another resource-hungry operation of the tool is running on the host.
+7. While a resource-hungry operation of the tool is running on the host, the Log Triage Tool shall not start a second one, and shall wait or refuse as the analyst chooses, naming the operation that holds the host.
+8. While an encoder session holds the NPU, the Log Triage Tool shall not open a second session on it from another process, and shall wait or refuse as the analyst chooses.
+9. The Log Triage Tool shall treat training, evaluation over folds, filling the store, scoring an archive and measuring throughput as resource-hungry operations.
+10. When a resource-hungry operation ends, the Log Triage Tool shall record the memory limit applied, the peak memory it counted, whether it waited for the host, and whether any structure was moved to disk.
+11. If a pipeline of the project ends because the host stopped it for memory, then that shall be treated as a fault of the pipeline to be corrected by batching and a memory limit, and its results shall not be reported as those of an uninterrupted run.
+12. The development pipelines that train or qualify an encoder shall meet criteria 1, 2, 5, 7 and 10 in the same way as the tool's own operations.
