@@ -11,11 +11,9 @@
 //! - `throughput_from_text_to_vector_on_csic`: logs per second end to end over CSIC's
 //!   distinct texts, where the time goes, and the memory of the process.
 //!
-//! No CPU provider is registered here or in the crate's library, not even for
-//! comparison. One test file still does: the hardware gate of task 2.2
-//! (`tests/npu_gate.rs`, on request) opens the spike model on the CPU provider for its
-//! comparison; it is older than the decision that no CPU provider runs anywhere, and
-//! removing that comparison is a recorded follow-up.
+//! No CPU provider is registered here or anywhere else in the workspace, not even for
+//! comparison (the comparison the hardware gate of task 2.2 had, in `tests/npu_gate.rs`,
+//! was removed with task 2.7).
 //!
 //! Run on request, in release, one test at a time (see `npu_support` for the variables):
 //!

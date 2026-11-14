@@ -15,9 +15,10 @@ use l2d_core::{
     LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
 };
 use l2d_store::{
-    DISTANCE, Filter, GROUP, ID, INDEX_TEXT_FACTOR, LABEL, OCCURRENCES, PHRASE_BYTE_BYTES, QUERY,
-    SEARCH_FIXED_BYTES, SOURCE, Store, StoreError, TEXT, TEXT_READ_FACTOR, TRUNCATED, VECTOR,
-    hits_schema, log_id, rows_frame, rows_schema, stored_schema,
+    DISTANCE, Filter, GROUP, ID, INDEX_TEXT_FACTOR, LABEL, LogFlags, OCCURRENCES,
+    PHRASE_BYTE_BYTES, QUERY, SEARCH_FIXED_BYTES, SOURCE, Store, StoreError, TEXT,
+    TEXT_READ_FACTOR, TRUNCATED, VECTOR, VectorOrigin, hits_schema, log_id, rows_frame,
+    rows_schema, stored_schema,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -171,11 +172,21 @@ fn unit_vector(text: &str) -> Vec<f32> {
 /// A log longer than this many bytes counts as truncated in these tests.
 const INPUT_BYTES: usize = 60;
 
+/// The three flags of a text in these tests: made up from its length, so that the
+/// three columns differ from each other.
+fn flags_for(text: &str) -> LogFlags {
+    LogFlags {
+        truncated: text.len() > INPUT_BYTES,
+        text_longer_than_input: text.len() > INPUT_BYTES / 2,
+        empty: text.len().is_multiple_of(3),
+    }
+}
+
 /// The rows frame for `logs` from `source`; `vector` gives the vector of a text.
 fn rows_by(logs: &LogsFrame, source: &str, vector: impl Fn(&str) -> Vec<f32>) -> DataFrame {
     let vectors: Vec<f32> = logs.records().flat_map(|r| vector(&r.text)).collect();
-    let truncated: Vec<bool> = logs.records().map(|r| r.text.len() > INPUT_BYTES).collect();
-    rows_frame(logs, source, &vectors, DIM, &truncated).expect("the logs make a rows frame")
+    let flags: Vec<LogFlags> = logs.records().map(|r| flags_for(&r.text)).collect();
+    rows_frame(logs, source, &vectors, DIM, &flags).expect("the logs make a rows frame")
 }
 
 fn rows(logs: &LogsFrame, source: &str) -> DataFrame {
@@ -184,9 +195,18 @@ fn rows(logs: &LogsFrame, source: &str) -> DataFrame {
 
 /// A store named `s` that holds `logs` from `source`.
 fn store_of(scratch: &Scratch, logs: &LogsFrame, source: &str) -> Store {
-    let mut store = Store::create(&scratch.paths(), "s", &identity()).unwrap();
+    let mut store = Store::create(
+        &scratch.paths(),
+        "s",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     store
-        .add_with(&rows(logs, source), &identity(), &mut budget())
+        .add_with(
+            &rows(logs, source),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .expect("the logs are added");
     store
 }
@@ -447,7 +467,9 @@ fn the_stored_and_hits_frames_have_the_documented_schemas() {
             "occurrences u32",
             "label str",
             "group str",
-            "truncated bool"
+            "truncated bool",
+            "text_longer_than_input bool",
+            "empty bool"
         ]
     );
 }
@@ -1167,7 +1189,11 @@ fn two_sources(scratch: &Scratch) -> (Store, LogsFrame) {
     let logs = synthetic_logs(60);
     let mut store = store_of(scratch, &logs, "first.log");
     store
-        .add_with(&rows(&logs, "second.log"), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "second.log"),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     (store, logs)
 }
@@ -1304,7 +1330,12 @@ fn nearest_returns_the_exact_nearest_logs_with_their_distances() {
     ];
     let flat: Vec<f32> = query_vectors.concat();
     let found = store
-        .nearest(&flat, &identity(), 7, &Filter::default())
+        .nearest(
+            &flat,
+            VectorOrigin::without_release(&identity()),
+            7,
+            &Filter::default(),
+        )
         .unwrap();
     assert_eq!(**found.hits.schema(), hits_schema());
     assert_eq!(found.hits.height(), 21);
@@ -1338,14 +1369,24 @@ fn nearest_returns_the_exact_nearest_logs_with_their_distances() {
 
     // More asked for than stored: every log, nearest first.
     let every = store
-        .nearest(&query_vectors[0], &identity(), 10_000, &Filter::default())
+        .nearest(
+            &query_vectors[0],
+            VectorOrigin::without_release(&identity()),
+            10_000,
+            &Filter::default(),
+        )
         .unwrap();
     assert_eq!(every.hits.height(), 500);
     assert_nearest(&every.hits, 0, &candidates, &query_vectors[0], 500);
     // Distances are far from unit length as well.
     let far: Vec<f32> = query_vectors[1].iter().map(|v| v * 1000.0).collect();
     let found = store
-        .nearest(&far, &identity(), 3, &Filter::default())
+        .nearest(
+            &far,
+            VectorOrigin::without_release(&identity()),
+            3,
+            &Filter::default(),
+        )
         .unwrap();
     let expected = brute_force(&candidates, &far, 3);
     assert_eq!(
@@ -1381,15 +1422,29 @@ fn among_equal_distances_the_log_stored_first_comes_first() {
         }
         values
     };
-    let mut store = Store::create(&scratch.paths(), "s", &identity()).unwrap();
+    let mut store = Store::create(
+        &scratch.paths(),
+        "s",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     store
-        .add_with(&rows_by(&logs, FILE, vector), &identity(), &mut budget())
+        .add_with(
+            &rows_by(&logs, FILE, vector),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
 
     let mut query = vec![0.0f32; usize::from(DIM)];
     query[0] = 1.0;
     let all = store
-        .nearest(&query, &identity(), 10, &Filter::default())
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            10,
+            &Filter::default(),
+        )
         .unwrap();
     assert_eq!(
         texts(&all.hits),
@@ -1408,7 +1463,12 @@ fn among_equal_distances_the_log_stored_first_comes_first() {
         (4, &["nearer", "tie c", "tie a", "tie b"]),
     ] {
         let found = store
-            .nearest(&query, &identity(), k, &Filter::default())
+            .nearest(
+                &query,
+                VectorOrigin::without_release(&identity()),
+                k,
+                &Filter::default(),
+            )
             .unwrap();
         assert_eq!(texts(&found.hits), expected, "k = {k}");
     }
@@ -1416,7 +1476,7 @@ fn among_equal_distances_the_log_stored_first_comes_first() {
     let found = store
         .nearest_with(
             &query,
-            &identity(),
+            VectorOrigin::without_release(&identity()),
             3,
             &Filter::default(),
             &mut budget_with(None, Some(1)),
@@ -1475,7 +1535,14 @@ fn a_text_filter_is_applied_before_the_distance_ordering() {
     ];
     for (filter, candidates) in &cases {
         for k in [1, 3, 100] {
-            let found = store.nearest(&query, &identity(), k, filter).unwrap();
+            let found = store
+                .nearest(
+                    &query,
+                    VectorOrigin::without_release(&identity()),
+                    k,
+                    filter,
+                )
+                .unwrap();
             assert_eq!(found.candidates, candidates.len() as u64, "{filter:?}");
             assert_nearest(&found.hits, 0, candidates, &query, k);
         }
@@ -1484,15 +1551,32 @@ fn a_text_filter_is_applied_before_the_distance_ordering() {
     let (filter, candidates) = &cases[0];
     assert!(candidates.len() > 3 && candidates.len() < 60);
     let unfiltered = store
-        .nearest(&query, &identity(), 1, &Filter::default())
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            1,
+            &Filter::default(),
+        )
         .unwrap();
-    let filtered = store.nearest(&query, &identity(), 1, filter).unwrap();
+    let filtered = store
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            1,
+            filter,
+        )
+        .unwrap();
     assert_ne!(texts(&unfiltered.hits), texts(&filtered.hits));
 
     // Without a source the same text of both sources is two logs, at one distance:
     // the one stored first comes first.
     let found = store
-        .nearest(&query, &identity(), 2, &Filter::default())
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            2,
+            &Filter::default(),
+        )
         .unwrap();
     assert_eq!(
         strings(&found.hits, SOURCE),
@@ -1528,7 +1612,12 @@ fn nearest_refuses_a_vector_of_another_identity_naming_both() {
     for given in others {
         let length = usize::from(given.dimension);
         let error = store
-            .nearest(&query[..length], &given, 3, &Filter::default())
+            .nearest(
+                &query[..length],
+                VectorOrigin::without_release(&given),
+                3,
+                &Filter::default(),
+            )
             .expect_err("another identity");
         assert_eq!(
             error,
@@ -1561,7 +1650,12 @@ fn nearest_names_a_query_that_cannot_be_one() {
 
     let detail = invalid_query(
         store
-            .nearest(&query[..7], &identity(), 3, &Filter::default())
+            .nearest(
+                &query[..7],
+                VectorOrigin::without_release(&identity()),
+                3,
+                &Filter::default(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains('7') && detail.contains('8'), "{detail}");
@@ -1569,7 +1663,12 @@ fn nearest_names_a_query_that_cannot_be_one() {
     spoiled[11] = f32::NAN;
     let detail = invalid_query(
         store
-            .nearest(&spoiled, &identity(), 3, &Filter::default())
+            .nearest(
+                &spoiled,
+                VectorOrigin::without_release(&identity()),
+                3,
+                &Filter::default(),
+            )
             .unwrap_err(),
     );
     assert!(
@@ -1578,7 +1677,12 @@ fn nearest_names_a_query_that_cannot_be_one() {
     );
     let detail = invalid_query(
         store
-            .nearest(&query, &identity(), 3, &contains(&[""]))
+            .nearest(
+                &query,
+                VectorOrigin::without_release(&identity()),
+                3,
+                &contains(&[""]),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("empty"), "{detail}");
@@ -1589,26 +1693,55 @@ fn nearest_names_a_query_that_cannot_be_one() {
 
     for (queries, k) in [(&query[..], 0usize), (&[][..], 3)] {
         let found = store
-            .nearest(queries, &identity(), k, &Filter::default())
+            .nearest(
+                queries,
+                VectorOrigin::without_release(&identity()),
+                k,
+                &Filter::default(),
+            )
             .unwrap();
         assert_eq!(found.hits.height(), 0);
         assert_eq!(**found.hits.schema(), hits_schema());
     }
     let nothing = store
-        .nearest(&query, &identity(), 3, &contains(&["no log holds this"]))
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            3,
+            &contains(&["no log holds this"]),
+        )
         .unwrap();
     assert_eq!((nothing.hits.height(), nothing.candidates), (0, 0));
 
-    let empty = Store::create(&scratch.paths(), "empty", &identity()).unwrap();
+    let empty = Store::create(
+        &scratch.paths(),
+        "empty",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     let found = empty
-        .nearest(&query, &identity(), 3, &Filter::default())
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            3,
+            &Filter::default(),
+        )
         .unwrap();
     assert_eq!((found.hits.height(), found.candidates), (0, 0));
     assert_eq!(
         empty.text_search(&Filter::default(), 5).unwrap().height(),
         0
     );
-    assert_eq!(empty.vectors(&Filter::default()).unwrap().height(), 0);
+    assert_eq!(
+        empty
+            .vectors(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default()
+            )
+            .unwrap()
+            .height(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1622,7 +1755,12 @@ fn vectors_returns_the_matching_rows_with_their_vectors() {
     let (store, logs) = two_sources(&scratch);
     let added = rows(&logs, "first.log");
 
-    let all = store.vectors(&Filter::default()).unwrap();
+    let all = store
+        .vectors(
+            VectorOrigin::without_release(&identity()),
+            &Filter::default(),
+        )
+        .unwrap();
     assert_eq!(**all.schema(), stored_schema());
     assert_eq!(all.height(), 120);
     assert_eq!(vectors(&all)[..60], vectors(&added));
@@ -1633,7 +1771,9 @@ fn vectors_returns_the_matching_rows_with_their_vectors() {
         source: Some("second.log".to_string()),
         ..Filter::default()
     };
-    let frame = store.vectors(&good_of_second).unwrap();
+    let frame = store
+        .vectors(VectorOrigin::without_release(&identity()), &good_of_second)
+        .unwrap();
     let expected: Vec<(String, Vec<f32>)> = logs
         .records()
         .filter(|record| record.label == Label::Good)
@@ -1671,14 +1811,33 @@ fn vectors_returns_the_matching_rows_with_their_vectors() {
         source: Some("first.log".to_string()),
         ..contains(&["id=2"])
     };
-    let frame = store.vectors(&filter).unwrap();
+    let frame = store
+        .vectors(VectorOrigin::without_release(&identity()), &filter)
+        .unwrap();
     assert_eq!(texts(&frame), scan(&logs, |text| text.contains("id=2")));
-    let mut copy = Store::create(&scratch.paths(), "copy", &identity()).unwrap();
+    let mut copy = Store::create(
+        &scratch.paths(),
+        "copy",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     let report = copy
-        .add_with(&frame.drop(ID).unwrap(), &identity(), &mut budget())
+        .add_with(
+            &frame.drop(ID).unwrap(),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(report.added, frame.height() as u64);
-    assert_eq!(ids(&copy.vectors(&Filter::default()).unwrap()), ids(&frame));
+    assert_eq!(
+        ids(&copy
+            .vectors(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default()
+            )
+            .unwrap()),
+        ids(&frame)
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1702,7 +1861,7 @@ fn the_results_do_not_depend_on_the_batch_size() {
         store
             .nearest_with(
                 &flat,
-                &identity(),
+                VectorOrigin::without_release(&identity()),
                 9,
                 filter,
                 &mut budget_with(None, batch_rows),
@@ -1735,9 +1894,15 @@ fn the_results_do_not_depend_on_the_batch_size() {
     }
 
     // Reading rows back does not depend on the budget either.
-    let all = store.vectors(&Filter::default()).unwrap();
+    let all = store
+        .vectors(
+            VectorOrigin::without_release(&identity()),
+            &Filter::default(),
+        )
+        .unwrap();
     let small = store
         .vectors_with(
+            VectorOrigin::without_release(&identity()),
             &Filter::default(),
             &mut budget_with(Some(64 * MIB), Some(3)),
         )
@@ -1766,12 +1931,22 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
         ),
         refusal(
             store
-                .vectors_with(&Filter::default(), &mut tight)
+                .vectors_with(
+                    VectorOrigin::without_release(&identity()),
+                    &Filter::default(),
+                    &mut tight,
+                )
                 .unwrap_err(),
         ),
         refusal(
             store
-                .nearest_with(&query, &identity(), 3, &Filter::default(), &mut tight)
+                .nearest_with(
+                    &query,
+                    VectorOrigin::without_release(&identity()),
+                    3,
+                    &Filter::default(),
+                    &mut tight,
+                )
                 .unwrap_err(),
         ),
     ] {
@@ -1790,7 +1965,11 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     let mut small = budget_with(Some(32 * MIB + SEARCH_FIXED_BYTES + room), None);
     let reason = refusal(
         store
-            .vectors_with(&Filter::default(), &mut small)
+            .vectors_with(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default(),
+                &mut small,
+            )
             .unwrap_err(),
     );
     assert!(
@@ -1822,7 +2001,13 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
         store.explain(&Filter::default()).unwrap().held_bytes,
         SEARCH_FIXED_BYTES
     );
-    let few = store.vectors_with(&narrow, &mut small).unwrap();
+    let few = store
+        .vectors_with(
+            VectorOrigin::without_release(&identity()),
+            &narrow,
+            &mut small,
+        )
+        .unwrap();
     assert_eq!(few.height(), 111);
     let counted = store
         .matching_with(&narrow, usize::MAX, &mut small)
@@ -1849,7 +2034,15 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     let mut holding = budget_with(Some(32 * MIB + SEARCH_FIXED_BYTES + room), None);
     holding.hold(room);
     assert!(holding.left_bytes() >= SEARCH_FIXED_BYTES);
-    let reason = refusal(store.vectors_with(&narrow, &mut holding).unwrap_err());
+    let reason = refusal(
+        store
+            .vectors_with(
+                VectorOrigin::without_release(&identity()),
+                &narrow,
+                &mut holding,
+            )
+            .unwrap_err(),
+    );
     for figure in [
         explained.held_bytes,
         SEARCH_FIXED_BYTES,
@@ -1879,7 +2072,11 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     );
     refusal(
         store
-            .vectors_with(&Filter::default(), &mut holding)
+            .vectors_with(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default(),
+                &mut holding,
+            )
             .unwrap_err(),
     );
     assert_eq!(holding.left_bytes(), SEARCH_FIXED_BYTES);
@@ -1889,7 +2086,13 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     let many: Vec<f32> = (0..100).flat_map(|_| query.clone()).collect();
     let reason = refusal(
         store
-            .nearest_with(&many, &identity(), 3_000, &Filter::default(), &mut small)
+            .nearest_with(
+                &many,
+                VectorOrigin::without_release(&identity()),
+                3_000,
+                &Filter::default(),
+                &mut small,
+            )
             .unwrap_err(),
     );
     assert!(
@@ -1897,7 +2100,13 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
         "{reason}"
     );
     let found = store
-        .nearest_with(&many, &identity(), 2, &Filter::default(), &mut small)
+        .nearest_with(
+            &many,
+            VectorOrigin::without_release(&identity()),
+            2,
+            &Filter::default(),
+            &mut small,
+        )
         .unwrap();
     assert_eq!(found.hits.height(), 200);
     assert!(found.held_bytes >= SEARCH_FIXED_BYTES);
@@ -1913,7 +2122,13 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     assert_eq!(holding.left_bytes(), 0);
     for (queries, k) in [(&query[..], 0usize), (&[][..], 5)] {
         let found = store
-            .nearest_with(queries, &identity(), k, &Filter::default(), &mut holding)
+            .nearest_with(
+                queries,
+                VectorOrigin::without_release(&identity()),
+                k,
+                &Filter::default(),
+                &mut holding,
+            )
             .expect("nothing is read, so nothing is refused");
         assert_eq!((found.hits.height(), found.candidates), (0, 0));
         assert_eq!((found.held_bytes, found.hits_bytes), (0, 0));
@@ -1921,7 +2136,13 @@ fn a_search_that_does_not_fit_the_memory_limit_is_refused_before_loading() {
     }
     refusal(
         store
-            .nearest_with(&query, &identity(), 1, &Filter::default(), &mut holding)
+            .nearest_with(
+                &query,
+                VectorOrigin::without_release(&identity()),
+                1,
+                &Filter::default(),
+                &mut holding,
+            )
             .unwrap_err(),
     );
 }
@@ -1938,10 +2159,20 @@ fn searching_leaves_the_store_as_it_was() {
 
     let query = unit_vector("q");
     store
-        .nearest(&query, &identity(), 5, &contains(&["id=1"]))
+        .nearest(
+            &query,
+            VectorOrigin::without_release(&identity()),
+            5,
+            &contains(&["id=1"]),
+        )
         .unwrap();
     store.text_search(&contains(&["=1"]), 10).unwrap();
-    store.vectors(&Filter::default()).unwrap();
+    store
+        .vectors(
+            VectorOrigin::without_release(&identity()),
+            &Filter::default(),
+        )
+        .unwrap();
     store.explain(&contains(&["id=1"])).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(
@@ -1952,10 +2183,23 @@ fn searching_leaves_the_store_as_it_was() {
     );
 
     let report = store
-        .add_with(&rows(&logs, "b.log"), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "b.log"),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(report.added, 200);
-    assert_eq!(store.vectors(&Filter::default()).unwrap().height(), 400);
+    assert_eq!(
+        store
+            .vectors(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default()
+            )
+            .unwrap()
+            .height(),
+        400
+    );
     drop(store);
     assert_fts_consistent(&path);
 }

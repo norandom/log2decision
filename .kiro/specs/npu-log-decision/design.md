@@ -122,7 +122,7 @@ graph LR
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
 | CLI | Rust 1.98, `clap` 4, `serde_json` | Subcommands, JSON output, exit codes | Binary name `l2d` |
-| Encoder execution | `ort` =2.0.0-rc.15, default features off, features `std`, `load-dynamic`, `vitis`, `api-30` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on NPU, CPU provider as fallback | Proven by the hardware gate (task 2.2). `api-30` because Ryzen AI 1.9 ships ONNX Runtime 1.30.0; `api-31` is refused by that DLL |
+| Encoder execution | `ort` =2.0.0-rc.15, default features off, features `std`, `load-dynamic`, `vitis`, `api-30` | Loads AMD's `onnxruntime.dll`; Vitis AI provider on the NPU only (no CPU provider is registered anywhere since task 2.7) | Proven by the hardware gate (task 2.2). `api-30` because Ryzen AI 1.9 ships ONNX Runtime 1.30.0; `api-31` is refused by that DLL |
 | NPU runtime | AMD Ryzen AI 1.9 deployment DLLs in `runtime/ryzenai/` | ONNX Runtime plus Vitis AI provider | Untracked; from AMD deployment package |
 | Data layer | `polars` (default features off; CSV, JSON, lazy, `ndarray` conversion) | Parsing of log data; frames between crates; grouping and joins in calibration, evaluation and reports | No cloud or HTTP features; lives in `l2d-core` |
 | Calibration | own code in `l2d-decide` | Conformal label sets at a stated error rate | `conformal-prediction` is removed by task 1.18 |
@@ -161,7 +161,7 @@ crates/
 │   ├── codec.rs                   # ByteCodec: text to fixed-length byte ids, truncation and empty flags, table lookup into the batch buffer
 │   ├── runtime.rs                 # RuntimeFiles check against the compiled-in manifest, the record, file versions
 │   ├── npu.rs                     # NPU device and driver query
-│   └── session.rs                 # EncoderSession: NPU or CPU execution via ort, placement evidence
+│   └── session.rs                 # EncoderSession: NPU-only execution via ort, placement evidence
 ├── l2d-train/src/                 # Optional / offline training module
 │   ├── lib.rs
 │   ├── model.rs                   # Burn module mirroring EncoderArch plus classifier layer
@@ -169,7 +169,7 @@ crates/
 │   └── export.rs                  # Burn weights export to EncoderPackage files
 ├── l2d-store/src/
 │   ├── lib.rs                     # Synchronous Store facade
-│   ├── sqlite.rs                  # SQLite setup, FTS5 index, meta table (format 1; no migrations yet)
+│   ├── sqlite.rs                  # SQLite setup, FTS5 index, meta table (format 2 since task 2.7, format 1 still read; no migrations)
 │   ├── vector.rs                  # In-memory exact SIMD vector search via faer
 │   └── query.rs                   # Nearest, text (FTS5), combined, restricted searches
 ├── l2d-decide/src/
@@ -302,7 +302,7 @@ flowchart TD
 | 5.3 | Similarity search | Store | `Store::nearest` | Triage |
 | 5.4 | Combined search | Store | `Store::nearest` with `Filter.contains` | |
 | 5.5 | Restrict by label or source | Store | `Filter` | |
-| 5.6 | Refuse identity mismatch | Store | `StoreError::IdentityMismatch` | |
+| 5.6 | Refuse identity mismatch | Store | `StoreError::IdentityMismatch`, `ReleaseMismatch` (task 2.7) | |
 | 5.7 | Persistent | Store | on-disk store | |
 | 6.1 | Ratio from labelled logs | NeighbourScorer | `Scorer::score` | Triage |
 | 6.2 | Evidence | NeighbourScorer | `Evidence` | Triage |
@@ -803,15 +803,18 @@ pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings
 | Field | Detail |
 |-------|--------|
 | Intent | Persist logs with vectors and answer text and similarity searches |
-| Requirements | 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 6.7 |
+| Requirements | 1.5, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 6.7 |
 
 **Responsibilities & Constraints**
-- One SQLite database `stores/<name>.db` holds one encoder identity, written to a `meta` table when the store is created.
+- One SQLite database `stores/<name>.db` holds one encoder identity and the AMD runtime release its vectors were made under, written to a `meta` table when the store is created (store format 2, task 2.7; the release column is nullable). Every vector that goes in or is compared with stored ones comes with a `VectorOrigin` (identity and release); a vector of another identity or another release is refused, both named. "No release" is stated explicitly (`VectorOrigin::without_release`); a store with a release refuses it, and a store without one refuses vectors that state one.
+- A store of format 1 (written before task 2.7) stays usable as built (owner decision of 2026-11-14): it is not migrated and nothing is written to it on open; it has no release, refuses vectors that state one with a message that names format 1, and reads the two newer flags of its logs as unknown. A format-2 file without the flag columns is refused. An older tool does not open format 2.
+- Three flags are stored per log (requirement 1.5; owner decision of 2026-11-14): `truncated` (the part the input mode reads was cut), `text_longer_than_input` (the whole text is longer than the encoder's input) and `empty` (nothing but padding reached the model), as the encoder reported them. They come back with stored rows and with hits.
+- Filling a store from logs is `l2d_decide::encode_into_store` (task 2.7): it checks the origin first, takes out texts the store cannot hold, sizes each batch by its own text bytes and refuses before anything is encoded when a row cannot fit, then encodes and adds batch by batch inside one store transaction (`Store::begin_fill`, `Fill`). A failure anywhere (encoder error, memory refusal, store error) rolls the whole fill back: the file's length and every page in use are as before, and the same logs can be filled again. A free page that was reused may keep other leftover bytes after a rollback (SQLite does not journal it); stored data is unaffected. The store uses a rollback journal: adding 200,000 logs of dimension 64 to a store of 175 MiB held a journal of about 61 MiB at its peak. There is no free-disk check before a fill; a full disk rolls the fill back (2.9's command is to check first). While a fill is open, searches through `Fill::store()` fail; nothing outside the store and decide crates opens a fill.
 - Rows are added; existing rows are never changed or removed by triage.
 - Full-text search uses SQLite FTS5 for exact and containment queries (the index narrows, a comparison decides; see "Search as built" below).
 - Vector search is exact squared L2 with `faer`'s SIMD kernel over the stored vectors (see "Search as built" below).
 - Entirely synchronous; no async runtime or background database daemon.
-- As built by task 1.8 (format 1): the FTS5 index is an external-content table over `logs.text` with the `trigram` tokenizer, kept in step by insert, delete and update triggers. Rows are never written with `INSERT OR REPLACE`, whose implicit delete would skip the trigger. A closed store is one file.
+- As built by task 1.8 (format 1; format 2 since task 2.7): the FTS5 index is an external-content table over `logs.text` with the `trigram` tokenizer, kept in step by insert, delete and update triggers. Rows are never written with `INSERT OR REPLACE`, whose implicit delete would skip the trigger. A closed store is one file.
 - Every row carries a finite vector of the store's dimension; a store cannot hold a log without a vector. A text with a NUL byte or longer than 1 MiB (`MAX_TEXT_BYTES`; lowered from 8 MiB by the owner on 2026-11-12, because the memory an add and a search must hold grows with the longest text) is refused by row.
 - Memory (requirement 12.9): an add holds 16 MiB plus 192 times the bytes of the longest text, counting the longest text indexed on the connection, and is refused up front when that does not fit. After an add that indexed a text over 16 KiB the store reopens its connection, because the text index keeps its hash table until the connection closes; an idle open store keeps at most 1 MiB (`Store::retained_bytes`). The caller's frame is not counted by the store.
 - Search as built by task 1.9:
@@ -831,12 +834,19 @@ pub fn train(records: &[LogRecord], arch: &EncoderArch, settings: &TrainSettings
 ```rust
 // Rows go in as the store rows frame (see "Data frames"); the store computes `id` and `encoder_revision`.
 pub fn log_id(source: &str, text: &str) -> String;   // SHA-256 of the 8-byte little-endian source length, the source, the text
-pub fn rows_frame(logs: &LogsFrame, source: &str, vectors: &[f32], dimension: u16, truncated: &[bool]) -> Result<DataFrame, StoreError>;
+pub fn rows_frame(logs: &LogsFrame, source: &str, vectors: &[f32], dimension: u16, flags: &[LogFlags]) -> Result<DataFrame, StoreError>;
+
+pub struct LogFlags { pub truncated: bool, pub text_longer_than_input: bool, pub empty: bool }
+
+// What produced a vector: the encoder identity and the AMD runtime release (task 2.7).
+pub struct VectorOrigin<'a> { pub identity: &'a EncoderIdentity, pub runtime_release: Option<&'a str> }
+impl<'a> VectorOrigin<'a> { pub fn without_release(identity: &'a EncoderIdentity) -> Self; }
 
 pub struct AddReport { pub rows: u64, pub added: u64, pub repeated: u64, pub plan: BatchPlan, pub held_bytes: u64, pub longest_text_bytes: u64 }
 
 pub enum StoreError {
     IdentityMismatch { store: EncoderIdentity, given: EncoderIdentity },
+    ReleaseMismatch { .. },   // names both releases and the store's format
     Missing { name: String, expected_at: PathBuf },
     Exists { .. }, InvalidName { .. }, InvalidIdentity { .. }, InvalidRows { .. },
     Memory(L2dError),
@@ -844,11 +854,15 @@ pub enum StoreError {
 }
 
 impl Store {
-    pub fn create(paths: &ProjectPaths, name: &str, identity: &EncoderIdentity) -> Result<Self, StoreError>;
+    pub fn create(paths: &ProjectPaths, name: &str, origin: VectorOrigin<'_>) -> Result<Self, StoreError>;
     pub fn open(paths: &ProjectPaths, name: &str) -> Result<Self, StoreError>;
-    pub fn add(&mut self, rows: &DataFrame, identity: &EncoderIdentity) -> Result<AddReport, StoreError>;   // fresh budget; callers holding a frame use add_with
-    pub fn add_with(&mut self, rows: &DataFrame, identity: &EncoderIdentity, budget: &mut MemoryBudget) -> Result<AddReport, StoreError>;
+    pub fn add(&mut self, rows: &DataFrame, origin: VectorOrigin<'_>) -> Result<AddReport, StoreError>;   // fresh budget; callers holding a frame use add_with
+    pub fn add_with(&mut self, rows: &DataFrame, origin: VectorOrigin<'_>, budget: &mut MemoryBudget) -> Result<AddReport, StoreError>;   // a fill of one add
+    pub fn begin_fill(&mut self, origin: VectorOrigin<'_>) -> Result<Fill<'_>, StoreError>;   // one transaction; rolled back on drop
     pub fn require_identity(&self, given: &EncoderIdentity) -> Result<(), StoreError>;
+    pub fn require_origin(&self, origin: VectorOrigin<'_>) -> Result<(), StoreError>;
+    pub fn runtime_release(&self) -> Option<&str>;
+    pub fn add_share_bytes(&self, longest_text_bytes: u64) -> u64;
     pub fn retained_bytes(&self) -> u64;
     pub fn len(&self) -> Result<u64, StoreError>;
 }
@@ -862,15 +876,18 @@ pub struct Explain { pub text_index: bool, pub scanned_phrases: Vec<String>, pub
 
 impl Store {
     // `queries` holds one or more query vectors one after the other; the hits frame has a `query` column.
-    pub fn nearest(&self, queries: &[f32], identity: &EncoderIdentity, k: usize, filter: &Filter) -> Result<Nearest, StoreError>;
-    pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<DataFrame, StoreError>;   // stored rows frame, insertion order
-    pub fn vectors(&self, filter: &Filter) -> Result<DataFrame, StoreError>;                      // for assessment and shift
+    pub fn nearest(&self, queries: &[f32], origin: VectorOrigin<'_>, k: usize, filter: &Filter) -> Result<Nearest, StoreError>;
+    pub fn text_search(&self, filter: &Filter, limit: usize) -> Result<DataFrame, StoreError>;   // stored rows frame, insertion order; its vectors are not checked against an origin
+    pub fn vectors(&self, filter: &Filter, origin: VectorOrigin<'_>) -> Result<DataFrame, StoreError>;   // for assessment, shift, head, outliers
     pub fn matching_with(&self, filter: &Filter, limit: usize, budget: &mut MemoryBudget) -> Result<Matching, StoreError>;   // counts without reading rows back
     pub fn explain(&self, filter: &Filter) -> Result<Explain, StoreError>;
     pub fn longest_text_bytes(&self) -> Result<u64, StoreError>;
 }
+
+// Encode logs into a store (task 2.7, crate l2d-decide, `fill.rs`). `LogEncoder` is the seam; `EncoderSession` is the tool's only encoder.
+pub fn encode_into_store<E: LogEncoder>(encoder: &mut E, store: &mut Store, logs: &LogsFrame, source: &str, budget: &mut MemoryBudget) -> Result<FillReport, FillError>;
 ```
-- Preconditions: `add` and `nearest` receive the identity of the encoder that produced the vectors; a difference from the store's identity returns `IdentityMismatch`. A query vector with a NaN or an infinity is `InvalidQuery`, as is an empty phrase.
+- Preconditions: `add`, `begin_fill`, `nearest` and `vectors` receive the origin of the vectors; a difference from the store's identity returns `IdentityMismatch`, from its release `ReleaseMismatch`. A query vector with a NaN or an infinity is `InvalidQuery`, as is an empty phrase.
 - Invariant: `id` is unique; adding an existing `id` adds its occurrences and leaves text, label and vector unchanged. An add is one transaction; a failed add leaves the file as it was.
 - The field lists above are a summary; the crate documentation is authoritative for exact fields.
 
@@ -1169,7 +1186,7 @@ As built by task 1.12 (the baseline side; the encoder side, the cost types above
 ### Domain Model
 - **Log**: a distinct text with occurrences, label, optional group, source.
 - **Encoder**: an immutable package identified by name, revision and dimension. Vectors are meaningful only together with their encoder identity.
-- **Store**: logs with vectors of exactly one encoder identity.
+- **Store**: logs with vectors of exactly one encoder identity and one AMD runtime release, three flags per log.
 - **Scorer**: produces a `Decision` per log. Baseline scorers are identified by name and revision.
 - **Run record**: what was run, on what, with which settings and result.
 
@@ -1212,7 +1229,7 @@ Store table `logs`:
 
 Indexes on `logs`: `label`, `source`, and `logs_text_bytes` over the byte length of `text` (added by task 1.9 so that the store knows its longest text; a store written before it gains the index on its next add).
 
-Both tables are STRICT with CHECK constraints for the ranges above. The file carries `user_version` 1 and an application id.
+Both tables are STRICT with CHECK constraints for the ranges above. The file carries `user_version` 2 (format 2, task 2.7: `meta.runtime_release`, `logs.text_longer_than_input`, `logs.empty`; format 1 is still read) and an application id.
 
 Store table `meta`: one row with encoder name, revision, dimension, creation time, tool version.
 

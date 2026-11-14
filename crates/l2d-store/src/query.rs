@@ -132,8 +132,8 @@ use l2d_core::{L2dError, Label, MemoryBudget, MemorySettings};
 use rusqlite::types::ToSql;
 
 use crate::{
-    GROUP, IDLE_BYTES, LABEL, MAX_TEXT_BYTES, OCCURRENCES, SOURCE, Store, StoreError, TEXT,
-    TRUNCATED, VECTOR, failed,
+    EMPTY, GROUP, IDLE_BYTES, LABEL, MAX_TEXT_BYTES, OCCURRENCES, SCHEMA_VERSION, SOURCE, Store,
+    StoreError, TEXT, TEXT_LONGER_THAN_INPUT, TRUNCATED, VECTOR, VectorOrigin, failed,
 };
 
 /// Column of the stored rows frame and of the hits frame: the identity of the log
@@ -264,10 +264,25 @@ pub const READ_FIXED_BYTES: u64 = 64 * 1024;
 /// source and group.
 pub const READ_ROW_BYTES: u64 = 256;
 
-/// The columns of a stored row as they are selected, in the order [`RowsBuilder::push`]
-/// reads them; `logs.vector` follows where the vector is read.
-pub(crate) const ROW_COLUMNS: &str = "logs.id, logs.text, logs.source, logs.occurrences, \
-                                      logs.label, logs.group_key, logs.truncated";
+/// How many columns [`row_columns`] selects.
+const ROW_COLUMN_COUNT: usize = 9;
+
+/// The columns of a stored row as they are selected from a file of the format `format`,
+/// in the order [`RowsBuilder::push`] reads them; `logs.vector` follows where the vector
+/// is read. A file of format 1 has no columns for the flags `text_longer_than_input`
+/// and `empty`: they are selected as absent values, which is what such a store knows
+/// of them.
+pub(crate) fn row_columns(format: u32) -> String {
+    let flags = if format >= SCHEMA_VERSION {
+        "logs.text_longer_than_input, logs.empty"
+    } else {
+        "NULL, NULL"
+    };
+    format!(
+        "logs.id, logs.text, logs.source, logs.occurrences, logs.label, logs.group_key, \
+         logs.truncated, {flags}"
+    )
+}
 
 /// Which logs a search or an export is about. Everything that is given must hold; the
 /// default names every log.
@@ -321,6 +336,10 @@ pub struct Matching {
 
 /// The column names and types of the stored rows frame, in order: `id`, then the
 /// columns of the rows frame ([`crate::rows_schema`]).
+///
+/// Unlike in the rows frame that is added, `text_longer_than_input` and `empty` can be
+/// absent here: a store of format 1 never recorded them, and an absent value means
+/// unknown, not false.
 pub fn stored_schema() -> Schema {
     let mut fields = vec![Field::new(ID.into(), DataType::String)];
     fields.extend(crate::rows_schema().iter_fields());
@@ -678,7 +697,7 @@ pub(crate) struct Share {
 }
 
 /// Builds the columns of stored rows from the rows of a statement that selects
-/// [`ROW_COLUMNS`], and the vector after them where it is wanted.
+/// [`row_columns`], and the vector after them where it is wanted.
 pub(crate) struct RowsBuilder {
     id: StringChunkedBuilder,
     text: StringChunkedBuilder,
@@ -687,6 +706,10 @@ pub(crate) struct RowsBuilder {
     label: StringChunkedBuilder,
     group: StringChunkedBuilder,
     truncated: Vec<bool>,
+    /// Absent for the rows of a store of format 1.
+    text_longer_than_input: Vec<Option<bool>>,
+    /// Absent for the rows of a store of format 1.
+    empty: Vec<Option<bool>>,
     vector: Option<ListPrimitiveChunkedBuilder<Float32Type>>,
     /// The vector of the row being read; reused from row to row.
     values: Vec<f32>,
@@ -704,6 +727,8 @@ impl RowsBuilder {
             label: StringChunkedBuilder::new(LABEL.into(), rows),
             group: StringChunkedBuilder::new(GROUP.into(), rows),
             truncated: Vec::with_capacity(rows),
+            text_longer_than_input: Vec::with_capacity(rows),
+            empty: Vec::with_capacity(rows),
             vector: with_vectors.then(|| {
                 ListPrimitiveChunkedBuilder::new(
                     VECTOR.into(),
@@ -717,7 +742,7 @@ impl RowsBuilder {
         }
     }
 
-    /// Appends the row `row` is at; its [`ROW_COLUMNS`] start at column `first`.
+    /// Appends the row `row` is at; its [`row_columns`] start at column `first`.
     pub(crate) fn push(&mut self, row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<()> {
         let text = |column: usize| -> rusqlite::Result<&str> {
             row.get_ref(first + column)?
@@ -734,8 +759,10 @@ impl RowsBuilder {
             None => self.group.append_null(),
         }
         self.truncated.push(row.get(first + 6)?);
+        self.text_longer_than_input.push(row.get(first + 7)?);
+        self.empty.push(row.get(first + 8)?);
         if let Some(vector) = &mut self.vector {
-            let blob = row.get_ref(first + 7)?.as_blob()?;
+            let blob = row.get_ref(first + ROW_COLUMN_COUNT)?.as_blob()?;
             self.values.clear();
             decode(blob, self.dimension, &mut self.values)?;
             vector.append_slice(&self.values);
@@ -753,6 +780,8 @@ impl RowsBuilder {
             self.label.finish().into_column(),
             self.group.finish().into_column(),
             Column::new(TRUNCATED.into(), self.truncated),
+            Column::new(TEXT_LONGER_THAN_INPUT.into(), self.text_longer_than_input),
+            Column::new(EMPTY.into(), self.empty),
         ];
         if let Some(vector) = &mut self.vector {
             columns.push(vector.finish().into_column());
@@ -941,7 +970,10 @@ impl Store {
         let mut builder = RowsBuilder::new(rows as usize, dimension, true);
         if rows > 0 {
             let fail = |error| self.failure(error);
-            let columns = format!("octet_length(logs.text), {ROW_COLUMNS}, logs.vector");
+            let columns = format!(
+                "octet_length(logs.text), {}, logs.vector",
+                row_columns(self.format())
+            );
             let mut statement = self
                 .connection
                 .prepare(&compiled.sql(&columns))
@@ -1020,6 +1052,11 @@ impl Store {
     ///
     /// Nothing in the store is changed. The budget holds afterwards what it held
     /// before.
+    ///
+    /// The rows carry their vectors, as every stored rows frame does, and no origin is
+    /// asked here: a search by phrase compares no vector. A caller that goes on to
+    /// compare the vectors of these rows with others calls [`Store::require_origin`]
+    /// first, or reads them with [`Store::vectors_with`], which does.
     pub fn text_search_with(
         &self,
         filter: &Filter,
@@ -1031,24 +1068,37 @@ impl Store {
 
     /// [`Store::vectors_with`] under a budget observed now with the default settings,
     /// in which nothing is held.
-    pub fn vectors(&self, filter: &Filter) -> Result<DataFrame, StoreError> {
+    pub fn vectors(
+        &self,
+        origin: VectorOrigin<'_>,
+        filter: &Filter,
+    ) -> Result<DataFrame, StoreError> {
         let mut budget =
             MemoryBudget::observe(&MemorySettings::default()).map_err(StoreError::Memory)?;
-        self.vectors_with(filter, &mut budget)
+        self.vectors_with(origin, filter, &mut budget)
     }
 
     /// Every log that `filter` names with its vector, in the order they were stored, as
     /// a stored rows frame: the export for the assessment of a vector set and for the
     /// shift test. The vectors come back bit for bit as they were added.
     ///
+    /// The vectors leave the store here to be compared outside it, so the caller says
+    /// which vectors it expects, as for a search by vector: `origin` is the encoder
+    /// identity and the runtime release of the vectors it will compare these with (or
+    /// [`VectorOrigin::without_release`]). Another identity than the store's is
+    /// [`StoreError::IdentityMismatch`], another release
+    /// [`StoreError::ReleaseMismatch`], both before anything is read.
+    ///
     /// The whole result is in memory at once, so it is counted first and refused with
     /// the estimate and the limit when it does not fit (requirement 12.5); otherwise
     /// as [`Store::text_search_with`] without a limit.
     pub fn vectors_with(
         &self,
+        origin: VectorOrigin<'_>,
         filter: &Filter,
         budget: &mut MemoryBudget,
     ) -> Result<DataFrame, StoreError> {
+        self.require_origin(origin)?;
         self.read_back(filter, usize::MAX, budget)
     }
 

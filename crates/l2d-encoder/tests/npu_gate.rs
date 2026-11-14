@@ -14,8 +14,13 @@
 //! `L2D_GATE_ALLOW_SKIP=1` does it instead print `SKIPPED` with the reason and pass
 //! (missing runtime files or device), or report the interpreter and go on (Python). With
 //! the runtime and the device present, every failure is a failure: the provider is
-//! registered with `error_on_failure`, zero nodes on the NPU fail the test, and so does an
-//! output that is the CPU provider's.
+//! registered with `error_on_failure`, zero nodes on the NPU fail the test, and so does a
+//! profile of the run in which no node was executed through the Vitis AI provider.
+//!
+//! No CPU provider is registered (owner, 2026-11-13: NPU only). The comparison with the
+//! same model on the CPU provider that this gate had was removed with task 2.7: the
+//! cosine of at least 0.99 between the two outputs, the check that they are not
+//! bit-identical, and the CPU provider's timing.
 //!
 //! This file holds what the proof needs and nothing of the encoder itself (the session is
 //! task 2.6). The runtime directory, the file check and the device query are the library's
@@ -637,53 +642,15 @@ fn the_spike_model_runs_on_the_npu_through_ort() {
     std::fs::remove_file(&profile_path)
         .unwrap_or_else(|error| panic!("removing {profile_path}: {error}"));
 
-    // --- The same model on the CPU provider of the same runtime, for comparison. ---
-    let mut cpu = Session::builder(&environment)
-        .unwrap_or_else(|error| panic!("creating the CPU session builder failed: {error}"))
-        .commit_from_file(&model)
-        .unwrap_or_else(|error| panic!("opening the model on the CPU provider failed: {error}"));
-    let on_cpu = infer(&mut cpu, &input_name, &shape, &data);
-    dump_output("cpu", &on_cpu);
-    let lowest = (0..BATCH)
-        .map(|row| {
-            cosine(
-                &first[row * width..(row + 1) * width],
-                &on_cpu[row * width..(row + 1) * width],
-            )
-        })
-        .fold(f64::INFINITY, f64::min);
-    for _ in 0..WARM_UP_BATCHES {
-        infer(&mut cpu, &input_name, &shape, &data);
-    }
-    let timed = Instant::now();
-    for _ in 0..TIMED_BATCHES {
-        infer(&mut cpu, &input_name, &shape, &data);
-    }
-    let cpu_elapsed = timed.elapsed().as_secs_f64();
-    println!(
-        "npu_gate: CPU provider, same model: lowest cosine against the NPU output over the \
-         {BATCH} rows {lowest:.4}; {:.2} ms per batch, {:.0} logs/s",
-        cpu_elapsed * 1e3 / TIMED_BATCHES as f64,
-        (TIMED_BATCHES * BATCH) as f64 / cpu_elapsed
-    );
+    // No session is opened on the CPU provider, here or anywhere in the workspace (owner,
+    // 2026-11-13: the encoder is NPU only). Until task 2.7 this test ran the same model on
+    // the CPU provider and compared the two outputs; that comparison is gone, and what
+    // says where the model ran is the provider's report and ONNX Runtime's profile.
 
     // --- The gate. ---
     assert!(
         placement.npu_nodes > 0,
         "GATE FAILED: the provider placed 0 nodes on the NPU ({placement:?})"
-    );
-    // Requirement 4.6: the NPU and the CPU agree to a cosine of at least 0.99 per vector.
-    assert!(
-        lowest >= 0.99,
-        "the NPU output is too far from the CPU output of the same model (lowest cosine \
-         {lowest}, required 0.99)"
-    );
-    // And they are not the same numbers: the NPU computes in its own 8-bit arithmetic, so
-    // a bit-identical output would mean the "NPU" session was served by the CPU provider.
-    assert!(
-        first != on_cpu,
-        "the NPU session's output is bit-identical to the CPU provider's: the model did \
-         not run on the NPU"
     );
     let on_vitis = executed.get(VITIS_PROVIDER).copied().unwrap_or(0);
     assert!(

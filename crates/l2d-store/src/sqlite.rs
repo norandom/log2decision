@@ -1,7 +1,7 @@
 //! The database file of a store: its schema, how it is created and how it is checked
 //! when it is opened.
 //!
-//! # Schema (format 1)
+//! # Schema (format 2)
 //!
 //! `meta`, exactly one row:
 //!
@@ -11,6 +11,7 @@
 //! | `encoder_name`, `encoder_revision`, `encoder_dimension` | TEXT, TEXT, INTEGER | the one encoder identity of the store |
 //! | `created_at` | TEXT | UTC, `YYYY-MM-DDTHH:MM:SSZ` |
 //! | `tool_version` | TEXT | the version of the tool that created the store |
+//! | `runtime_release` | TEXT, nullable | the release of the AMD runtime the vectors were made under; null for vectors that were not made by it through this tool |
 //!
 //! `logs`, one row per stored log:
 //!
@@ -23,7 +24,9 @@
 //! | `occurrences` | INTEGER | 1 to 4,294,967,295 |
 //! | `label` | TEXT, indexed | `good`, `bad` or `unknown` |
 //! | `group_key` | TEXT, nullable | the group key |
-//! | `truncated` | INTEGER | 0 or 1 |
+//! | `truncated` | INTEGER | 0 or 1: the part of the text the encoder reads was cut |
+//! | `text_longer_than_input` | INTEGER | 0 or 1: the whole text is longer than the encoder's input |
+//! | `empty` | INTEGER | 0 or 1: no byte other than padding reached the model |
 //! | `vector` | BLOB | `dimension` 32-bit floats, little-endian: `4 * dimension` bytes |
 //! | `encoder_revision` | TEXT | the revision of the store's encoder |
 //!
@@ -45,6 +48,26 @@
 //!
 //! The file carries the application id [`APPLICATION_ID`] and its format number
 //! ([`SCHEMA_VERSION`]) in `PRAGMA user_version`.
+//!
+//! # Format 1
+//!
+//! Format 2 (task 2.7) added the column `runtime_release` to `meta` and the columns
+//! `text_longer_than_input` and `empty` to `logs`, and nothing else. A file that says it
+//! is of format 2 and lacks one of the three is not opened (the two flag columns were
+//! added to the format before any store of real vectors was written in it, so there is
+//! no third format for them).
+//!
+//! A file of format 1 ([`OLDEST_SCHEMA_VERSION`]), written before the release was
+//! recorded, is still opened and stays usable as it was built (owner decision of
+//! 2026-11-14): nothing is written to it when it is opened, it is searched by phrase,
+//! and it takes and compares vectors without a release as before. It refuses vectors
+//! made under any release, saying that it is of format 1, because nothing says under
+//! which release, if any, its own were made. It is not migrated: it keeps its format
+//! number and its columns. Its logs have the flag `truncated` only: the two other flags
+//! are read back as absent values, which means unknown and not false, and those two
+//! flags of rows added to it are not kept. A version of the tool that knows format 1
+//! only does not open a file of format 2, so it cannot add vectors to one without the
+//! check of the release.
 
 use std::path::Path;
 use std::time::Duration;
@@ -52,8 +75,15 @@ use std::time::Duration;
 use l2d_core::EncoderIdentity;
 use rusqlite::{Connection, OpenFlags};
 
-/// The format of the database file. A file of another format is not opened.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The format of the database file a store is created with.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// The oldest format that is still opened (see the module description, "Format 1").
+/// A file of a format outside these two is not opened.
+pub const OLDEST_SCHEMA_VERSION: u32 = 1;
+
+/// The longest runtime release a store records, in bytes.
+pub const MAX_RELEASE_BYTES: usize = 64;
 
 /// Marks a database file as a store of this tool (`PRAGMA application_id`): "L2DS".
 pub const APPLICATION_ID: i32 = 0x4C32_4453;
@@ -78,7 +108,12 @@ pub(crate) struct Meta {
     pub identity: EncoderIdentity,
     pub created_at: String,
     pub tool_version: String,
+    /// The release of the AMD runtime the vectors were made under, if one is recorded.
+    pub runtime_release: Option<String>,
 }
+
+/// The columns of `logs` that format 2 added, in the order they are written and read.
+pub(crate) const FLAG_COLUMNS: [&str; 2] = ["text_longer_than_input", "empty"];
 
 /// The statements that make an empty database a store for vectors of `dimension`.
 fn schema_sql(dimension: u16) -> String {
@@ -90,7 +125,9 @@ fn schema_sql(dimension: u16) -> String {
             encoder_revision TEXT NOT NULL,
             encoder_dimension INTEGER NOT NULL CHECK (encoder_dimension BETWEEN 1 AND 65535),
             created_at TEXT NOT NULL,
-            tool_version TEXT NOT NULL
+            tool_version TEXT NOT NULL,
+            runtime_release TEXT CHECK (runtime_release IS NULL OR
+                length(runtime_release) BETWEEN 1 AND {MAX_RELEASE_BYTES})
         ) STRICT;
         CREATE TABLE logs (
             seq INTEGER PRIMARY KEY,
@@ -101,6 +138,9 @@ fn schema_sql(dimension: u16) -> String {
             label TEXT NOT NULL CHECK (label IN ('good', 'bad', 'unknown')),
             group_key TEXT,
             truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            text_longer_than_input INTEGER NOT NULL
+                CHECK (text_longer_than_input IN (0, 1)),
+            empty INTEGER NOT NULL CHECK (empty IN (0, 1)),
             vector BLOB NOT NULL CHECK (length(vector) = {vector_bytes}),
             encoder_revision TEXT NOT NULL
         ) STRICT;
@@ -136,37 +176,40 @@ fn connect(path: &Path) -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
-/// Makes the empty file `path` a store for `identity`, in one transaction: after a
-/// failure or an interruption the file holds no part of a store.
+/// Makes the empty file `path` a store for `identity` and `runtime_release`, in one
+/// transaction: after a failure or an interruption the file holds no part of a store.
 pub(crate) fn create(
     path: &Path,
     identity: &EncoderIdentity,
+    runtime_release: Option<&str>,
     tool_version: &str,
-) -> Result<(Connection, Meta), String> {
-    let run = || -> rusqlite::Result<(Connection, Meta)> {
+) -> Result<(Connection, Meta, u32), String> {
+    let run = || -> rusqlite::Result<(Connection, Meta, u32)> {
         let mut connection = connect(path)?;
         let transaction = connection.transaction()?;
         transaction.execute_batch(&schema_sql(identity.dimension))?;
         transaction.execute(
             "INSERT INTO meta (id, encoder_name, encoder_revision, encoder_dimension, \
-             created_at, tool_version) \
-             VALUES (1, ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?4)",
+             created_at, tool_version, runtime_release) \
+             VALUES (1, ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?4, ?5)",
             rusqlite::params![
                 identity.name,
                 identity.revision,
                 identity.dimension,
-                tool_version
+                tool_version,
+                runtime_release
             ],
         )?;
         transaction.commit()?;
         let meta = read_meta(&connection)?;
-        Ok((connection, meta))
+        Ok((connection, meta, SCHEMA_VERSION))
     };
     run().map_err(|error| error.to_string())
 }
 
-/// Opens the store file `path` after checking that it is one, of this format.
-pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
+/// Opens the store file `path` after checking that it is one, of a format this version
+/// reads and writes; the format is returned beside what `meta` says.
+pub(crate) fn open(path: &Path) -> Result<(Connection, Meta, u32), String> {
     let connection = connect(path).map_err(|error| error.to_string())?;
     let pragma = |name: &str| -> Result<i64, String> {
         connection
@@ -181,10 +224,10 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
         ));
     }
     let version = pragma("user_version")?;
-    if version != i64::from(SCHEMA_VERSION) {
+    if version < i64::from(OLDEST_SCHEMA_VERSION) || version > i64::from(SCHEMA_VERSION) {
         return Err(format!(
             "it has the store format {version}; this version of the tool reads and writes \
-             the format {SCHEMA_VERSION} only"
+             the formats {OLDEST_SCHEMA_VERSION} to {SCHEMA_VERSION} only"
         ));
     }
     let tables: i64 = connection
@@ -200,14 +243,47 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
             "{tables} of the tables meta, logs and logs_fts are there, not all three"
         ));
     }
+    // The columns format 2 added are there in format 2 and in no older format.
+    let newer = version == i64::from(SCHEMA_VERSION);
+    let added = [("meta", "runtime_release")]
+        .into_iter()
+        .chain(FLAG_COLUMNS.map(|column| ("logs", column)));
+    for (table, column) in added {
+        let has = has_column(&connection, table, column).map_err(|error| error.to_string())?;
+        if has != newer {
+            return Err(format!(
+                "it has the store format {version}, but its {table} table has {} column \
+                 {column}; that column is what format {SCHEMA_VERSION} added",
+                if has { "the" } else { "no" }
+            ));
+        }
+    }
     let meta = read_meta(&connection).map_err(|error| format!("reading meta: {error}"))?;
-    Ok((connection, meta))
+    // The range was checked above.
+    Ok((connection, meta, version as u32))
 }
 
-pub(crate) fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
+/// Whether `table` has the column `column`.
+fn has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     connection.query_row(
-        "SELECT encoder_name, encoder_revision, encoder_dimension, created_at, tool_version \
-         FROM meta WHERE id = 1",
+        "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |row| row.get::<_, i64>(0).map(|columns| columns > 0),
+    )
+}
+
+/// What the file says about the store now. A file of format 1 has no release.
+pub(crate) fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
+    let release = if has_column(connection, "meta", "runtime_release")? {
+        "runtime_release"
+    } else {
+        "NULL"
+    };
+    connection.query_row(
+        &format!(
+            "SELECT encoder_name, encoder_revision, encoder_dimension, created_at, \
+             tool_version, {release} FROM meta WHERE id = 1"
+        ),
         [],
         |row| {
             Ok(Meta {
@@ -218,6 +294,7 @@ pub(crate) fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
                 },
                 created_at: row.get(3)?,
                 tool_version: row.get(4)?,
+                runtime_release: row.get(5)?,
             })
         },
     )

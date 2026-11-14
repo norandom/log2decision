@@ -53,13 +53,13 @@ use std::collections::BinaryHeap;
 use faer::linalg::matmul::dot::inner_prod;
 use faer::{Conj, col::ColRef, row::RowRef};
 use l2d_core::polars::prelude::{Column, DataFrame};
-use l2d_core::{BatchPlan, EncoderIdentity, MemoryBudget, MemorySettings};
+use l2d_core::{BatchPlan, MemoryBudget, MemorySettings};
 
 use crate::query::{
-    Compiled, DISTANCE, QUERY, READ_FIXED_BYTES, ROW_COLUMNS, RowsBuilder, TEXT_READ_FACTOR,
-    decode, row_bytes,
+    Compiled, DISTANCE, QUERY, READ_FIXED_BYTES, RowsBuilder, TEXT_READ_FACTOR, decode, row_bytes,
+    row_columns,
 };
-use crate::{Filter, Store, StoreError, failed};
+use crate::{Filter, Store, StoreError, VectorOrigin, failed};
 
 /// What the budget is asked for per stored vector of a batch, beside the vector
 /// itself: its place in the insertion order (8 bytes), doubled.
@@ -168,13 +168,13 @@ impl Store {
     pub fn nearest(
         &self,
         queries: &[f32],
-        identity: &EncoderIdentity,
+        origin: VectorOrigin<'_>,
         k: usize,
         filter: &Filter,
     ) -> Result<Nearest, StoreError> {
         let mut budget =
             MemoryBudget::observe(&MemorySettings::default()).map_err(StoreError::Memory)?;
-        self.nearest_with(queries, identity, k, filter, &mut budget)
+        self.nearest_with(queries, origin, k, filter, &mut budget)
     }
 
     /// For each query vector, the `k` stored logs nearest to it by squared L2 distance
@@ -182,10 +182,14 @@ impl Store {
     /// distance, the order among equal distances, and the memory).
     ///
     /// `queries` holds the query vectors one after the other, each of the store's
-    /// dimension, produced by the encoder `identity`.
+    /// dimension, of `origin`: the encoder that produced them and, if they were made by
+    /// the AMD runtime, its release ([`VectorOrigin::made_under`]; otherwise
+    /// [`VectorOrigin::without_release`]).
     ///
     /// - Another identity than the store's is [`StoreError::IdentityMismatch`], naming
     ///   both (requirement 5.6); it is checked before anything else.
+    /// - Another runtime release than the store's is [`StoreError::ReleaseMismatch`],
+    ///   naming both: vectors of different releases are not compared.
     /// - `queries` that is not whole vectors, or holds a value that is not finite, and
     ///   a filter that cannot be searched for, are [`StoreError::InvalidQuery`].
     /// - Fewer logs than `k` pass the filter: all of them are returned.
@@ -203,12 +207,12 @@ impl Store {
     pub fn nearest_with(
         &self,
         queries: &[f32],
-        identity: &EncoderIdentity,
+        origin: VectorOrigin<'_>,
         k: usize,
         filter: &Filter,
         budget: &mut MemoryBudget,
     ) -> Result<Nearest, StoreError> {
-        self.require_identity(identity)?;
+        self.require_origin(origin)?;
         let dimension = usize::from(self.identity().dimension);
         if !queries.len().is_multiple_of(dimension) {
             return Err(StoreError::InvalidQuery {
@@ -399,7 +403,10 @@ impl Store {
         let mut distances: Vec<f32> = Vec::with_capacity(total);
         let mut fetch = self
             .connection
-            .prepare(&format!("SELECT {ROW_COLUMNS} FROM logs WHERE seq = ?1"))
+            .prepare(&format!(
+                "SELECT {} FROM logs WHERE seq = ?1",
+                row_columns(self.format())
+            ))
             .map_err(fail)?;
         for (query, hits) in best.iter().enumerate() {
             for near in hits {
