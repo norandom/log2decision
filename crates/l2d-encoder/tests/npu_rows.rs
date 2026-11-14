@@ -186,7 +186,10 @@ fn every_row_is_right_when_the_texts_are_rows_of_an_image() {
     println!(
         "{TAG}: image of {ROWS} rows: ready after {:.2} s, {} of {} nodes on the NPU, on the \
          CPU: {:?}",
-        encoder.ready_seconds, placement.npu_nodes, placement.all_nodes, placement.cpu_operators
+        encoder.ready_seconds,
+        placement.npu_nodes,
+        placement.all_nodes,
+        placement.cpu_operators()
     );
     // `error_on_failure` does not stop a session whose graph the provider could not
     // compile: it then runs every node on the CPU. The placement is the check.
@@ -197,7 +200,7 @@ fn every_row_is_right_when_the_texts_are_rows_of_an_image() {
          on the NPU"
     );
     assert_eq!(
-        placement.cpu_operators,
+        placement.cpu_operators(),
         ["QuantizeLinear", "DequantizeLinear"]
     );
 

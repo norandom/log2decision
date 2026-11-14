@@ -11,8 +11,8 @@
 //! Without one, the first other PCI device of AMD in the class is taken and marked
 //! [`NpuMatch::AmdVendorOnly`]: the list holds the one id seen so far (the reference
 //! host), other processor generations have other ids, and whether such a device runs the
-//! encoder is decided by the provider, which is registered so that it fails with an
-//! error. Requiring a listed id would turn every host the list does not know into "no
+//! encoder is decided by the session (task 2.6): it reads the provider's placement report
+//! and refuses a model that would not run on the NPU. Requiring a listed id would turn every host the list does not know into "no
 //! NPU". [`NpuStatus::log_lines`] names every device seen, the one taken and why, so a
 //! wrong pick is visible in the output.
 

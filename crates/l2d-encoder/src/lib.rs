@@ -1,6 +1,6 @@
-//! Encoder package format, identity, and execution on NPU or CPU.
+//! Encoder package format, identity, and execution on the NPU.
 //!
-//! So far (task 2.3) the two things that are settled before the runtime is loaded:
+//! (Task 2.3) the two things that are settled before the runtime is loaded:
 //! - [`runtime`]: the AMD runtime files, checked against a manifest ([`RuntimeFiles`]);
 //! - [`npu`]: presence of the AMD NPU and its driver version ([`NpuStatus`]).
 //!
@@ -21,6 +21,12 @@
 //! - [`onnx_edit`]: the same model file for another batch size, with its quantized bytes
 //!   as input or output, or cut at an inner tensor.
 
+//!
+//! And (task 2.6) the execution itself:
+//! - [`session`]: the package's model open on the NPU, texts in and unit vectors out
+//!   ([`EncoderSession`]). NPU only: a session that would run elsewhere is not opened,
+//!   and the error says why ([`EncoderError`]).
+
 pub mod codec;
 pub mod encode;
 pub mod npu;
@@ -28,6 +34,12 @@ pub mod onnx;
 pub mod onnx_edit;
 pub mod package;
 pub mod runtime;
+pub mod session;
+
+pub use session::{
+    EncodeStats, Encoded, EncoderError, EncoderSession, ImageEncoder, ImageModel, PlacementReport,
+    SessionInfo,
+};
 
 pub use codec::{ByteCodec, ByteTable, InputArch, InputBatch, InputMode, TextInput};
 pub use npu::{ComputeAccelerator, NpuMatch, NpuStatus};

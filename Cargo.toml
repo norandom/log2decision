@@ -191,8 +191,8 @@ rusqlite = { version = "0.32", default-features = false, features = ["bundled"] 
 # platforms" by their own description: a distance can differ in its last bits between
 # CPUs of different SIMD widths, never between runs on one host.
 faer = { version = "0.24", default-features = false, features = ["std"] }
-# ONNX Runtime binding (requirement 4, hardware gate of task 2.2). So far a
-# dev-dependency of `l2d-encoder` only: the gate test `tests/npu_gate.rs` is its one user.
+# ONNX Runtime binding (requirement 4, hardware gate of task 2.2). A dependency of
+# `l2d-encoder` only: its session (`src/session.rs`, task 2.6) and its hardware tests.
 #
 # - The version is pinned: 2.0.0-rc.15 is a release candidate (there is no stable 2.x),
 #   and it wraps ONNX Runtime 1.31. AMD's Ryzen AI 1.9 ships ONNX Runtime 1.30.0, so the
