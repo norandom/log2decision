@@ -9,24 +9,28 @@
 //!
 //! `--work-dir DIR`, or `<project>/work/baseline-score-<UTC time>/` when it is not
 //! given. The directory must be empty or absent; the run creates it and writes nothing
-//! outside it. Before anything is read the free space of its volume is compared with
-//! an estimate of what the run needs, and the run is refused when it is less:
+//! outside it. The free space of its volume is compared with an estimate of what the
+//! run needs, and the run is refused when it is less:
 //!
-//! - for the parts, the bytes the selected entries take in the archive (text
-//!   compressed by zstd in place of deflate), plus 16 bytes per 64 bytes of unpacked
-//!   text for the numbers of a row;
-//! - for deduplication on disk, what [`super::archive_run`] states: the unpacked bytes
-//!   of the selected entries, and the 32 bytes of a row on disk for as many rows as
-//!   records of 6 bytes would make of them.
+//! - before anything is read, for the parts: the bytes the selected entries take in the
+//!   archive (text compressed by zstd in place of deflate), plus 16 bytes per 64 bytes
+//!   of unpacked text for the numbers of a row;
+//! - when the set of distinct texts is frozen and the read goes on on disk (task 1.20,
+//!   remediation), for deduplication on disk, what [`super::archive_run`] states (the
+//!   unpacked bytes of the selected entries, and the 32 bytes of a row on disk for as
+//!   many rows as records of 6 bytes would make of them), with the estimate of the
+//!   parts again beside it. A run that stays in memory takes this check not at all.
 //!
-//! The directory, the check and the deduplication on disk are shared with `l2d ingest`
-//! ([`super::archive_run`]). A run that is refused before it wrote a part removes the
-//! directory again when it made it.
+//! The directory, the checks and the deduplication on disk are shared with `l2d
+//! ingest` ([`super::archive_run`]). A run that is refused before it wrote a part
+//! removes the directory again when it made it. The `disk_free_bytes` and
+//! `disk_estimated_bytes` of the output are those of the last check taken.
 //!
 //! # A failure after the first row
 //!
 //! A run can be refused long after its first row (a partition of deduplication on disk
-//! whose keys do not fit). With `--json` the document that was begun is then ended as
+//! whose keys do not fit, too little free disk at the freeze). With `--json` the
+//! document that was begun is then ended as
 //! a whole document with `"incomplete":true`, and the error envelope follows on the
 //! next line. The parts written until then stay, without a manifest.
 //!
@@ -219,7 +223,7 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         input,
         "baseline-score-<UTC time>",
         args.work_dir.as_deref(),
-        Some(parts_estimate),
+        parts_estimate,
     )?;
 
     let limit = args.limit.unwrap_or(DEFAULT_TEXT_LIMIT);
@@ -398,7 +402,7 @@ fn write_scores<W: Write>(
             detail: "the archive was read without a batch plan".into(),
         })?;
     let dedup = run.input.disk_dedup();
-    let (disk_free, disk_estimated) = (run.disk_free, run.disk_estimated);
+    let (disk_free, disk_estimated) = run.disk_check();
     // The directory holds the parts from here on, so it stays when `dir` is let go.
     let (summary, dir) = run.finish();
     let work = dir.work();

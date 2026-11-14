@@ -16,23 +16,37 @@
 //! refused before it wrote a result leaves nothing either. A directory that was there
 //! before the run stays.
 //!
-//! # The free-disk check
+//! # When the disk is used (task 1.20, remediation)
 //!
-//! Before anything is read, the free space of the directory's volume is compared with
-//! an estimate of what the run needs, and the run is refused when it is less. For
-//! deduplication on disk the estimate is the unpacked bytes of the selected entries
+//! `ingest` uses the disk only when it needs it ([`spill_when_needed`]): while the set
+//! of distinct texts fits the memory limit nothing is made, no disk is looked at and
+//! nothing more is held, as before task 1.20. A `--work-dir` the analyst gives is
+//! checked before the read (below a file, not empty) and made only then. When the set
+//! is frozen, the directory is made, the free disk is checked, and the read goes on on
+//! disk; a refusal there comes during the read, with what was read until then.
+//!
+//! `baseline score` writes parts from its first batch, so its directory is made and the
+//! disk is checked for the parts before the read ([`ArchiveRun::prepare`]); the key of
+//! every row is written to `dedup/` from the start, because the occurrence counts of
+//! the parts are read out by them. The disk for deduplication on disk is checked at the
+//! freeze, as for `ingest`, together with the whole estimate of the parts again: a run
+//! that stays in memory is not refused for the disk deduplication on disk would need.
+//!
+//! # The free-disk estimate
+//!
+//! For deduplication on disk the estimate is the unpacked bytes of the selected entries
 //! (a text that does not fit the set in memory is written once per batch it occurs
 //! in) and the 32 bytes a row on disk takes beside its text, for as many rows as
 //! records of 6 bytes would make of those bytes. It is an estimate, not a bound: the
 //! rows are not known before the read, and a gzip entry declares its compressed size
-//! only.
+//! only. At the freeze it is the same figure, for all the selected entries.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use l2d_core::parts::WorkDir;
-use l2d_core::{ArchiveSummary, DiskDedup, L2dError, ZipInput};
+use l2d_core::{ArchiveSummary, DiskDedup, FreezeDiskCheck, L2dError, ZipInput};
 use serde::Serialize;
 
 use super::common::Context;
@@ -99,29 +113,51 @@ impl Drop for RunDir {
     }
 }
 
+/// Has `input` use the disk only when its set of distinct texts outgrows the memory
+/// limit (module documentation), for a command that keeps nothing in the directory and
+/// wants no occurrence counts (`ingest`). Nothing is made here.
+///
+/// `name` is the name of the directory below the project's work directory when the
+/// analyst gave none; `<UTC time>` in it becomes the time of the run.
+///
+/// [`L2dError::InvalidInput`] when the directory the analyst gave would be below a
+/// file, [`L2dError::Refused`] when it holds something.
+pub(crate) fn spill_when_needed(
+    context: &Context,
+    input: &mut ZipInput,
+    name: &str,
+    given: Option<&Path>,
+) -> Result<(), L2dError> {
+    if let Some(given) = given {
+        WorkDir::check(given)?;
+    }
+    input.spill_when_needed(&run_directory(context, name, given)?, None);
+    input.check_disk_at_freeze(FreezeDiskCheck::default());
+    Ok(())
+}
+
 /// An archive that is read with deduplication on disk in the work directory of its
-/// run.
+/// run, for a command that writes result parts there (`baseline score`).
 pub(crate) struct ArchiveRun {
     /// The archive. It is let go before the directory, so that its files are gone
     /// when the directory is removed.
     pub(crate) input: ZipInput,
     dir: RunDir,
     /// The free space of the directory's volume before the run.
-    pub(crate) disk_free: u64,
-    /// What the run was estimated to need there.
-    pub(crate) disk_estimated: u64,
+    disk_free: u64,
+    /// What the parts were estimated to need there.
+    disk_estimated: u64,
 }
 
 impl ArchiveRun {
     /// Makes the work directory of the run, checks the free space of its volume
-    /// against what the run is estimated to need, and names the directory for
-    /// deduplication on disk to the archive. Nothing of the archive's entries is read.
+    /// against what the result parts are estimated to need (`parts`), and names the
+    /// directory for deduplication on disk to the archive. The disk for deduplication
+    /// on disk is checked when the set is frozen, with `parts` again beside it. Nothing
+    /// of the archive's entries is read.
     ///
     /// `name` is the name of the directory below the project's work directory when
     /// the analyst gave none; `<UTC time>` in it becomes the time of the run.
-    ///
-    /// `parts` is what the result parts of the run are estimated to need, for a
-    /// command that writes them.
     ///
     /// [`L2dError::InvalidInput`] when the directory would be below a file,
     /// [`L2dError::Refused`] when it holds something or the free space is less than
@@ -131,33 +167,35 @@ impl ArchiveRun {
         mut input: ZipInput,
         name: &str,
         given: Option<&Path>,
-        parts: Option<u64>,
+        parts: u64,
     ) -> Result<Self, L2dError> {
         let dir = RunDir(WorkDir::create(&run_directory(context, name, given)?)?);
-        let mut estimate = Vec::with_capacity(2);
-        if let Some(parts) = parts {
-            estimate.push(("the result parts", parts));
-        }
-        estimate.push((
-            "deduplication on disk",
-            input.selected_bytes().dedup_disk_bytes(),
-        ));
-        let disk_estimated = estimate
-            .iter()
-            .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
-        let disk_free = dir.work().require_free(&estimate)?;
+        let disk_free = dir.work().require_free(&[("the result parts", parts)])?;
         input.spill_into(&dir.work().path().join("dedup"), None)?;
+        input.check_disk_at_freeze(FreezeDiskCheck {
+            beside: vec![("the result parts".to_string(), parts)],
+            free_bytes: None,
+        });
         Ok(Self {
             input,
             dir,
             disk_free,
-            disk_estimated,
+            disk_estimated: parts,
         })
     }
 
     /// The work directory.
     pub(crate) fn work(&self) -> &WorkDir {
         self.dir.work()
+    }
+
+    /// The free disk space and the estimate of the last check: at the freeze when the
+    /// read went on on disk, before the read otherwise.
+    pub(crate) fn disk_check(&self) -> (u64, u64) {
+        match self.input.freeze_disk() {
+            Some(disk) => (disk.free_bytes, disk.estimated_bytes),
+            None => (self.disk_free, self.disk_estimated),
+        }
     }
 
     /// Ends the read: the summary of the archive, and the work directory, from which
@@ -201,10 +239,6 @@ impl DedupReport {
                 spilled_distinct: 0,
             },
         }
-    }
-
-    pub(crate) fn on_disk(&self) -> bool {
-        self.on_disk
     }
 
     /// The lines of the text output: where the texts were deduplicated, and the disk

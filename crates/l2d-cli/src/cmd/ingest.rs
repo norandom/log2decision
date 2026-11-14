@@ -14,13 +14,17 @@
 //! When the distinct texts of an archive outgrow the memory limit, they are
 //! deduplicated on disk, as `l2d baseline score` does it and with the same code
 //! ([`super::archive_run`]; task 1.20): the counts are those of a read in memory.
-//! The temporary files are in `--work-dir DIR`, or in
-//! `<project>/work/ingest-<UTC time>-<process id>/` when it is not given; the directory
-//! must be empty or absent. The free space of its volume is checked against an estimate
-//! before anything is read. When the command ends, however it ends, its files are
-//! gone, and so is every directory it made; a directory that was there before stays,
-//! empty as it was. The output says whether the disk was used (`work` in JSON, a line
-//! of the text output when it was).
+//! The disk is used only then (remediation of task 1.20): while the set fits, the
+//! command makes no directory, looks at no disk, holds nothing more and prints what
+//! it printed before task 1.20. When the set is frozen, the temporary files go to
+//! `--work-dir DIR`, or to `<project>/work/ingest-<UTC time>-<process id>/` when it is
+//! not given, which is made then; the free space of its volume is checked then against
+//! an estimate, and a refusal there ends the command during the read (exit code 4, the
+//! records read until then in the message, no report). A directory given with
+//! `--work-dir` must be empty or absent, which is checked before the read. When the
+//! command ends, however it ends, its files are gone, and so is every directory it
+//! made; a directory that was there before stays, empty as it was. The output says
+//! when the disk was used (`work` in JSON, two lines of the text output).
 //!
 //! The text output counts the entries that match no pattern and the directories and
 //! lists the others; the JSON output lists every entry. In JSON a skipped record
@@ -42,7 +46,7 @@ use clap::Args;
 use l2d_core::{ArchiveSummary, EntryReport, EntrySkip, L2dError, ZipInput};
 use serde::{Serialize, Serializer};
 
-use super::archive_run::{ArchiveRun, DedupReport};
+use super::archive_run::{DedupReport, spill_when_needed};
 use super::common::{
     ArchiveArgs, Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, LabelCounts, MemoryReport,
     Operation, TEXT_CHARS, archive_input, read_input,
@@ -126,15 +130,15 @@ fn text(
 
 // --- Zip archives --------------------------------------------------------------------------
 
-/// Where the temporary files of the read were, and whether the texts were
-/// deduplicated on disk: the `work` object of the JSON output. The directory is gone
-/// again when the command made it.
+/// Where the temporary files of a read that went on on disk were: the `work` object of
+/// the JSON output, which a read in memory does not have. The directory is gone again
+/// when the command made it.
 #[derive(Debug, Serialize)]
 struct WorkReport {
     directory: String,
     deduplication: DedupReport,
-    /// Free disk space of the directory's volume before the read, and what the read
-    /// was estimated to need.
+    /// Free disk space of the directory's volume when the set was frozen, and what
+    /// the read was estimated to need there.
     disk_free_bytes: u64,
     disk_estimated_bytes: u64,
 }
@@ -142,35 +146,33 @@ struct WorkReport {
 /// Reads the archive at `archive` to its end and prints its report.
 fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(), L2dError> {
     let mut budget = context.budget()?;
-    let input = ZipInput::open(archive, &args.archive.settings(), &budget)?;
+    let mut input = ZipInput::open(archive, &args.archive.settings(), &budget)?;
     // Nothing is kept in the directory, so its name need not be told from the time
     // alone: with the process id two runs in one second do not meet.
     let name = format!("ingest-<UTC time>-{}", std::process::id());
-    let mut run = ArchiveRun::prepare(context, input, &name, args.work_dir.as_deref(), None)?;
-    for batch in run.input.batches(&mut budget) {
+    spill_when_needed(context, &mut input, &name, args.work_dir.as_deref())?;
+    for batch in input.batches(&mut budget) {
         // Only the summary is wanted: the rows of a batch are let go at once.
         batch?;
     }
-    let plan = run
-        .input
+    let plan = input
         .batch_plan()
         .cloned()
         .ok_or_else(|| L2dError::Runtime {
             detail: "the archive was read without a batch plan".into(),
         })?;
-    let dedup = run.input.disk_dedup();
-    let directory = run.work().path().to_string_lossy().into_owned();
-    let (disk_free_bytes, disk_estimated_bytes) = (run.disk_free, run.disk_estimated);
-    let (summary, dir) = run.finish();
-    // Nothing is kept: what the run made of its directory goes now.
-    drop(dir);
-    let report = ArchiveReport::of(&summary);
-    let work = WorkReport {
-        directory,
-        deduplication: DedupReport::of(dedup, summary.input.distinct_texts),
-        disk_free_bytes,
-        disk_estimated_bytes,
+    let work = match (input.disk_dedup(), input.freeze_disk()) {
+        (Some(dedup), Some(disk)) => Some(WorkReport {
+            directory: disk.directory.to_string_lossy().into_owned(),
+            deduplication: DedupReport::of(Some(dedup), 0),
+            disk_free_bytes: disk.free_bytes,
+            disk_estimated_bytes: disk.estimated_bytes,
+        }),
+        _ => None,
     };
+    // Nothing is kept: the files and what the run made of its directory go now.
+    let summary = input.finish();
+    let report = ArchiveReport::of(&summary);
     let memory = context.memory_report(
         &budget,
         vec![Operation::batches("read", summary.input.records, plan)],
@@ -178,12 +180,12 @@ fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(
 
     let out = io::stdout().lock();
     let written = if context.json {
-        archive_json(out, &report, &work, &memory)
+        archive_json(out, &report, work.as_ref(), &memory)
     } else {
         archive_text(
             out,
             &report,
-            &work,
+            work.as_ref(),
             &memory,
             args.limit.unwrap_or(DEFAULT_TEXT_LIMIT),
         )
@@ -195,13 +197,16 @@ fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(
 fn archive_json(
     out: impl Write,
     input: &ArchiveReport<'_>,
-    work: &WorkReport,
+    work: Option<&WorkReport>,
     memory: &MemoryReport,
 ) -> io::Result<()> {
     let mut json = JsonOut::begin(io::BufWriter::new(out))?;
     json.field("command", "ingest")?;
     json.field("input", input)?;
-    json.field("work", work)?;
+    // A read in memory is reported as before task 1.20.
+    if let Some(work) = work {
+        json.field("work", work)?;
+    }
     json.field("memory", memory)?;
     json.end()
 }
@@ -387,14 +392,14 @@ fn skip_words(kind: usize) -> &'static str {
 fn archive_text(
     out: impl Write,
     report: &ArchiveReport<'_>,
-    work: &WorkReport,
+    work: Option<&WorkReport>,
     memory: &MemoryReport,
     limit: u64,
 ) -> io::Result<()> {
     let mut out = io::BufWriter::new(out);
     archive_report_text(&mut out, report, limit)?;
     // A read that stayed in memory is reported as before task 1.20.
-    if work.deduplication.on_disk() {
+    if let Some(work) = work {
         work.deduplication
             .write_text(&mut out, work.disk_free_bytes, work.disk_estimated_bytes)?;
     }

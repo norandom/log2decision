@@ -511,6 +511,19 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_scored_with_deduplication_
         u64::from(lines)
     );
     assert_eq!(roomy["parts"]["deduplication"]["on_disk"], false);
+    // The disk for deduplication is asked for at the freeze, and only then: the run in
+    // memory was checked for its parts alone (remediation of task 1.20).
+    let unpacked = (forward.len() + backward.len()) as u64;
+    let dedup_estimate = unpacked + 32 * (unpacked / 6);
+    let estimated = |document: &Value| document["parts"]["disk_estimated_bytes"].as_u64().unwrap();
+    assert_eq!(
+        estimated(&short) - estimated(&roomy),
+        dedup_estimate,
+        "{} {}",
+        short["parts"],
+        roomy["parts"]
+    );
+    assert_eq!(ingested["work"]["disk_estimated_bytes"], dedup_estimate);
     assert_eq!(short["scored"], lines);
     assert_eq!(short["input"]["distinct_texts"], lines);
     assert_eq!(short["input"]["records"], 2 * lines);
@@ -753,23 +766,40 @@ fn lines_of_one_partition(count: usize) -> String {
 #[test]
 fn a_partition_whose_keys_do_not_fit_is_refused_and_leaves_whole_documents() {
     let scratch = Scratch::new("partition");
+    let total = 200_000u64;
     let path = scratch.write(
         "one-partition.zip",
-        &archive(&[("hostile.log", lines_of_one_partition(200_000).as_bytes())]),
+        &archive(&[(
+            "hostile.log",
+            lines_of_one_partition(total as usize).as_bytes(),
+        )]),
     );
     let refusal = |line: &str| {
         assert!(line.starts_with("error: refused: "), "{line}");
         for part in ["partition 0 of 64", "needs", "is left", " bytes)"] {
             assert!(line.contains(part), "{part}: {line}");
         }
+        // Refused while the archive is read, not after it: well before its end.
+        let read: u64 = line
+            .split("; stopped after ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("no record count: {line}"));
+        assert!(
+            read <= total / 2,
+            "refused after {read} of {total} records: {line}"
+        );
     };
 
-    // `ingest`: exit code 4, no report, and nothing left of its work directory.
+    // `ingest`: exit code 4, no report, and nothing left of its work directory. Under
+    // this limit the set is frozen and its buffers fit beside it (remediation of task
+    // 1.20: they are held from the freeze on).
     let ingest_work = scratch.arg("ingest-run");
     let line = scratch.fails(
         &[
             "--memory-limit",
-            "44MB",
+            "41MB",
             "ingest",
             "--input",
             &path,
@@ -780,7 +810,7 @@ fn a_partition_whose_keys_do_not_fit_is_refused_and_leaves_whole_documents() {
     );
     refusal(&line);
     assert!(!scratch.path("ingest-run").exists());
-    let line = scratch.fails(&["--memory-limit", "44MB", "ingest", "--input", &path], 4);
+    let line = scratch.fails(&["--memory-limit", "41MB", "ingest", "--input", &path], 4);
     refusal(&line);
     assert!(!scratch.path("project").join("work").exists());
 
@@ -790,7 +820,7 @@ fn a_partition_whose_keys_do_not_fit_is_refused_and_leaves_whole_documents() {
     let output = scratch.run(&[
         "--json",
         "--memory-limit",
-        "53MB",
+        "51MB",
         "baseline",
         "score",
         "--input",

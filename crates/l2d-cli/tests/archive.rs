@@ -446,8 +446,11 @@ fn twice(lines: u32) -> Vec<u8> {
     ])
 }
 
-/// The limit under which the set of the 100,000 texts of `twice` does not fit.
-const SHORT: &str = "44MB";
+/// The limit under which the set of the 100,000 texts of `twice` does not fit and the
+/// buffers of deduplication on disk do fit beside it when it is frozen: at 40 MiB the
+/// read is refused at the freeze, at 42 MiB the set fits. It depends on the constants
+/// of the memory model.
+const SHORT: &str = "41MB";
 
 #[test]
 fn an_archive_whose_texts_outgrow_the_memory_limit_is_ingested_with_deduplication_on_disk() {
@@ -459,7 +462,8 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_ingested_with_deduplicatio
     let roomy = scratch.json(&["--memory-limit", "2GB", "ingest", "--input", &path]);
     assert_eq!(roomy["input"]["records"], 2 * lines);
     assert_eq!(roomy["input"]["distinct_texts"], lines);
-    assert_eq!(roomy["work"]["deduplication"]["on_disk"], false, "{roomy}");
+    // In memory the report is the one of task 1.16: no `work`.
+    assert!(roomy.get("work").is_none(), "{roomy}");
 
     // Under a limit the set does not fit: the same report, by way of the disk, at any
     // batch size.
@@ -484,6 +488,17 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_ingested_with_deduplicatio
         assert!(
             dedup["spilled_bytes"].as_u64().unwrap()
                 <= work["disk_estimated_bytes"].as_u64().unwrap(),
+            "{work}"
+        );
+        // The disk was checked at the freeze, for deduplication on disk alone: the
+        // unpacked bytes and 32 bytes for every 6 of them.
+        let unpacked = 2
+            * (0..lines)
+                .map(|line| format!("line {line}\n").len() as u64)
+                .sum::<u64>();
+        assert_eq!(
+            work["disk_estimated_bytes"].as_u64().unwrap(),
+            unpacked + 32 * (unpacked / 6),
             "{work}"
         );
         assert!(work["disk_free_bytes"].as_u64().unwrap() > 0, "{work}");
@@ -542,6 +557,56 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_ingested_with_deduplicatio
     assert_eq!(short["input"], roomy["input"]);
     assert_eq!(short["work"]["directory"], empty_arg.as_str());
     assert_eq!(scratch.files(), with_empty);
+}
+
+/// Remediation of task 1.20 after the review of d03b1db: `ingest` uses the disk only
+/// when the set of distinct texts outgrows the memory, as at task 1.16 until then.
+#[test]
+fn an_archive_whose_texts_fit_in_memory_is_ingested_without_a_work_directory() {
+    let scratch = Scratch::new("no-disk");
+    let path = scratch.write("sample.zip", &sample());
+    // A file is where the project's work directory would be: it cannot be made.
+    let blocker = scratch.root.join("project").join("work");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let before = scratch.files();
+
+    let value = scratch.json(&["ingest", "--input", &path]);
+    assert_eq!(value["input"]["distinct_texts"], 3);
+    assert!(value.get("work").is_none(), "{value}");
+    let text = scratch.text(&["ingest", "--input", &path]);
+    assert!(text.contains("  distinct texts: 3 "), "{text}");
+    assert!(!text.contains("deduplication"), "{text}");
+    assert!(!text.contains("  disk: "), "{text}");
+    // Nothing is held for deduplication on disk beside a set that fits: under this
+    // limit the buffers for it (3.4 MiB) would not fit beside a batch.
+    let value = scratch.json(&["--memory-limit", "40MB", "ingest", "--input", &path]);
+    assert_eq!(value["input"]["records"], 6);
+    assert_eq!(scratch.files(), before, "nothing is written");
+    assert_eq!(std::fs::read(&blocker).unwrap(), b"not a directory");
+
+    // When the set does outgrow the memory, the directory is made then: here it
+    // cannot be, which is said plainly, after the read began and with no report.
+    let many = scratch.write("many.zip", &twice(100_000));
+    let line = scratch.fails(&["--memory-limit", SHORT, "ingest", "--input", &many], 2);
+    assert!(line.contains("is a file"), "{line}");
+    let output = scratch.run(&[
+        "--json",
+        "--memory-limit",
+        SHORT,
+        "ingest",
+        "--input",
+        &many,
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let out = stdout(&output);
+    let documents: Vec<Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}")))
+        .collect();
+    assert_eq!(documents.len(), 1, "{out}");
+    assert_eq!(documents[0]["error"]["exit_code"], 2, "{out}");
+    std::fs::remove_file(&many).unwrap();
+    assert_eq!(scratch.files(), before, "nothing is written");
 }
 
 #[test]

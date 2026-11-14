@@ -134,6 +134,24 @@ impl WorkDir {
     /// nothing in it is touched. [`L2dError::InvalidInput`] when a file is where a
     /// directory above it would have to be.
     pub fn create(path: &Path) -> Result<Self, L2dError> {
+        Self::check(path)?;
+        let created: Vec<PathBuf> = path
+            .ancestors()
+            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+            .map(Path::to_path_buf)
+            .collect();
+        std::fs::create_dir_all(path)
+            .map_err(|error| failed("creating the work directory", path, &error))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            created,
+        })
+    }
+
+    /// Checks, without making anything, that [`WorkDir::create`] may make or use the
+    /// directory at `path`: the same errors, for a run that makes it only when it needs
+    /// it.
+    pub fn check(path: &Path) -> Result<(), L2dError> {
         if let Some(file) = path.ancestors().skip(1).find(|above| above.is_file()) {
             return Err(L2dError::InvalidInput {
                 detail: format!(
@@ -144,11 +162,6 @@ impl WorkDir {
                 ),
             });
         }
-        let created: Vec<PathBuf> = path
-            .ancestors()
-            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
-            .map(Path::to_path_buf)
-            .collect();
         if path.exists() {
             let holds_something = match std::fs::read_dir(path) {
                 Ok(mut entries) => entries.next().is_some(),
@@ -163,12 +176,7 @@ impl WorkDir {
                 )));
             }
         }
-        std::fs::create_dir_all(path)
-            .map_err(|error| failed("creating the work directory", path, &error))?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            created,
-        })
+        Ok(())
     }
 
     /// Where the directory is.
@@ -204,25 +212,36 @@ impl WorkDir {
     /// Like [`WorkDir::require_free`], with `free` in place of the operating system's
     /// figure.
     pub fn require_free_of(&self, free: u64, needed: &[(&str, u64)]) -> Result<(), L2dError> {
-        let total = needed
-            .iter()
-            .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
-        if total <= free {
-            return Ok(());
-        }
-        let named: Vec<String> = needed
-            .iter()
-            .map(|(what, bytes)| format!("{} for {what}", exact(*bytes)))
-            .collect();
-        Err(refused(format!(
-            "the run is estimated to need {} of disk space in the work directory {} ({}), but \
-             {} is free there; nothing was read",
-            exact(total),
-            self.path.display(),
-            named.join(", "),
-            exact(free),
-        )))
+        require_free_in(&self.path, free, needed, "nothing was read")
     }
+}
+
+/// [`L2dError::Refused`] when `free` is less than the sum of `needed`, with both
+/// figures, the directory `dir`, and `progress` (what was read until then).
+pub(crate) fn require_free_in(
+    dir: &Path,
+    free: u64,
+    needed: &[(&str, u64)],
+    progress: &str,
+) -> Result<(), L2dError> {
+    let total = needed
+        .iter()
+        .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
+    if total <= free {
+        return Ok(());
+    }
+    let named: Vec<String> = needed
+        .iter()
+        .map(|(what, bytes)| format!("{} for {what}", exact(*bytes)))
+        .collect();
+    Err(refused(format!(
+        "the run is estimated to need {} of disk space in the work directory {} ({}), but {} is \
+         free there; {progress}",
+        exact(total),
+        dir.display(),
+        named.join(", "),
+        exact(free),
+    )))
 }
 
 /// One part file of a table.
