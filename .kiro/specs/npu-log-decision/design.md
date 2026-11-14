@@ -17,6 +17,7 @@ Two measured results shape the design. A general text-embedding model on the NPU
 - Triage per log: ratio, evidence, abstention, ranking, review budget.
 - Population-shift test, vector-set assessment, and an evaluation report with grouped splits.
 - No Python at runtime, no network use.
+- Operational on a field machine, not only in a lab: batching, data types that spill under one global memory limit, streaming where possible, and one hungry process at a time (owner criteria of 2026-11-14, section "Operating Criteria: Field Machines, Not Labs").
 
 ### Non-Goals
 - Language-model stages (for example explaining a decision); separate spec.
@@ -1268,6 +1269,33 @@ Run records are written next to the artifact they describe (`training-record.jso
 - Text search terms are passed to the store as escaped literals, never concatenated into filter expressions unescaped.
 - No network access; no crate with network features is linked (10.2).
 - Runtime DLLs are loaded only from `runtime/ryzenai/` by absolute path.
+
+## Operating Criteria: Field Machines, Not Labs
+
+Owner criteria of 2026-11-14. The tool and every pipeline around it (reading, scoring, encoding, storing, evaluation, training, and the development scripts that train and qualify encoders) must run on the machine an analyst has in the field: one laptop, a fixed amount of memory, one NPU, other programs running. A lab machine with memory to spare hides the faults these criteria exist to prevent. A pipeline that does not meet them is not operational, whatever its results.
+
+The four criteria:
+
+1. **Batching.** No step loads or builds a whole dataset as one object in memory. Work is done in batches whose size follows from the memory that is free, and results do not depend on the batch size.
+2. **Data types that spill, under a global memory limit.** One limit holds for the whole process (`MemoryBudget`), and everything a step holds is charged to it. A structure that grows with the data (a deduplication set, a table of vectors, a feature cache) has a form on disk it moves to when it no longer fits, with results identical to the in-memory form. Where no such form exists yet, the step refuses before it starts and states what it needs and what is left; it never runs until the host kills it.
+3. **Streaming where possible.** Input is read as a stream and results are written as they are produced (parts on disk, a manifest last), so that the cost in memory is that of one batch and not of the input. A step that cannot stream says why in its design.
+4. **One hungry process at a time, by a resource-aware gate.** Training, evaluation over folds, a fill of the store, scoring a large archive and any measurement of speed are hungry processes. Before one starts it looks at the host (free memory, whether the NPU is in use, whether another hungry process of this project runs) and then runs, waits, or refuses with the reason. Two of them do not run side by side on one machine, and a measurement is not taken beside another load.
+
+Where the design stands against them:
+
+| Criterion | Met today | Not met, or not built |
+|---|---|---|
+| 1 Batching | Readers, `Batcher`, zip input, `baseline score`, the fill of the store (requirement 12) | The trainer's contract `train(records: &[LogRecord], ..)` takes the whole dataset; the development scripts (`tools/science`, `tools/embedding-qualification`) build whole-dataset arrays of 1.3 to 1.8 GB (task 2.16) |
+| 2 Spilling types, global limit | `MemoryBudget` for every command; the deduplication set of an archive moves to disk (tasks 1.17, 1.20) | Baseline fit, calibration, the shift test and the pairwise assessments need all rows at once and refuse instead (requirement 12.5); the exact vector search holds all vectors; the Python scripts have no limit at all |
+| 3 Streaming | Zip entries, records, Parquet parts with a manifest (requirement 13) | Per-log results of the commands on plain files; vectors exported for qualification (one file written at the end) |
+| 4 One hungry process, resource-aware | Each command reads free memory and adapts or refuses (requirement 12.1, 12.7) | No gate between processes: nothing stops two trainings, or a training beside a measurement. The NPU is guarded by convention only |
+
+What follows for the design (not yet requirements; the owner approves the wording before requirements.md is amended):
+
+- **A gate for hungry processes** in `l2d-core`: a named lock for the project on the machine, taken by the commands and tests that count as hungry and by the development scripts through a small wrapper. A second process waits with a message that names the holder, or refuses when asked not to wait. The NPU gets a lock of its own, so that one session at a time is a property of the tool and not of the people running it. The run record states that the gate was held.
+- **The trainer reads batches from a source,** not a slice of all records, and its calibration texts are drawn from the stream. Its contract in the Training section is changed when the training task is specified.
+- **Development pipelines follow the same rules.** A training or qualification script reads memory-mapped files or a batch iterator, states its peak memory in its record, takes the gate, and is run alone on the machine. A run that needed a restart says so in its record.
+- **Operations that need all rows at once** stay refusals for now; each is a candidate for a spilling form (out-of-core fit, sampled or partitioned assessments), decided per operation when it is built.
 
 ## Performance & Scalability
 - Encoding: one image of 64 texts per run, target ≥ 1,000 logs/s on the NPU (measured with a trained model, text to unit vector: medians between about 16,000 and 42,000 logs/s with one session over the recorded runs of tasks 2.12 and 2.6).
