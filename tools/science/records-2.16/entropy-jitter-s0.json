@@ -1,0 +1,356 @@
+{
+ "task": "npu-log-decision 2.16",
+ "variant": "entropy-jitter-s0",
+ "data": {
+  "path": "D:\\Source\\log2decision\\data\\csic-2010\\csic_database.csv",
+  "sha256": "c420f0bc0464376de75b6c419a0ac226fe69fe12c8ac4908843273721e44e637",
+  "records": 61065,
+  "distinct_texts": 25608
+ },
+ "split": {
+  "name": "split17",
+  "fold": 0,
+  "held_out_mixed_paths": [
+   "/tienda1/publico/anadir.jsp",
+   "/tienda1/publico/entrar.jsp",
+   "/tienda1/publico/vaciar.jsp"
+  ],
+  "held_out_paths": 3,
+  "held_out_logs": 4783,
+  "fitting_logs": 20825
+ },
+ "packages": {
+  "numpy": "2.5.4",
+  "torch": "2.15.0",
+  "onnx": "1.23.2",
+  "onnxruntime": "1.31.1",
+  "scikit-learn": "1.9.1",
+  "scipy": "1.18.1"
+ },
+ "python": "3.12.10",
+ "host": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+ "settings": {
+  "patcher": "entropy-jump",
+  "patcher_setting": 0.43557290616263344,
+  "objective": "contrastive",
+  "label_weight": 0.0,
+  "seed": 0,
+  "byte_model_seed": 0,
+  "epochs": 12,
+  "batch": 256,
+  "lr": 0.001,
+  "weight_decay": 0.01,
+  "optimizer": "AdamW, one-cycle schedule (10 % warm-up)",
+  "temperature": 0.1,
+  "mask_rate": 0.3,
+  "boundary_drop": 0.15,
+  "threads": 6,
+  "device": "cpu",
+  "routing": "keep (the whole line)",
+  "input_bytes": 1024,
+  "patch_limit": 128,
+  "strides": [
+   1,
+   2,
+   2,
+   1
+  ],
+  "width": 192,
+  "validation": "loss only; the last epoch is kept",
+  "validation_mixed_paths": [
+   "/tienda1/miembros/editar.jsp"
+  ],
+  "validation_logs": 5112,
+  "training_logs": 15713,
+  "calibration_texts": 512
+ },
+ "training": {
+  "history": [
+   {
+    "epoch": 1,
+    "train": {
+     "objective": 5.557442572026874,
+     "length": 0.1320952474449795
+    },
+    "validation": {
+     "objective": 5.8896481271640795,
+     "length": 0.07504773328477204
+    },
+    "seconds": 103.12699120002799
+   },
+   {
+    "epoch": 2,
+    "train": {
+     "objective": 4.553485753147332,
+     "length": 0.08153768381462936
+    },
+    "validation": {
+     "objective": 5.467820262311957,
+     "length": 0.08683707480536007
+    },
+    "seconds": 112.06502340000588
+   },
+   {
+    "epoch": 3,
+    "train": {
+     "objective": 3.949308172777776,
+     "length": 0.04688794541674174
+    },
+    "validation": {
+     "objective": 4.706343011770263,
+     "length": 0.05107910772756395
+    },
+    "seconds": 128.80152400000952
+   },
+   {
+    "epoch": 4,
+    "train": {
+     "objective": 3.526842847389654,
+     "length": 0.03758687414487337
+    },
+    "validation": {
+     "objective": 4.172524379639185,
+     "length": 0.06002767229997823
+    },
+    "seconds": 127.17716869997093
+   },
+   {
+    "epoch": 5,
+    "train": {
+     "objective": 3.1974533822484426,
+     "length": 0.03816130480276274
+    },
+    "validation": {
+     "objective": 3.901296579175525,
+     "length": 0.07573545622567943
+    },
+    "seconds": 85.7665695999749
+   },
+   {
+    "epoch": 6,
+    "train": {
+     "objective": 2.9872394019745783,
+     "length": 0.037331084339856754
+    },
+    "validation": {
+     "objective": 3.809042362026952,
+     "length": 0.056307861112868514
+    },
+    "seconds": 70.65715539996745
+   },
+   {
+    "epoch": 7,
+    "train": {
+     "objective": 2.8397952928842307,
+     "length": 0.035033311322639635
+    },
+    "validation": {
+     "objective": 3.5683297682815875,
+     "length": 0.04826617646993011
+    },
+    "seconds": 102.37126919999719
+   },
+   {
+    "epoch": 8,
+    "train": {
+     "objective": 2.7170057954820375,
+     "length": 0.03474185058086862
+    },
+    "validation": {
+     "objective": 3.4803565917347146,
+     "length": 0.042933795702787984
+    },
+    "seconds": 152.81329700001515
+   },
+   {
+    "epoch": 9,
+    "train": {
+     "objective": 2.608451515639116,
+     "length": 0.03430058423581224
+    },
+    "validation": {
+     "objective": 3.391315242121104,
+     "length": 0.04893180081097581
+    },
+    "seconds": 131.65571849996923
+   },
+   {
+    "epoch": 10,
+    "train": {
+     "objective": 2.5023449543650873,
+     "length": 0.03630428277356752
+    },
+    "validation": {
+     "objective": 3.3473049302895865,
+     "length": 0.05227438981698736
+    },
+    "seconds": 114.20499930001097
+   },
+   {
+    "epoch": 11,
+    "train": {
+     "objective": 2.4465446395390904,
+     "length": 0.03707195456836591
+    },
+    "validation": {
+     "objective": 3.344624446498023,
+     "length": 0.04490553492502381
+    },
+    "seconds": 103.4611243000254
+   },
+   {
+    "epoch": 12,
+    "train": {
+     "objective": 2.4118628045933437,
+     "length": 0.03787401693473681
+    },
+    "validation": {
+     "objective": 3.3102192233239354,
+     "length": 0.0481671093152734
+    },
+    "seconds": 97.59379409998655
+   }
+  ],
+  "chosen_epoch": 12,
+  "seconds": 1329.6946346999612
+ },
+ "parameters": {
+  "line_graph": 670592,
+  "graph": 329344,
+  "byte_table": 16384
+ },
+ "files": {
+  "line_f32_sha256": "259ce5db68a52925a5a278ab7d949e3e54377a0d89e392a1c54f4f6d9447d9d2",
+  "line_int8_sha256": "482b279a7411fb9e57abfc4f1239553d340ab778a0fd4a1b8e61fd826dd3bb4f",
+  "line_int8_bytes": 680488
+ },
+ "raw_length_p01_p50_p99_f32": [
+  0.7226235824823379,
+  0.9902665019035339,
+  1.8670496010780335
+ ],
+ "triage_f32": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.6598990224513911,
+    "average_precision": 0.7862875718646001,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.6591823992340766,
+     "/tienda1/publico/entrar.jsp": 0.9723926380368098,
+     "/tienda1/publico/vaciar.jsp": 0.8282208588957055
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.5985830724490893,
+    "average_precision": 0.716620338575676,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.5753225222871474,
+     "/tienda1/publico/entrar.jsp": 0.6763803680981595,
+     "/tienda1/publico/vaciar.jsp": 0.7423312883435582
+    }
+   },
+   "head_penalty": 100.0
+  },
+  "cv5": {
+   "linear_head_pooled": 0.5590178586896297,
+   "knn_k11_pooled": 0.638318087764256,
+   "linear_head_mean_of_folds": 0.5634831173037459,
+   "knn_k11_mean_of_folds": 0.6492972799979381,
+   "per_fold": [
+    {
+     "fold": 0,
+     "linear_head": 0.5933878364103751,
+     "knn_k11": 0.7254366308650445
+    },
+    {
+     "fold": 1,
+     "linear_head": 0.565674305314251,
+     "knn_k11": 0.6357119443056944
+    },
+    {
+     "fold": 2,
+     "linear_head": 0.6420547447105159,
+     "knn_k11": 0.5866923338833452
+    },
+    {
+     "fold": 3,
+     "linear_head": 0.35260386791721576,
+     "knn_k11": 0.7045767769940314
+    },
+    {
+     "fold": 4,
+     "linear_head": 0.6636948321663717,
+     "knn_k11": 0.5940687139415742
+    }
+   ]
+  }
+ },
+ "raw_length_p01_p50_p99_int8": [
+  0.7159338742494583,
+  0.9740065932273865,
+  1.8178838920593263
+ ],
+ "triage_int8": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.7557117344198394,
+    "average_precision": 0.8718095223441842,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.7360358871844498,
+     "/tienda1/publico/entrar.jsp": 0.9355828220858895,
+     "/tienda1/publico/vaciar.jsp": 0.9815950920245399
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.5546366419593941,
+    "average_precision": 0.677985314546225,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.544307656740546,
+     "/tienda1/publico/entrar.jsp": 0.9279141104294479,
+     "/tienda1/publico/vaciar.jsp": 0.7469325153374233
+    }
+   },
+   "head_penalty": 0.1
+  },
+  "cv5": {
+   "linear_head_pooled": 0.5399983369971253,
+   "knn_k11_pooled": 0.614757924373101,
+   "linear_head_mean_of_folds": 0.5619851652622435,
+   "knn_k11_mean_of_folds": 0.6197569194002334,
+   "per_fold": [
+    {
+     "fold": 0,
+     "linear_head": 0.5352092118173689,
+     "knn_k11": 0.6937384722137105
+    },
+    {
+     "fold": 1,
+     "linear_head": 0.5820343040112061,
+     "knn_k11": 0.6427988621432915
+    },
+    {
+     "fold": 2,
+     "linear_head": 0.6637154129493251,
+     "knn_k11": 0.5918183791013208
+    },
+    {
+     "fold": 3,
+     "linear_head": 0.2940093791178978,
+     "knn_k11": 0.5496989574451594
+    },
+    {
+     "fold": 4,
+     "linear_head": 0.7349575184154189,
+     "knn_k11": 0.6207299260976844
+    }
+   ]
+  }
+ },
+ "float_against_8bit_cosine_min_p01_median": [
+  0.42722636461257935,
+  0.7941943407058716,
+  0.9597617387771606
+ ],
+ "cv5_note": "the encoder was fitted once, on the training part of split17; in the cv5 folds the scorers hold no label of the held-out fold, but the encoder has seen unlabelled texts of four of the five large endpoints",
+ "seconds": 1884.3024784000008
+}

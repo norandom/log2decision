@@ -57,7 +57,7 @@ def main() -> None:
     count, dimension = vectors.shape
     baseline = eq.random_unit(count, dimension)
 
-    ratio = summary(f"CSIC vectors from the NPU ({count} distinct inputs)", spectrum(vectors))
+    ratio = summary(f"CSIC vectors {eq.SOURCE} ({count} distinct inputs)", spectrum(vectors))
     ratio_random = summary("random unit vectors, same number", spectrum(baseline))
     summary(f"good texts only ({int((~bad).sum())})", spectrum(vectors[~bad]))
     summary(f"bad texts only ({int(bad.sum())})", spectrum(vectors[bad]))
@@ -66,7 +66,7 @@ def main() -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.3))
     index = np.arange(1, dimension + 1)
-    axes[0].plot(index, ratio, color=eq.SERIES[0], lw=2, marker="o", ms=3, label="CSIC vectors from the NPU")
+    axes[0].plot(index, ratio, color=eq.SERIES[0], lw=2, marker="o", ms=3, label=f"CSIC vectors {eq.SOURCE}")
     axes[0].plot(index, ratio_random, color=eq.MUTED, lw=2, label="random unit vectors")
     axes[0].set_yscale("log")
     axes[0].set_xlabel("principal component")
@@ -74,7 +74,7 @@ def main() -> None:
     axes[0].set_title("Scree plot")
     axes[0].legend(loc="upper right")
     cumulative = np.cumsum(ratio)
-    axes[1].plot(index, cumulative, color=eq.SERIES[0], lw=2, label="CSIC vectors from the NPU")
+    axes[1].plot(index, cumulative, color=eq.SERIES[0], lw=2, label=f"CSIC vectors {eq.SOURCE}")
     axes[1].plot(index, np.cumsum(ratio_random), color=eq.MUTED, lw=2, label="random unit vectors")
     for level in (0.90, 0.95, 0.99):
         needed = int(np.searchsorted(cumulative, level) + 1)
@@ -104,6 +104,10 @@ def main() -> None:
     off = np.array([s[1] for s in steps])
     levels = np.array([s[2] for s in steps])
     on_grid = off < 0.02
+    if not on_grid.any():
+        # Float vectors (an encoder that was not run in 8 bits) lie on no such grid.
+        print(f"vectors whose values are whole multiples of their smallest gap (within 0.02 of a step): 0 of {count}; no 8-bit grid to recover")
+        return
     print(
         f"vectors whose values are whole multiples of their smallest gap (within 0.02 of a step): {int(on_grid.sum())} of {count} ({on_grid.mean():.4f}); "
         f"largest absolute level among those: min {levels[on_grid].min()}, median {int(np.median(levels[on_grid]))}, max {levels[on_grid].max()}"
