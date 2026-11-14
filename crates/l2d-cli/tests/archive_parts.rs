@@ -492,9 +492,11 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_scored_with_deduplication_
     );
     const LIMIT: &str = "50MB";
 
-    // Reading it in memory alone is refused under this limit.
-    let line = scratch.fails(&["--memory-limit", LIMIT, "ingest", "--input", &path], 4);
-    assert!(line.contains("deduplication set"), "{line}");
+    // `ingest` reads it under this limit on disk as well (task 1.20) and leaves
+    // nothing behind.
+    let ingested = scratch.json(&["--memory-limit", LIMIT, "ingest", "--input", &path]);
+    assert_eq!(ingested["work"]["deduplication"]["on_disk"], true);
+    assert!(!scratch.path("project").join("work").exists());
 
     // Scoring it completes under the same limit, on disk, with the rows of a run that
     // has room for the whole set.
@@ -513,6 +515,9 @@ fn an_archive_whose_texts_outgrow_the_memory_limit_is_scored_with_deduplication_
     assert_eq!(short["input"]["distinct_texts"], lines);
     assert_eq!(short["input"]["records"], 2 * lines);
     assert_eq!(rows_hashes(&short), rows_hashes(&roomy));
+    // The counts of `ingest` and of `baseline score`, on disk and in memory.
+    assert_eq!(ingested["input"], short["input"]);
+    assert_eq!(ingested["input"], roomy["input"]);
 
     let rows = scored(&scratch.path("short"));
     assert_eq!(rows.len(), lines as usize);
@@ -721,4 +726,188 @@ fn a_damaged_entry_fails_the_command_after_the_parts_are_written() {
     assert_eq!(texts, ["first", "last"]);
     let manifest = manifest(&scratch.path("run"));
     assert!(manifest["input"]["entries"][1]["skipped"]["damaged"].is_string());
+}
+
+// --- Task 1.20 -----------------------------------------------------------------------------
+
+/// `count` distinct lines whose keys all fall into partition 0 of deduplication on
+/// disk: the partition of a text is chosen by the first byte of its key, which is the
+/// first byte of its SHA-256.
+fn lines_of_one_partition(count: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let mut lines = String::new();
+    let mut found = 0;
+    let mut index = 0u64;
+    while found < count {
+        let text = format!("h{index}");
+        if Sha256::digest(text.as_bytes())[0] % 64 == 0 {
+            lines.push_str(&text);
+            lines.push('\n');
+            found += 1;
+        }
+        index += 1;
+    }
+    lines
+}
+
+#[test]
+fn a_partition_whose_keys_do_not_fit_is_refused_and_leaves_whole_documents() {
+    let scratch = Scratch::new("partition");
+    let path = scratch.write(
+        "one-partition.zip",
+        &archive(&[("hostile.log", lines_of_one_partition(200_000).as_bytes())]),
+    );
+    let refusal = |line: &str| {
+        assert!(line.starts_with("error: refused: "), "{line}");
+        for part in ["partition 0 of 64", "needs", "is left", " bytes)"] {
+            assert!(line.contains(part), "{part}: {line}");
+        }
+    };
+
+    // `ingest`: exit code 4, no report, and nothing left of its work directory.
+    let ingest_work = scratch.arg("ingest-run");
+    let line = scratch.fails(
+        &[
+            "--memory-limit",
+            "44MB",
+            "ingest",
+            "--input",
+            &path,
+            "--work-dir",
+            &ingest_work,
+        ],
+        4,
+    );
+    refusal(&line);
+    assert!(!scratch.path("ingest-run").exists());
+    let line = scratch.fails(&["--memory-limit", "44MB", "ingest", "--input", &path], 4);
+    refusal(&line);
+    assert!(!scratch.path("project").join("work").exists());
+
+    // `baseline score` with `--json`: exit code 4, and standard output holds whole
+    // documents only, the last of them the error envelope.
+    let work = scratch.arg("score-run");
+    let output = scratch.run(&[
+        "--json",
+        "--memory-limit",
+        "53MB",
+        "baseline",
+        "score",
+        "--input",
+        &path,
+        "--baseline",
+        "web",
+        "--work-dir",
+        &work,
+    ]);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    refusal(stderr(&output).trim_end());
+    let out = stdout(&output);
+    let documents: Vec<Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}")))
+        .collect();
+    assert_eq!(documents.len(), 2, "{out}");
+    assert_eq!(documents[0]["command"], "baseline score");
+    assert_eq!(documents[0]["incomplete"], true, "{out}");
+    assert!(documents[0]["scores"].is_array(), "{out}");
+    assert!(documents[0].get("parts").is_none(), "{out}");
+    assert_eq!(documents[1]["error"]["exit_code"], 4);
+    assert_eq!(documents[1]["error"]["kind"], "refused");
+    // What a run that failed may leave: the parts written until then, without a
+    // manifest; nothing of the deduplication on disk.
+    let left = names(&scratch.path("score-run"));
+    assert!(
+        !left.is_empty(),
+        "the texts of the set in memory were scored"
+    );
+    for name in &left {
+        assert!(
+            name.starts_with("scores-") && name.ends_with(".parquet"),
+            "{left:?}"
+        );
+    }
+}
+
+#[test]
+fn the_disk_estimate_holds_for_an_archive_of_short_lines() {
+    let scratch = Scratch::new("short-lines");
+    // 400,000 distinct lines of 1 to 6 digits: a row on disk takes 32 bytes beside a
+    // text of about 6.
+    let lines = 400_000u64;
+    let content: String = (0..lines).map(|line| format!("{line}\n")).collect();
+    let path = scratch.write("short.zip", &archive(&[("short.log", content.as_bytes())]));
+
+    let scored = scratch.score(&path, "scored", &["--memory-limit", "64MB"]);
+    let parts = &scored["parts"];
+    let dedup = &parts["deduplication"];
+    assert_eq!(dedup["on_disk"], true, "{parts}");
+    assert_eq!(scored["input"]["distinct_texts"], lines);
+    let spilled = dedup["spilled_bytes"].as_u64().unwrap();
+    // Every row that went to disk is counted with its 32 bytes.
+    assert!(
+        spilled >= 32 * dedup["spilled_records"].as_u64().unwrap(),
+        "{dedup}"
+    );
+    let written = spilled + parts["bytes"].as_u64().unwrap();
+    let estimated = parts["disk_estimated_bytes"].as_u64().unwrap();
+    assert!(
+        written <= estimated,
+        "{written} bytes were written and {estimated} estimated: {parts}"
+    );
+
+    let ingested = scratch.json(&["--memory-limit", "50MB", "ingest", "--input", &path]);
+    let work = &ingested["work"];
+    assert_eq!(work["deduplication"]["on_disk"], true, "{work}");
+    assert_eq!(ingested["input"]["distinct_texts"], lines);
+    let spilled = work["deduplication"]["spilled_bytes"].as_u64().unwrap();
+    let estimated = work["disk_estimated_bytes"].as_u64().unwrap();
+    assert!(
+        spilled <= estimated,
+        "{spilled} bytes were written and {estimated} estimated: {work}"
+    );
+}
+
+#[test]
+fn a_work_directory_the_run_made_is_removed_when_the_run_is_refused() {
+    let scratch = Scratch::new("made");
+    let path = scratch.write("sample.zip", &sample());
+    // The text output has its first lines by the time the first batch is refused, so
+    // only the exit code and the diagnostics are looked at.
+    let score = |limit: &'static str, work: &str, code: i32| {
+        let output = scratch.run(&[
+            "--memory-limit",
+            limit,
+            "baseline",
+            "score",
+            "--input",
+            &path,
+            "--baseline",
+            "web",
+            "--work-dir",
+            work,
+        ]);
+        assert_eq!(output.status.code(), Some(code), "{}", stderr(&output));
+        stderr(&output).trim_end().to_string()
+    };
+
+    // Under this limit the scorer fits and the first batch does not: the run is
+    // refused after its work directory was made.
+    let made = scratch.path("made").join("run");
+    let line = score("41MB", &made.to_string_lossy(), 4);
+    assert!(line.contains("reading the archive needs"), "{line}");
+    assert!(!scratch.path("made").exists(), "{:?}", names(&scratch.root));
+
+    // A directory that was there before stays, empty as it was.
+    std::fs::create_dir(scratch.path("there")).unwrap();
+    score("41MB", &scratch.arg("there"), 4);
+    assert_eq!(names(&scratch.path("there")), Vec::<String>::new());
+
+    // Below a file: the analyst's error, said plainly.
+    let file = scratch.write("plain.txt", b"x");
+    let below = Path::new(&file).join("run");
+    let line = score("2GB", &below.to_string_lossy(), 2);
+    assert!(line.contains("is a file"), "{line}");
+    assert!(!line.contains("os error"), "{line}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"x");
 }

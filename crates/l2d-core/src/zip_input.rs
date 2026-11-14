@@ -92,7 +92,9 @@
 //! afterwards. What the caller holds beside the archive ([`ZipInput::hold_beside`])
 //! counts as held from the first batch on. Still refused, with the figures: skipped
 //! records or a directory that do not fit, a frozen set that leaves no room for the
-//! smallest batch, and a partition on disk whose keys do not fit.
+//! smallest batch, and a partition on disk whose keys do not fit (as soon as it
+//! outgrows the room, while the archive is read: task 1.20). What deduplication on
+//! disk is estimated to write is [`SelectedBytes::dedup_disk_bytes`].
 //!
 //! # What a hostile archive can and cannot do
 //!
@@ -134,7 +136,7 @@ use crate::types::{InputSummary, Label, LogsFrame, SkippedRecord};
 use crate::zip_directory::{
     DataFault, DirectoryEntry, EntryKind, locate_data, read_directory, unreadable,
 };
-use crate::zip_spill::{CountFile, Merge, Spill, WRITERS_HELD};
+use crate::zip_spill::{CountFile, Merge, SPILL_HELD, Spill, estimated_disk_bytes};
 
 pub use crate::zip_spill::DiskDedup;
 
@@ -934,7 +936,7 @@ impl ZipInput {
 
     fn spill_held(&self) -> u64 {
         match self.spill {
-            Some(_) => WRITERS_HELD,
+            Some(_) => SPILL_HELD,
             None => 0,
         }
     }
@@ -1050,8 +1052,8 @@ impl ZipInput {
             exact(self.readers_held()),
         ) + &match &self.spill {
             Some(_) => format!(
-                ", the buffers of deduplication on disk {}",
-                exact(WRITERS_HELD)
+                ", the buffers of deduplication on disk and of its occurrence counts {}",
+                exact(SPILL_HELD)
             ),
             None => String::new(),
         } + &match self.beside {
@@ -1221,10 +1223,17 @@ impl ZipInput {
                 self.freeze();
             }
         }
+        let (held, records, entries) = (self.held_bytes(), self.records, self.next_entry);
         if let Some(spill) = &mut self.spill
             && spill.frozen()
         {
-            // The set takes no new text: the rows it does not hold go to disk.
+            // The set takes no new text: the rows it does not hold go to disk. What a
+            // partition's set may take when the partitions are deduplicated is what
+            // the limit leaves now, or less: a partition that outgrows it is refused
+            // here.
+            let room = budget
+                .usable_bytes()
+                .saturating_sub(held + PARSE_BATCH_BYTES);
             let positions = batch
                 .column(LogsFrame::FIRST_POSITION)
                 .and_then(Column::u64)
@@ -1243,7 +1252,17 @@ impl ZipInput {
                 };
                 match self.counts.get_mut(key) {
                     Some(seen) => *seen = seen.saturating_add(count),
-                    None => spill.spill(key, position, count, text)?,
+                    None => spill
+                        .spill(key, position, count, text, room)
+                        .map_err(|error| match error {
+                            L2dError::Refused { reason } => L2dError::Refused {
+                                reason: format!(
+                                    "{reason}; stopped after {records} records of {entries} \
+                                     entries"
+                                ),
+                            },
+                            other => other,
+                        })?,
                 }
             }
             return Ok(None);
@@ -1304,7 +1323,7 @@ impl ZipInput {
         let room = budget.left_bytes();
         match &mut self.spill {
             Some(spill) => {
-                spill.deduplicate(room, table_bytes)?;
+                spill.deduplicate(room)?;
                 spill.merge().map(Some)
             }
             None => Ok(None),
@@ -1407,6 +1426,21 @@ pub struct SelectedBytes {
     pub packed: u64,
     /// Their bytes unpacked, as the directory declares them.
     pub unpacked: u64,
+}
+
+impl SelectedBytes {
+    /// What deduplication on disk is estimated to write for these entries, in bytes:
+    /// their unpacked bytes, and the 32 bytes a row on disk takes beside its text for
+    /// as many rows as records of 6 bytes would make of them.
+    ///
+    /// It is an estimate, not a bound: the rows of an archive are not known before it
+    /// is read (records shorter than 6 bytes on average take more), a gzip entry
+    /// declares its compressed size only, and a text is written once per batch it
+    /// occurs in. For logs it is high: a text that the set in memory holds is not
+    /// written at all.
+    pub fn dedup_disk_bytes(&self) -> u64 {
+        estimated_disk_bytes(self.unpacked)
+    }
 }
 
 /// The occurrence counts of the rows handed out: see [`ZipInput::occurrence_counts`].

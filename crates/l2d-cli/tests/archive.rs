@@ -429,3 +429,149 @@ fn the_other_commands_do_not_read_an_archive_yet() {
         assert!(line.contains("l2d ingest"), "{line}");
     }
 }
+
+// --- Deduplication on disk (requirement 13.12; task 1.20) -----------------------------------
+
+/// `lines` distinct lines, each twice: the second time in another entry, in reverse.
+fn twice(lines: u32) -> Vec<u8> {
+    let mut forward = String::new();
+    let mut backward = String::new();
+    for line in 0..lines {
+        forward.push_str(&format!("line {line}\n"));
+        backward.push_str(&format!("line {}\n", lines - 1 - line));
+    }
+    archive(&[
+        ("forward.log", forward.as_bytes()),
+        ("backward.log", backward.as_bytes()),
+    ])
+}
+
+/// The limit under which the set of the 100,000 texts of `twice` does not fit.
+const SHORT: &str = "44MB";
+
+#[test]
+fn an_archive_whose_texts_outgrow_the_memory_limit_is_ingested_with_deduplication_on_disk() {
+    let scratch = Scratch::new("on-disk");
+    let lines = 100_000u64;
+    let path = scratch.write("many.zip", &twice(lines as u32));
+    let before = scratch.files();
+
+    let roomy = scratch.json(&["--memory-limit", "2GB", "ingest", "--input", &path]);
+    assert_eq!(roomy["input"]["records"], 2 * lines);
+    assert_eq!(roomy["input"]["distinct_texts"], lines);
+    assert_eq!(roomy["work"]["deduplication"]["on_disk"], false, "{roomy}");
+
+    // Under a limit the set does not fit: the same report, by way of the disk, at any
+    // batch size.
+    for batch_rows in [None, Some("3000")] {
+        let mut args = vec!["--memory-limit", SHORT];
+        if let Some(rows) = batch_rows {
+            args.extend_from_slice(&["--batch-rows", rows]);
+        }
+        args.extend_from_slice(&["ingest", "--input", &path]);
+        let short = scratch.json(&args);
+        let work = &short["work"];
+        let dedup = &work["deduplication"];
+        assert_eq!(dedup["on_disk"], true, "{batch_rows:?}: {work}");
+        let in_memory = dedup["set_texts"].as_u64().unwrap();
+        assert!(in_memory > 0 && in_memory < lines, "{dedup}");
+        assert_eq!(
+            dedup["spilled_distinct"].as_u64().unwrap() + in_memory,
+            lines
+        );
+        assert_eq!(short["input"], roomy["input"], "{batch_rows:?}");
+        // What was written stayed within what the run was estimated to need.
+        assert!(
+            dedup["spilled_bytes"].as_u64().unwrap()
+                <= work["disk_estimated_bytes"].as_u64().unwrap(),
+            "{work}"
+        );
+        assert!(work["disk_free_bytes"].as_u64().unwrap() > 0, "{work}");
+        // The directory the files were in: one of this run below the project's.
+        let directory = Path::new(work["directory"].as_str().unwrap());
+        assert!(
+            directory
+                .parent()
+                .unwrap()
+                .ends_with(Path::new("project").join("work")),
+            "{work}"
+        );
+        let name = directory.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("ingest-2"), "{name}");
+    }
+    // Without `--work-dir` the files were below the project's work directory, and
+    // nothing of it is left.
+    assert_eq!(scratch.files(), before, "nothing is left behind");
+
+    // A directory that is named and absent is made and removed again, with the
+    // directories made above it.
+    let given = scratch.root.join("given").join("run");
+    let given_arg = given.to_string_lossy().into_owned();
+    let text = scratch.text(&[
+        "--memory-limit",
+        SHORT,
+        "ingest",
+        "--input",
+        &path,
+        "--work-dir",
+        &given_arg,
+    ]);
+    for expected in [
+        "  records read: 200000 (0 skipped)\n",
+        "  distinct texts: 100000 (0 good, 0 bad, 100000 unknown)\n",
+        "  entries: 2 in the archive, 2 read, 0 not read\n",
+        "  deduplication: on disk after ",
+    ] {
+        assert!(text.contains(expected), "{expected:?} is not in:\n{text}");
+    }
+    assert_eq!(scratch.files(), before, "nothing is left behind");
+
+    // A directory that was there and empty is used and left as it was.
+    std::fs::create_dir(scratch.root.join("empty")).unwrap();
+    let with_empty = scratch.files();
+    let empty_arg = scratch.root.join("empty").to_string_lossy().into_owned();
+    let short = scratch.json(&[
+        "--memory-limit",
+        SHORT,
+        "ingest",
+        "--input",
+        &path,
+        "--work-dir",
+        &empty_arg,
+    ]);
+    assert_eq!(short["input"], roomy["input"]);
+    assert_eq!(short["work"]["directory"], empty_arg.as_str());
+    assert_eq!(scratch.files(), with_empty);
+}
+
+#[test]
+fn the_work_directory_of_ingest_is_checked_before_anything_is_read() {
+    let scratch = Scratch::new("work-dir");
+    let path = scratch.write("sample.zip", &sample());
+
+    // Below a file: the analyst's error, said plainly.
+    let file = scratch.write("plain.txt", b"x");
+    let before = scratch.files();
+    let below = Path::new(&file).join("run").to_string_lossy().into_owned();
+    let line = scratch.fails(&["ingest", "--input", &path, "--work-dir", &below], 2);
+    assert!(line.contains("is a file"), "{line}");
+    assert!(!line.contains("os error"), "{line}");
+
+    // In use: refused, and left alone.
+    std::fs::create_dir(scratch.root.join("used")).unwrap();
+    let kept = scratch.write("used/notes.txt", b"mine");
+    let used = scratch.root.join("used").to_string_lossy().into_owned();
+    let line = scratch.fails(&["ingest", "--input", &path, "--work-dir", &used], 4);
+    assert!(line.contains("not an empty directory"), "{line}");
+    assert_eq!(std::fs::read(&kept).unwrap(), b"mine");
+
+    // On an input that is not an archive the option is an analyst error.
+    let plain = scratch.write("plain.log", b"GET /a 200\n");
+    let line = scratch.fails(&["ingest", "--input", &plain, "--work-dir", "somewhere"], 2);
+    assert!(line.contains("--work-dir"), "{line}");
+    assert!(line.contains("zip archives"), "{line}");
+    assert!(!Path::new("somewhere").exists());
+    std::fs::remove_file(&plain).unwrap();
+    std::fs::remove_dir_all(scratch.root.join("used")).unwrap();
+    assert_eq!(scratch.files(), before);
+}

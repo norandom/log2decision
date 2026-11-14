@@ -654,3 +654,194 @@ fn what_the_selected_entries_hold_is_known_before_the_read() {
     );
     assert!(all.packed < all.unpacked, "{all:?}");
 }
+
+// --- Task 1.20 -----------------------------------------------------------------------------
+
+/// `count` distinct lines whose keys all fall into partition 0 of deduplication on
+/// disk: the partition of a text is chosen by the first byte of its key, which is the
+/// first byte of its SHA-256.
+fn lines_of_one_partition(count: usize) -> String {
+    let mut lines = String::new();
+    let mut found = 0;
+    let mut index = 0u64;
+    while found < count {
+        let text = format!("h{index}");
+        if Sha256::digest(text.as_bytes())[0] % 64 == 0 {
+            lines.push_str(&text);
+            lines.push('\n');
+            found += 1;
+        }
+        index += 1;
+    }
+    lines
+}
+
+/// Task 1.20: a partition whose keys will not fit is refused as soon as it outgrows
+/// the room, while the archive is still being read, with what is needed and what is
+/// left.
+#[test]
+fn a_partition_whose_keys_do_not_fit_is_refused_while_the_archive_is_read() {
+    let scratch = Scratch::new("partition");
+    let total = 70_000u64;
+    let path = scratch.write(
+        "one-partition.zip",
+        &archive(&[(
+            "hostile.log",
+            lines_of_one_partition(total as usize).as_bytes(),
+        )]),
+    );
+    let settings = ZipInputSettings {
+        max_record_bytes: 1_024,
+        ..ZipInputSettings::default()
+    };
+    // What the limit leaves beside the buffers and a batch holds the keys of fewer
+    // rows than the archive puts into its one partition.
+    let limit = Some(l2d_core::memory::PROCESS_BASELINE_BYTES + 9 * MIB);
+    let mut budget = budget(limit, Some(1_024));
+    let spill = scratch.path("work/dedup");
+    let mut input = ZipInput::open(&path, &settings, &budget).unwrap();
+    // No text in memory: every row goes to disk.
+    input.spill_into(&spill, Some(0)).unwrap();
+    let error = input
+        .batches(&mut budget)
+        .find_map(Result::err)
+        .expect("the partition is refused");
+    assert!(matches!(error, L2dError::Refused { .. }), "{error}");
+    let text = error.to_string();
+    for part in ["partition 0 of 64", "needs", "is left", " bytes)"] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    let summary = input.finish();
+    assert!(
+        summary.input.records < total,
+        "refused after {} of {total} records: {text}",
+        summary.input.records
+    );
+    // Nothing is left of the deduplication on disk.
+    assert!(!spill.exists(), "{:?}", listing(&scratch.dir));
+}
+
+/// Task 1.20: what deduplication on disk holds in memory is counted from the moment
+/// its directory is named, the chunks the occurrence counts are read in included.
+#[test]
+fn the_buffers_of_deduplication_on_disk_and_of_the_counts_are_held() {
+    let scratch = Scratch::new("held");
+    let path = scratch.write("repeating.zip", &repeating());
+    let budget = budget(None, None);
+    let mut input = ZipInput::open(&path, &ZipInputSettings::default(), &budget).unwrap();
+    let before = input.held_bytes();
+    input.spill_into(&scratch.path("spill"), None).unwrap();
+    let held = input.held_bytes() - before;
+    // 66 buffers of 32 KiB; and for the counts a chunk of 65,536 keys of 16 bytes
+    // with its 65,536 counts of 4 bytes.
+    let (buffers, counts) = (66 * 32 * 1_024, 65_536 * (16 + 4));
+    assert!(
+        held >= buffers + counts,
+        "{held} bytes are held, less than {buffers} and {counts}"
+    );
+    assert!(held < buffers + counts + MIB, "{held}");
+}
+
+/// Task 1.20: a work directory below a file is the analyst's error, said plainly.
+#[test]
+fn a_work_directory_below_a_file_is_an_analyst_error() {
+    let scratch = Scratch::new("below-file");
+    let file = scratch.write("plain.txt", b"x");
+    for below in ["run", "a/b/run"] {
+        let error = WorkDir::create(&file.join(below)).unwrap_err();
+        assert!(matches!(error, L2dError::InvalidInput { .. }), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("is a file"), "{text}");
+        assert!(text.contains("plain.txt"), "{text}");
+        assert!(!text.contains("os error"), "{text}");
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"x");
+    assert_eq!(listing(&scratch.dir), ["plain.txt"]);
+}
+
+/// Task 1.20: a run that leaves nothing in its directory removes what it made, and
+/// nothing else.
+#[test]
+fn the_directories_a_run_made_are_removed_as_far_as_they_are_empty() {
+    let scratch = Scratch::new("made");
+    // Absent with absent parents: all of them go again.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), Vec::<String>::new());
+
+    // Something was written: the directory stays, and what is above it.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    std::fs::write(dir.path().join("part.parquet"), b"x").unwrap();
+    dir.remove_created();
+    assert_eq!(
+        listing(&scratch.dir),
+        ["a", "a/b", "a/b/run", "a/b/run/part.parquet"]
+    );
+    std::fs::remove_file(dir.path().join("part.parquet")).unwrap();
+
+    // A directory that was there before is not removed, nor what is above it.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), ["a", "a/b", "a/b/run"]);
+    // Below one that was there: only what was made.
+    let dir = WorkDir::create(&scratch.path("a/b/run/deeper/still")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), ["a", "a/b", "a/b/run"]);
+}
+
+/// The bytes of the files below `dir`; 0 when it is absent.
+fn bytes_below(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(|entry| entry.unwrap().metadata().map_or(0, |file| file.len()))
+        .sum()
+}
+
+/// Task 1.20: the estimate of what deduplication on disk writes counts the 32 bytes of
+/// a row on disk, so that it holds for an archive of very short lines.
+#[test]
+fn the_disk_estimate_of_deduplication_holds_for_short_lines() {
+    let scratch = Scratch::new("short");
+    // 400,000 distinct lines of 1 to 6 digits, 6.7 bytes each with the line end.
+    let lines = 400_000u64;
+    let content: String = (0..lines).map(|line| format!("{line}\n")).collect();
+    let path = scratch.write("short.zip", &archive(&[("short.log", content.as_bytes())]));
+    let spill = scratch.path("work/dedup");
+    let mut budget = budget(None, None);
+    let mut input = ZipInput::open(&path, &ZipInputSettings::default(), &budget).unwrap();
+    let selected = input.selected_bytes();
+    assert_eq!(selected.unpacked, content.len() as u64);
+    let estimate = selected.dedup_disk_bytes();
+    // The unpacked bytes, and 32 bytes for every 6 of them.
+    assert_eq!(estimate, selected.unpacked + 32 * (selected.unpacked / 6));
+
+    // All but 50,000 texts go to disk.
+    input.spill_into(&spill, Some(50_000)).unwrap();
+    let mut rows = 0;
+    let mut most = 0;
+    for batch in input.batches(&mut budget) {
+        rows += batch.unwrap().len() as u64;
+        most = most.max(bytes_below(&spill));
+    }
+    for chunk in input.occurrence_counts() {
+        chunk.unwrap();
+        most = most.max(bytes_below(&spill));
+    }
+    assert_eq!(rows, lines);
+    let report = input.disk_dedup().expect("the read went on on disk");
+    assert_eq!(report.spilled_records, lines - report.set_texts);
+    // The partitions when they were complete, and the keys of the rows of the read.
+    let written = report.spilled_bytes + 16 * report.set_texts;
+    assert!(
+        report.spilled_bytes > selected.unpacked,
+        "the case: more is written than the archive unpacks to: {report:?}"
+    );
+    assert!(
+        written <= estimate && most <= estimate,
+        "{written} bytes were written, {most} seen at once, {estimate} estimated"
+    );
+    drop(input);
+    assert!(!spill.exists());
+}

@@ -17,6 +17,12 @@
 //! JSON document: the result, or the envelope. When standard output itself is closed
 //! the envelope cannot be written and only the exit code and standard error say so.
 //!
+//! `l2d baseline score` on a zip archive can be refused long after its first row (a
+//! partition of deduplication on disk whose keys do not fit, task 1.20). It ends the
+//! document it began ([`JsonOut::cut_off`]): the rows written so far, then
+//! `"incomplete":true` in place of the fields of a finished run, and the envelope on
+//! the next line. Standard output then holds whole documents only.
+//!
 //! `l2d ingest` on a zip archive with a damaged entry is the one case of a whole result
 //! followed by a failure (requirement 13.6): the report with the records of the other
 //! entries is printed to its end, then the command fails. With `--json` standard output
@@ -105,6 +111,8 @@ pub struct JsonOut<W: Write> {
     out: W,
     fields: usize,
     elements: usize,
+    /// Whether a list was started and not ended.
+    in_list: bool,
 }
 
 impl<W: Write> JsonOut<W> {
@@ -116,6 +124,7 @@ impl<W: Write> JsonOut<W> {
             out,
             fields: 0,
             elements: 0,
+            in_list: false,
         })
     }
 
@@ -140,6 +149,7 @@ impl<W: Write> JsonOut<W> {
     pub fn begin_list(&mut self, key: &str) -> io::Result<()> {
         self.key(key)?;
         self.elements = 0;
+        self.in_list = true;
         self.out.write_all(b"[")
     }
 
@@ -155,7 +165,20 @@ impl<W: Write> JsonOut<W> {
 
     /// Ends the list that was started.
     pub fn end_list(&mut self) -> io::Result<()> {
+        self.in_list = false;
         self.out.write_all(b"]")
+    }
+
+    /// Ends the object of a run that failed after it began its output, so that what
+    /// was written is a whole document: the list that was started is ended, the field
+    /// `incomplete` says that the fields of a finished run are missing, and the
+    /// object and the line end. The error envelope follows on the next line.
+    pub fn cut_off(mut self) -> io::Result<()> {
+        if self.in_list {
+            self.end_list()?;
+        }
+        self.field("incomplete", &true)?;
+        self.end()
     }
 
     /// Ends the object and the line, and flushes.
@@ -305,6 +328,28 @@ mod tests {
         json.field("count", &2).unwrap();
         json.end().unwrap();
         assert!(!DOCUMENT_OPEN.load(Ordering::Relaxed));
+
+        // A document that is cut off inside a list, or between fields, is whole.
+        let mut cut = Vec::new();
+        let mut json = JsonOut::begin(&mut cut).unwrap();
+        json.field("command", "x").unwrap();
+        json.begin_list("rows").unwrap();
+        json.element(&1).unwrap();
+        json.cut_off().unwrap();
+        assert!(!DOCUMENT_OPEN.load(Ordering::Relaxed));
+        assert_eq!(
+            String::from_utf8(cut).unwrap(),
+            "{\"command\":\"x\",\"rows\":[1],\"incomplete\":true}\n"
+        );
+        let mut cut = Vec::new();
+        let mut json = JsonOut::begin(&mut cut).unwrap();
+        json.begin_list("rows").unwrap();
+        json.end_list().unwrap();
+        json.cut_off().unwrap();
+        assert_eq!(
+            String::from_utf8(cut).unwrap(),
+            "{\"rows\":[],\"incomplete\":true}\n"
+        );
         let text = String::from_utf8(bytes).unwrap();
         assert_eq!(
             text,

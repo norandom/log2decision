@@ -2,6 +2,7 @@
 
 use l2d_core::L2dError;
 
+pub mod archive_run;
 pub mod assess;
 pub mod baseline;
 pub mod baseline_archive;

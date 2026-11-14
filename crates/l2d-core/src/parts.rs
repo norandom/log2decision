@@ -122,14 +122,33 @@ pub fn free_disk_bytes(dir: &Path) -> Result<u64, L2dError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkDir {
     path: PathBuf,
+    /// The directories this value made, the deepest first: the directory itself and
+    /// those above it that were absent.
+    created: Vec<PathBuf>,
 }
 
 impl WorkDir {
     /// Creates the directory at `path`, with the directories above it.
     ///
     /// [`L2dError::Refused`] when it exists and holds anything, or is not a directory:
-    /// nothing in it is touched.
+    /// nothing in it is touched. [`L2dError::InvalidInput`] when a file is where a
+    /// directory above it would have to be.
     pub fn create(path: &Path) -> Result<Self, L2dError> {
+        if let Some(file) = path.ancestors().skip(1).find(|above| above.is_file()) {
+            return Err(L2dError::InvalidInput {
+                detail: format!(
+                    "the work directory {} cannot be made: {} is a file, not a directory (give \
+                     another `--work-dir`)",
+                    path.display(),
+                    file.display()
+                ),
+            });
+        }
+        let created: Vec<PathBuf> = path
+            .ancestors()
+            .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+            .map(Path::to_path_buf)
+            .collect();
         if path.exists() {
             let holds_something = match std::fs::read_dir(path) {
                 Ok(mut entries) => entries.next().is_some(),
@@ -148,12 +167,28 @@ impl WorkDir {
             .map_err(|error| failed("creating the work directory", path, &error))?;
         Ok(Self {
             path: path.to_path_buf(),
+            created,
         })
     }
 
     /// Where the directory is.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Removes the directories [`WorkDir::create`] made for this value, as far as they
+    /// are empty: the directory itself when it was absent, then those above it that
+    /// were. A directory that holds something stays, and so does everything above it;
+    /// a directory that was there before is never removed.
+    ///
+    /// For a run that leaves nothing in its directory, or is refused before it wrote
+    /// anything.
+    pub fn remove_created(&self) {
+        for dir in &self.created {
+            if std::fs::remove_dir(dir).is_err() {
+                break;
+            }
+        }
     }
 
     /// Checks the free space of the volume against what the run is estimated to need:

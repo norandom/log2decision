@@ -38,10 +38,19 @@
 //!
 //! # Memory
 //!
-//! Counted from the moment a directory is named ([`WRITERS_HELD`]): one buffer per
-//! partition and one for each of the two other files. A partition's set is asked for
-//! before it is built, and refused when it does not fit; with [`PARTITIONS`] partitions
-//! a read can go on to that many times the texts one set can hold.
+//! Counted from the moment a directory is named ([`SPILL_HELD`]): one buffer per
+//! partition and one for each of the two other files, and the chunks the occurrence
+//! counts are read out in. A partition's set must fit what the memory limit leaves
+//! beside what is held for the archive: a partition that outgrows that room is refused
+//! as soon as it does, while the archive is read, and not after its last entry. With
+//! [`PARTITIONS`] partitions a read can go on to that many times the texts one set can
+//! hold.
+//!
+//! # Disk
+//!
+//! A row on disk takes [`SPILLED_ROW_BYTES`] beside its text. How many rows an archive
+//! has is not known before it is read, so [`estimated_disk_bytes`] takes a record to be
+//! [`ESTIMATED_RECORD_BYTES`] long: an estimate, not a bound.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -51,6 +60,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::L2dError;
 use crate::memory::exact;
+use crate::zip_input::table_bytes;
 
 /// The number of partition files.
 pub(crate) const PARTITIONS: usize = 64;
@@ -61,9 +71,45 @@ const BUFFER_BYTES: usize = 32 * 1024;
 pub(crate) const WRITERS_HELD: u64 = ((PARTITIONS + 2) * BUFFER_BYTES) as u64;
 /// Keys or counts read at once when the occurrence counts are read out.
 const COUNT_CHUNK_ROWS: usize = 65_536;
+/// What reading the occurrence counts out holds: a chunk of keys (16 bytes each) with
+/// the chunk of counts made from it (4 bytes each), and the buffers of the two files
+/// being read.
+const COUNTS_HELD: u64 = (COUNT_CHUNK_ROWS * (16 + 4) + 2 * BUFFER_BYTES) as u64;
+/// Everything deduplication on disk holds in memory, from the moment its directory is
+/// named to the end of the read.
+pub(crate) const SPILL_HELD: u64 = WRITERS_HELD + COUNTS_HELD;
 
 /// Key, position, occurrences, text length.
 const RECORD_HEADER: usize = 16 + 8 + 4 + 4;
+/// What a row on disk takes beside its text.
+pub(crate) const SPILLED_ROW_BYTES: u64 = RECORD_HEADER as u64;
+/// The length a record is taken to have, line end included, where the rows of an
+/// archive are estimated from its unpacked bytes: shorter than a line of any log, so
+/// that the estimate is high. The archive of the review of task 1.17 that the estimate
+/// was too low for has records of 6.9 bytes on average.
+pub(crate) const ESTIMATED_RECORD_BYTES: u64 = 6;
+
+/// What deduplication on disk is estimated to write for entries of `unpacked` bytes:
+/// every text once (a text that is not in the set in memory is written once per batch
+/// it occurs in, never more often than it occurs), and [`SPILLED_ROW_BYTES`] for every
+/// row, with the rows estimated from [`ESTIMATED_RECORD_BYTES`].
+pub(crate) fn estimated_disk_bytes(unpacked: u64) -> u64 {
+    let rows = unpacked / ESTIMATED_RECORD_BYTES;
+    unpacked.saturating_add(rows.saturating_mul(SPILLED_ROW_BYTES))
+}
+
+/// The refusal of a partition whose keys do not fit the room.
+fn partition_refused(index: usize, records: u64, needed: u64, room: u64) -> L2dError {
+    L2dError::Refused {
+        reason: format!(
+            "deduplication on disk: partition {index} of {PARTITIONS} holds {records} rows, and \
+             the set of their keys needs {}, but {} is left of the memory limit beside what is \
+             held for the archive",
+            exact(needed),
+            exact(room),
+        ),
+    }
+}
 /// Position, occurrences, text length.
 const DISTINCT_HEADER: usize = 8 + 4 + 4;
 
@@ -209,12 +255,18 @@ impl Spill {
     }
 
     /// Writes a row whose text is not in the frozen set to its partition.
+    ///
+    /// `room` is the memory the set of one partition may take. [`L2dError::Refused`]
+    /// when the keys of the partition's rows, this one included, no longer fit it: the
+    /// partition could not be deduplicated after the read, so the read stops here. The
+    /// message states the memory needed and available.
     pub(crate) fn spill(
         &mut self,
         key: &[u8; 16],
         position: u64,
         occurrences: u32,
         text: &str,
+        room: u64,
     ) -> Result<(), L2dError> {
         let index = usize::from(key[0]) % PARTITIONS;
         let not_frozen = || L2dError::Runtime {
@@ -241,6 +293,15 @@ impl Spill {
         let Some(writer) = &mut partition.writer else {
             return Err(not_frozen());
         };
+        let needed = table_bytes(partition.records as usize + 1);
+        if needed > room {
+            return Err(partition_refused(
+                index,
+                partition.records + 1,
+                needed,
+                room,
+            ));
+        }
         let mut header = [0u8; RECORD_HEADER];
         header[..16].copy_from_slice(key);
         header[16..24].copy_from_slice(&position.to_le_bytes());
@@ -259,18 +320,14 @@ impl Spill {
     /// Deduplicates every partition (module documentation): `distinct-NN.bin` takes
     /// the place of `partition-NN.bin`.
     ///
-    /// `room` is the memory the set of one partition may take, `table_bytes` what a
-    /// set of that many keys takes. [`L2dError::Refused`] when a partition's set does
-    /// not fit; the message states the memory needed and available.
-    pub(crate) fn deduplicate(
-        &mut self,
-        room: u64,
-        table_bytes: impl Fn(usize) -> u64,
-    ) -> Result<(), L2dError> {
+    /// `room` is the memory the set of one partition may take. [`L2dError::Refused`]
+    /// when a partition's set does not fit (the room can have shrunk since its last
+    /// row was written); the message states the memory needed and available.
+    pub(crate) fn deduplicate(&mut self, room: u64) -> Result<(), L2dError> {
         let Some(mut partitions) = self.partitions.take() else {
             return Ok(());
         };
-        let result = self.deduplicate_partitions(&mut partitions, room, table_bytes);
+        let result = self.deduplicate_partitions(&mut partitions, room);
         self.partitions = Some(partitions);
         result
     }
@@ -279,7 +336,6 @@ impl Spill {
         &mut self,
         partitions: &mut [Partition],
         room: u64,
-        table_bytes: impl Fn(usize) -> u64,
     ) -> Result<(), L2dError> {
         for (index, partition) in partitions.iter_mut().enumerate() {
             let Some(mut writer) = partition.writer.take() else {
@@ -292,16 +348,7 @@ impl Spill {
             drop(writer);
 
             let mut totals: HashMap<[u8; 16], u32> = HashMap::new();
-            let refused = |needed: u64| L2dError::Refused {
-                reason: format!(
-                    "deduplication on disk: partition {index} of {PARTITIONS} holds {} rows, \
-                     and the set of their keys needs {}, but {} is left of the memory limit \
-                     beside what is held for the archive",
-                    partition.records,
-                    exact(needed),
-                    exact(room),
-                ),
-            };
+            let refused = |needed: u64| partition_refused(index, partition.records, needed, room);
             let needed = table_bytes(partition.records as usize);
             if needed > room {
                 return Err(refused(needed));
