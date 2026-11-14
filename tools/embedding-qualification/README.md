@@ -47,7 +47,37 @@ pwsh -NoProfile -File run_all.ps1 `
 The pictures go to `docs/images/2026-11-14-embedding-qualification/`. Every script uses
 the seed in `eq.py`; `q3_structure.py` takes about four minutes (UMAP twice, k-means).
 
-`q5_information.py` is run by itself and is not part of `run_all.ps1`. It gives the
+## Another encoder (task 2.16)
+
+The scripts qualify any encoder whose vectors are in the layout of step 1. Three options
+of every script (and of `run_all.ps1`) say how that encoder reads a text and where the
+vectors come from; without them a run is the published model's, as before:
+
+| Option | `run_all.ps1` | Meaning |
+|---|---|---|
+| `--input payload` or `whole` | `-InputMode` | `payload`: what follows the first `?` or line feed (the published model). `whole`: the whole line |
+| `--input-bytes N` | `-InputBytes` | the bytes the encoder reads at most (256; 1024 for the encoders of task 2.16) |
+| `--source "..."` | `-Source` | the words after "vectors" in legends and log lines (`from the NPU`) |
+
+With `whole`, the analysis set stays the published encoder's (the first text of every
+distinct non-empty payload, 12,078 texts), so the figures compare like with like; the
+folding counts of `q1_collapse.py` are over all 25,608 texts, whose whole lines are all
+distinct. `-Information` adds `q5_information.py` to the run.
+
+```powershell
+$v = 'D:\BuildArtifacts\log2decision\task-2.16\vectors\entropy-s0-int8'
+$q = 'D:\BuildArtifacts\log2decision\task-2.16\qualification\entropy-s0-int8'
+pwsh -NoProfile -File run_all.ps1 -Vectors $v -Record "$v\record.json" -Logs $q -Out $q `
+    -InputMode whole -InputBytes 1024 -Source 'in 8 bits (Python reference)' -Information
+# The comparison table and the pictures of docs/2026-11-14-hierarchical-encoder-gate.md
+uv run python hg_report.py --root D:\BuildArtifacts\log2decision\task-2.16 `
+    --out ..\..\docs\images\2026-11-14-hierarchical-encoder-gate
+```
+
+## The information view
+
+`q5_information.py` is run by itself and is not part of `run_all.ps1` unless
+`-Information` is given. It gives the
 information view of the
 [research log](../../docs/2026-11-14-research-log-encoder-direction.md): the variance
 spectrum beside log2ml's encoders, its Shannon entropy, and the feature ablation.

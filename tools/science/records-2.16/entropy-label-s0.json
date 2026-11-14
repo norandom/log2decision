@@ -1,0 +1,379 @@
+{
+ "task": "npu-log-decision 2.16",
+ "variant": "entropy-label-s0",
+ "data": {
+  "path": "D:\\Source\\log2decision\\data\\csic-2010\\csic_database.csv",
+  "sha256": "c420f0bc0464376de75b6c419a0ac226fe69fe12c8ac4908843273721e44e637",
+  "records": 61065,
+  "distinct_texts": 25608
+ },
+ "split": {
+  "name": "split17",
+  "fold": 0,
+  "held_out_mixed_paths": [
+   "/tienda1/publico/anadir.jsp",
+   "/tienda1/publico/entrar.jsp",
+   "/tienda1/publico/vaciar.jsp"
+  ],
+  "held_out_paths": 3,
+  "held_out_logs": 4783,
+  "fitting_logs": 20825
+ },
+ "packages": {
+  "numpy": "2.5.4",
+  "torch": "2.15.0",
+  "onnx": "1.23.2",
+  "onnxruntime": "1.31.1",
+  "scikit-learn": "1.9.1",
+  "scipy": "1.18.1"
+ },
+ "python": "3.12.10",
+ "host": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+ "settings": {
+  "patcher": "entropy-jump",
+  "patcher_setting": 0.43557290616263344,
+  "objective": "contrastive",
+  "label_weight": 0.5,
+  "seed": 0,
+  "byte_model_seed": 0,
+  "epochs": 12,
+  "batch": 256,
+  "lr": 0.001,
+  "weight_decay": 0.01,
+  "optimizer": "AdamW, one-cycle schedule (10 % warm-up)",
+  "temperature": 0.1,
+  "mask_rate": 0.3,
+  "threads": 6,
+  "device": "cpu",
+  "routing": "keep (the whole line)",
+  "input_bytes": 1024,
+  "patch_limit": 128,
+  "strides": [
+   1,
+   2,
+   2,
+   1
+  ],
+  "width": 192,
+  "validation": "loss only; the last epoch is kept",
+  "validation_mixed_paths": [
+   "/tienda1/miembros/editar.jsp"
+  ],
+  "validation_logs": 5112,
+  "training_logs": 15713,
+  "calibration_texts": 512
+ },
+ "training": {
+  "history": [
+   {
+    "epoch": 1,
+    "train": {
+     "objective": 5.480452345685,
+     "length": 0.1569612259509334,
+     "label": 0.6817379650673314
+    },
+    "validation": {
+     "objective": 5.838641949755858,
+     "length": 0.05060736974191171,
+     "label": 0.7282662838464239
+    },
+    "seconds": 112.1184136000229
+   },
+   {
+    "epoch": 2,
+    "train": {
+     "objective": 3.846111314768461,
+     "length": 0.09153653837610974,
+     "label": 0.5908371596259587
+    },
+    "validation": {
+     "objective": 3.90381312384292,
+     "length": 0.09399818423377562,
+     "label": 0.6471897440150683
+    },
+    "seconds": 119.36327879998134
+   },
+   {
+    "epoch": 3,
+    "train": {
+     "objective": 2.563403657897913,
+     "length": 0.05946599416425756,
+     "label": 0.5247288170090261
+    },
+    "validation": {
+     "objective": 2.979430533210996,
+     "length": 0.0647934684158246,
+     "label": 0.6207549490897402
+    },
+    "seconds": 128.60061070002848
+   },
+   {
+    "epoch": 4,
+    "train": {
+     "objective": 2.0738489249187615,
+     "length": 0.04682609567632425,
+     "label": 0.502146493995591
+    },
+    "validation": {
+     "objective": 2.9754546234305477,
+     "length": 0.11502668990845412,
+     "label": 0.6249369198809114
+    },
+    "seconds": 103.13422379997792
+   },
+   {
+    "epoch": 5,
+    "train": {
+     "objective": 1.802756830440141,
+     "length": 0.03853610892806382,
+     "label": 0.48216975069263
+    },
+    "validation": {
+     "objective": 2.693167375380258,
+     "length": 0.08594691317458528,
+     "label": 0.6522318878632289
+    },
+    "seconds": 93.53736519999802
+   },
+   {
+    "epoch": 6,
+    "train": {
+     "objective": 1.626071991228112,
+     "length": 0.03474364994883382,
+     "label": 0.4717709716436235
+    },
+    "validation": {
+     "objective": 2.7224595870863477,
+     "length": 0.07883988052070234,
+     "label": 0.7671582083245492
+    },
+    "seconds": 84.82511219999287
+   },
+   {
+    "epoch": 7,
+    "train": {
+     "objective": 1.5339175057291325,
+     "length": 0.032041766650963845,
+     "label": 0.4619715308267565
+    },
+    "validation": {
+     "objective": 2.797700323409318,
+     "length": 0.10222008989916907,
+     "label": 0.6805072245865781
+    },
+    "seconds": 87.71374239999568
+   },
+   {
+    "epoch": 8,
+    "train": {
+     "objective": 1.4426307275901735,
+     "length": 0.030084989242569114,
+     "label": 0.4483694764754944
+    },
+    "validation": {
+     "objective": 2.690846492053944,
+     "length": 0.09750394297527595,
+     "label": 0.685411217312018
+    },
+    "seconds": 76.39984699996421
+   },
+   {
+    "epoch": 9,
+    "train": {
+     "objective": 1.3821209930966951,
+     "length": 0.028673181294885643,
+     "label": 0.4446852073203309
+    },
+    "validation": {
+     "objective": 2.796009554969313,
+     "length": 0.11468265727249809,
+     "label": 0.8093224825287976
+    },
+    "seconds": 75.664895599999
+   },
+   {
+    "epoch": 10,
+    "train": {
+     "objective": 1.3498319181685519,
+     "length": 0.02814068196191203,
+     "label": 0.43888432017935836
+    },
+    "validation": {
+     "objective": 2.804724133117285,
+     "length": 0.11406523735059865,
+     "label": 0.7294059958489661
+    },
+    "seconds": 86.75747489999048
+   },
+   {
+    "epoch": 11,
+    "train": {
+     "objective": 1.3162702024115769,
+     "length": 0.028900563555671766,
+     "label": 0.4316659579887462
+    },
+    "validation": {
+     "objective": 2.7406478221520945,
+     "length": 0.11216091679581128,
+     "label": 0.7303726557170002
+    },
+    "seconds": 91.05129720002878
+   },
+   {
+    "epoch": 12,
+    "train": {
+     "objective": 1.312792340958664,
+     "length": 0.028353771218405426,
+     "label": 0.43104199771247464
+    },
+    "validation": {
+     "objective": 2.733154744282948,
+     "length": 0.11251481264357416,
+     "label": 0.7459130398200384
+    },
+    "seconds": 97.15195570001379
+   }
+  ],
+  "chosen_epoch": 12,
+  "seconds": 1156.3182170999935
+ },
+ "parameters": {
+  "line_graph": 670592,
+  "graph": 329344,
+  "byte_table": 16384
+ },
+ "files": {
+  "line_f32_sha256": "0d002a7cec024b950084a8df404b7d877f98f2f1b31a57bd6ae497be4112fcdb",
+  "line_int8_sha256": "b0c463ea93b9724d81925969657a7c36424edd16dc170014b7985dfd784d9524",
+  "line_int8_bytes": 680488
+ },
+ "raw_length_p01_p50_p99_f32": [
+  0.7001491224765778,
+  1.0335721969604492,
+  1.6692807221412658
+ ],
+ "triage_f32": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.7279322621733192,
+    "average_precision": 0.860737139136009,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.7064701266712674,
+     "/tienda1/publico/entrar.jsp": 0.9723926380368098,
+     "/tienda1/publico/vaciar.jsp": 0.9969325153374233
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.734043475591977,
+    "average_precision": 0.8336092237907775,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.70789162254214,
+     "/tienda1/publico/entrar.jsp": 0.4294478527607362,
+     "/tienda1/publico/vaciar.jsp": 0.7254601226993865
+    }
+   },
+   "head_penalty": 1.0
+  },
+  "cv5": {
+   "linear_head_pooled": 0.6924990285027193,
+   "knn_k11_pooled": 0.6875002462420421,
+   "linear_head_mean_of_folds": 0.7530388099625969,
+   "knn_k11_mean_of_folds": 0.690868833617061,
+   "per_fold": [
+    {
+     "fold": 0,
+     "linear_head": 0.7508128345487961,
+     "knn_k11": 0.7428353099018207
+    },
+    {
+     "fold": 1,
+     "linear_head": 0.6905709779351084,
+     "knn_k11": 0.6157479578845069
+    },
+    {
+     "fold": 2,
+     "linear_head": 0.6985096959560699,
+     "knn_k11": 0.6293872963944466
+    },
+    {
+     "fold": 3,
+     "linear_head": 0.9198943880319355,
+     "knn_k11": 0.7593336756840556
+    },
+    {
+     "fold": 4,
+     "linear_head": 0.7054061533410739,
+     "knn_k11": 0.7070399282204745
+    }
+   ]
+  }
+ },
+ "raw_length_p01_p50_p99_int8": [
+  0.725752044916153,
+  1.0170139074325562,
+  1.5898502600193023
+ ],
+ "triage_int8": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.6289547941316391,
+    "average_precision": 0.7574378172774876,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.6472854284641227,
+     "/tienda1/publico/entrar.jsp": 0.9386503067484663,
+     "/tienda1/publico/vaciar.jsp": 0.05828220858895706
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.6141662062827066,
+    "average_precision": 0.7257179965373695,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.5942713243717788,
+     "/tienda1/publico/entrar.jsp": 0.7101226993865031,
+     "/tienda1/publico/vaciar.jsp": 0.4938650306748466
+    }
+   },
+   "head_penalty": 100.0
+  },
+  "cv5": {
+   "linear_head_pooled": 0.615276763598543,
+   "knn_k11_pooled": 0.6033840551382862,
+   "linear_head_mean_of_folds": 0.6651957516756735,
+   "knn_k11_mean_of_folds": 0.608880481568753,
+   "per_fold": [
+    {
+     "fold": 0,
+     "linear_head": 0.7315769583316035,
+     "knn_k11": 0.7150888055516565
+    },
+    {
+     "fold": 1,
+     "linear_head": 0.6372163841593189,
+     "knn_k11": 0.626975436248534
+    },
+    {
+     "fold": 2,
+     "linear_head": 0.626402538557799,
+     "knn_k11": 0.6185511798382074
+    },
+    {
+     "fold": 3,
+     "linear_head": 0.682907235873188,
+     "knn_k11": 0.4849624060150376
+    },
+    {
+     "fold": 4,
+     "linear_head": 0.6478756414564575,
+     "knn_k11": 0.5988245801903292
+    }
+   ]
+  }
+ },
+ "float_against_8bit_cosine_min_p01_median": [
+  -0.5724093914031982,
+  -0.27121594548225403,
+  0.27840274572372437
+ ],
+ "cv5_note": "the encoder was fitted once, on the training part of split17; in the cv5 folds the scorers hold no label of the held-out fold, but the encoder has seen unlabelled texts of four of the five large endpoints; this variant also saw their labels",
+ "seconds": 1830.4617879000143
+}

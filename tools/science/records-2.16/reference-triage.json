@@ -1,0 +1,99 @@
+{
+ "published_npu_vectors": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.9396843300646072,
+    "average_precision": 0.9747139768657371,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.9327934972150198,
+     "/tienda1/publico/entrar.jsp": 0.9969325153374233,
+     "/tienda1/publico/vaciar.jsp": 0.9969325153374233
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.5508607261789666,
+    "average_precision": 0.6728442106084611,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.5492420694023443,
+     "/tienda1/publico/entrar.jsp": 0.9969325153374233,
+     "/tienda1/publico/vaciar.jsp": 0.9969325153374233
+    }
+   },
+   "head_penalty": 1.0
+  }
+ },
+ "random_unit_vectors": {
+  "split17": {
+   "linear_head": {
+    "roc_auc": 0.5003767475407824,
+    "average_precision": 0.6509445934292493,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.5003035933593626,
+     "/tienda1/publico/entrar.jsp": 0.9263803680981595,
+     "/tienda1/publico/vaciar.jsp": 0.3282208588957055
+    }
+   },
+   "knn_k11": {
+    "roc_auc": 0.5074396129705507,
+    "average_precision": 0.6529664469662109,
+    "per_group": {
+     "/tienda1/publico/anadir.jsp": 0.5096730903268668,
+     "/tienda1/publico/entrar.jsp": 0.8773006134969326,
+     "/tienda1/publico/vaciar.jsp": 0.3696319018404908
+    }
+   },
+   "head_penalty": 100.0
+  },
+  "cv5": {
+   "linear_head_pooled": 0.49386603106091326,
+   "knn_k11_pooled": 0.5055812967812804,
+   "linear_head_mean_of_folds": 0.4981856948348183,
+   "knn_k11_mean_of_folds": 0.5061628177065276,
+   "per_fold": [
+    {
+     "fold": 0,
+     "linear_head": 0.5044373122358782,
+     "knn_k11": 0.5047336821899285
+    },
+    {
+     "fold": 1,
+     "linear_head": 0.49353313127090304,
+     "knn_k11": 0.508748724101985
+    },
+    {
+     "fold": 2,
+     "linear_head": 0.4998215948164876,
+     "knn_k11": 0.499365887772425
+    },
+    {
+     "fold": 3,
+     "linear_head": 0.49303910549569796,
+     "knn_k11": 0.5078735175567785
+    },
+    {
+     "fold": 4,
+     "linear_head": 0.5000973303551247,
+     "knn_k11": 0.5100922769115209
+    }
+   ]
+  }
+ },
+ "baseline": {
+  "strip": {
+   "roc_auc": 0.988927957583291,
+   "per_group": {
+    "/tienda1/publico/anadir.jsp": 0.987795461010706,
+    "/tienda1/publico/entrar.jsp": 0.9969325153374233,
+    "/tienda1/publico/vaciar.jsp": 0.9969325153374233
+   }
+  },
+  "keep": {
+   "roc_auc": 0.9962037505946626,
+   "per_group": {
+    "/tienda1/publico/anadir.jsp": 0.9960900269259164,
+    "/tienda1/publico/entrar.jsp": 1.0,
+    "/tienda1/publico/vaciar.jsp": 1.0
+   }
+  }
+ }
+}

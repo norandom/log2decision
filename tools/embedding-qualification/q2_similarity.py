@@ -127,8 +127,11 @@ def main() -> None:
     empties = [i for i, row in enumerate(rows) if row["empty"]]
     same = all(np.array_equal(probes[empties[0]], probes[i]) for i in empties)
     print(f"probes with an empty input: {[rows[i]['name'] for i in empties]}; all the same vector: {same}")
-    csic_empty = csic.vectors[np.flatnonzero(csic.empty)[0]]
-    print(f"the same vector as CSIC's texts with an empty input: {bool(np.array_equal(csic_empty, probes[empties[0]]))}")
+    if csic.empty.any():
+        csic_empty = csic.vectors[np.flatnonzero(csic.empty)[0]]
+        print(f"the same vector as CSIC's texts with an empty input: {bool(np.array_equal(csic_empty, probes[empties[0]]))}")
+    else:
+        print("no CSIC text has an empty input")
 
     kinds = [kind for kind in ORDER if kind in cosines]
     fig, ax = plt.subplots(figsize=(8.6, 5.6))

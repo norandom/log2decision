@@ -19,6 +19,13 @@ import numpy as np
 
 SEED = 20261114
 INPUT_BYTES = 256
+# How the encoder under test reads a text, set by `arguments()`: `payload` (the published
+# model of task 2.1: what follows the first `?` or line feed, cut at 256 bytes) or `whole`
+# (the whole line, cut at `--input-bytes`; the encoders of task 2.16).
+INPUT_MODE = "payload"
+INPUT_LIMIT = INPUT_BYTES
+# Where the vectors come from, for the legends and the log lines.
+SOURCE = "from the NPU"
 
 # Colours: one fixed categorical order (blue, orange, aqua, yellow, magenta, green,
 # violet, red), grey for "other" and for the random baseline.
@@ -71,19 +78,32 @@ def save(fig, out: Path, name: str) -> None:
 
 
 def arguments(description: str) -> argparse.Namespace:
+    global INPUT_MODE, INPUT_LIMIT, SOURCE
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--vectors", required=True, type=Path, help="directory of the Rust export")
     parser.add_argument("--record", required=True, type=Path, help="record.json of the published model")
     parser.add_argument("--out", required=True, type=Path, help="directory for the PNG files")
-    return parser.parse_args()
+    parser.add_argument("--input", choices=["payload", "whole"], default="payload", help="what the encoder reads of a text")
+    parser.add_argument("--input-bytes", type=int, default=INPUT_BYTES, help="bytes the encoder reads at most")
+    parser.add_argument("--source", default=SOURCE, help='where the vectors come from, for legends ("from the NPU")')
+    args = parser.parse_args()
+    INPUT_MODE, INPUT_LIMIT, SOURCE = args.input, args.input_bytes, args.source
+    return args
 
 
-def encoder_input(text: str) -> bytes:
+def payload_input(text: str, limit: int = INPUT_BYTES) -> bytes:
     """The bytes the encoder reads in `payload` mode: what follows the first `?` or line
     feed, cut at 256 bytes (the rule of `l2d_core::adapters::csic2010::split_routing`)."""
     raw = text.encode("utf-8")
     cuts = [at for at in (raw.find(b"?"), raw.find(b"\n")) if at >= 0]
-    return raw[min(cuts) + 1 :][:INPUT_BYTES] if cuts else b""
+    return raw[min(cuts) + 1 :][:limit] if cuts else b""
+
+
+def encoder_input(text: str) -> bytes:
+    """The bytes the encoder under test reads of a text (`--input`, `--input-bytes`)."""
+    if INPUT_MODE == "whole":
+        return text.encode("utf-8")[:INPUT_LIMIT]
+    return payload_input(text, INPUT_LIMIT)
 
 
 @dataclass
@@ -95,7 +115,11 @@ class Csic:
     split: np.ndarray  # "training" | "validation" | "held-out"
     inputs: list[bytes]
     empty: np.ndarray  # bool
-    keep: np.ndarray  # indices: first text of every distinct non-empty input
+    # The analysis set, as indices. `payload`: the first text of every distinct non-empty
+    # input. `whole`: the same texts (the first text of every distinct non-empty payload of
+    # at most 256 bytes), so that an encoder that reads the whole line is measured on the
+    # texts the published encoder was measured on; `inputs` are then the whole lines.
+    keep: np.ndarray
     record: dict
 
 
@@ -135,8 +159,9 @@ def load_csic(vectors_dir: Path, record_path: Path) -> Csic:
     empty = np.array([row["empty"] for row in rows])
     seen: set[bytes] = set()
     keep = []
-    for i, data in enumerate(inputs):
-        if not empty[i] and data not in seen:
+    keys = inputs if INPUT_MODE == "payload" else [payload_input(row["text"]) for row in rows]
+    for i, data in enumerate(keys):
+        if data and not empty[i] and data not in seen:
             seen.add(data)
             keep.append(i)
     return Csic(

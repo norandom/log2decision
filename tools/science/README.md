@@ -63,10 +63,53 @@ uv run python publish.py $out D:\Source\log2decision\models\science-2.1 --run sp
 An encoder run takes 5 to 12 minutes on the CPU with 4 to 8 threads (`-Threads`), depending on what else the
 machine does. A run whose record exists in `$out` is skipped by `run_all.ps1`.
 
+## Hierarchical encoder gate (task 2.16)
+
+A second spike in the same environment: bytes, then patches, then one vector per log
+line; three ways to cut patches (fixed stride, delimiters, entropy of a next-byte model)
+under one self-supervised objective, and a flat control. The result is in
+[`docs/2026-11-14-hierarchical-encoder-gate.md`](../../docs/2026-11-14-hierarchical-encoder-gate.md).
+Everything is written below `D:\BuildArtifacts\log2decision\task-2.16` (`L2D_HG_DIR`
+names another place); the AIT sample is read from the zip archive without unpacking it.
+
+```powershell
+$env:PYTHONUTF8 = '1'
+# 1. The byte model (causal convolutions, next-byte prediction, no label): about 6 minutes
+uv run python hg_run.py bytelm --seed 0
+# 2. Byte features and entropies, float and 8-bit; the patchers' settings for an equal
+#    budget; patch statistics on CSIC and on the AIT sample: about 5 minutes
+uv run python hg_run.py features --seed 0
+# 3. One variant: trains the line model, exports it, quantizes it, writes the vectors
+#    (float and 8-bit) in the layout the qualification scripts read, and scores them
+#    with the science gate's linear head and neighbour ratio: 10 to 40 minutes each
+uv run python hg_run.py variant --name fixed     --patcher fixed
+uv run python hg_run.py variant --name delimiter --patcher delimiter
+uv run python hg_run.py variant --name entropy   --patcher entropy-jump
+uv run python hg_run.py variant --name flat      --patcher flat
+uv run python hg_run.py variant --name entropy-label  --patcher entropy-jump --label-weight 0.5
+uv run python hg_run.py variant --name entropy-jitter --patcher entropy-jump --boundary-drop 0.15
+# (also fixed-jitter and delimiter-jitter, and --seed 1 for fixed, delimiter, entropy)
+# Not run for the gate: --patcher entropy-global, --objective masked
+# The same through a wrapper that keeps the log and starts a run again that the host
+# stopped (it goes on from the last epoch, checkpoint.pt in the variant's directory):
+./hg_variant.ps1 -Name entropy-jitter -Patcher entropy-jump -More '--boundary-drop', '0.15'
+# 4. Reference rows: the published encoder's vectors, random unit vectors, the baseline
+uv run python hg_run.py reference
+# 5. The files of the NPU test (crates\l2d-encoder\tests\npu_hierarchical_gate.rs), and,
+#    after that test ran, the comparison of its vectors with the 8-bit reference
+uv run python hg_run.py npu-fixture --variant entropy-s0
+uv run python hg_run.py npu-compare --variant entropy-s0
+```
+
+The qualification of the vectors and the comparison table are in
+`tools/embedding-qualification` (`run_all.ps1 -InputMode whole`, `hg_report.py`).
+
 ## Files
 
 | File | Content |
 | --- | --- |
+| `hg.py` | Task 2.16: the byte model, the three patchers, the pooling, the line model and the flat control, the objectives, export and 8-bit quantization in the image layout, the scoring with the science gate's functions |
+| `hg_run.py` | Task 2.16: the steps above; one training record (JSON) per byte model and per variant |
 | `l2dsci.py` | Data reading (the text layout and group key of the Rust CSIC adapter), splits, the baseline re-implementation, the encoder, training, ONNX export and quantization, the two scorers on vectors, metrics |
 | `run_gate.py` | One run: one split, fold, seed, routing mode and objective; writes one JSON record |
 | `run_all.ps1` | The batches of runs |

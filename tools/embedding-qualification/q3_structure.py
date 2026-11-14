@@ -140,7 +140,7 @@ def main() -> None:
     for ax in axes:
         ax.set_xlabel(f"component 1 ({pca.explained_variance_ratio_[0]:.0%} of the variance)")
         ax.set_ylabel(f"component 2 ({pca.explained_variance_ratio_[1]:.0%})")
-    fig.suptitle(f"{count:,} distinct CSIC inputs, vectors from the NPU", fontsize=12, fontweight="bold", color=eq.INK)
+    fig.suptitle(f"{count:,} distinct CSIC inputs, vectors {eq.SOURCE}", fontsize=12, fontweight="bold", color=eq.INK)
     fig.tight_layout()
     eq.save(fig, args.out, "q3-pca.png")
 
@@ -252,7 +252,7 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(9, 4))
     ys = np.arange(len(rows))
     height = 0.26
-    for offset, (column, colour, label) in enumerate([(1, eq.SERIES[0], "vectors from the NPU"), (2, eq.SERIES[3], "same vectors, classes shuffled"), (3, eq.MUTED, "random unit vectors")]):
+    for offset, (column, colour, label) in enumerate([(1, eq.SERIES[0], f"vectors {eq.SOURCE}"), (2, eq.SERIES[3], "same vectors, classes shuffled"), (3, eq.MUTED, "random unit vectors")]):
         values = [row[column] for row in rows]
         ax.barh(ys + (offset - 1) * height, values, height=height - 0.03, color=colour, label=label)
         for y, value in zip(ys, values):
@@ -312,7 +312,7 @@ def main() -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 3.9), sharey=True)
     bins = (np.arange(K + 2) - 0.5) / K
-    for ax, values, title in [(axes[0], share, "vectors from the NPU"), (axes[1], share_random, "baseline: random unit vectors")]:
+    for ax, values, title in [(axes[0], share, f"vectors {eq.SOURCE}"), (axes[1], share_random, "baseline: random unit vectors")]:
         width = 0.4 / K
         centres = np.arange(K + 1) / K
         good_counts = np.histogram(values[~bad[held]], bins=bins)[0] / (~bad[held]).sum()

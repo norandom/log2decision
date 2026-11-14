@@ -1,0 +1,138 @@
+{
+ "task": "npu-log-decision 2.16",
+ "step": "byte model",
+ "data": {
+  "path": "D:\\Source\\log2decision\\data\\csic-2010\\csic_database.csv",
+  "sha256": "c420f0bc0464376de75b6c419a0ac226fe69fe12c8ac4908843273721e44e637",
+  "records": 61065,
+  "distinct_texts": 25608
+ },
+ "split": {
+  "name": "split17",
+  "fold": 0,
+  "held_out_mixed_paths": [
+   "/tienda1/publico/anadir.jsp",
+   "/tienda1/publico/entrar.jsp",
+   "/tienda1/publico/vaciar.jsp"
+  ],
+  "held_out_paths": 3,
+  "held_out_logs": 4783,
+  "fitting_logs": 20825
+ },
+ "validation_mixed_paths": [
+  "/tienda1/miembros/editar.jsp"
+ ],
+ "validation_logs": 5112,
+ "training_logs": 15713,
+ "packages": {
+  "numpy": "2.5.4",
+  "torch": "2.15.0",
+  "onnx": "1.23.2",
+  "onnxruntime": "1.31.1",
+  "scikit-learn": "1.9.1",
+  "scipy": "1.18.1"
+ },
+ "python": "3.12.10",
+ "host": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+ "settings": {
+  "seed": 0,
+  "epochs": 8,
+  "batch": 64,
+  "lr": 0.002,
+  "weight_decay": 0.01,
+  "optimizer": "AdamW, one-cycle schedule (10 % warm-up)",
+  "threads": 12,
+  "device": "cpu",
+  "layers": 4,
+  "kernel": [
+   1,
+   9
+  ],
+  "causal_taps": 5,
+  "channels": 96,
+  "feature_layer": 2,
+  "table_width": 64,
+  "input_bytes": 1024,
+  "objective": "next-byte cross-entropy plus 0.1 x squared log-normaliser, no label",
+  "logit_floor": 12.0,
+  "normaliser_weight": 0.1,
+  "trained_on": "training part of the fitting side"
+ },
+ "history": [
+  {
+   "epoch": 1,
+   "train_bits_per_byte": 4.744404015151982,
+   "validation_bits_per_byte": 3.623513487468063,
+   "held_out_bits_per_byte": 3.751647573738007,
+   "seconds": 37.723609400040004
+  },
+  {
+   "epoch": 2,
+   "train_bits_per_byte": 2.030436672345869,
+   "validation_bits_per_byte": 2.470658580638431,
+   "held_out_bits_per_byte": 2.833463757469115,
+   "seconds": 42.36496689997148
+  },
+  {
+   "epoch": 3,
+   "train_bits_per_byte": 1.5399531250793188,
+   "validation_bits_per_byte": 2.106071778471454,
+   "held_out_bits_per_byte": 2.55335087991603,
+   "seconds": 38.49929119995795
+  },
+  {
+   "epoch": 4,
+   "train_bits_per_byte": 1.3790375137680597,
+   "validation_bits_per_byte": 1.9789420516142877,
+   "held_out_bits_per_byte": 2.452277273385472,
+   "seconds": 43.50997290003579
+  },
+  {
+   "epoch": 5,
+   "train_bits_per_byte": 1.2905958925307066,
+   "validation_bits_per_byte": 1.8778264464493626,
+   "held_out_bits_per_byte": 2.4413596618991784,
+   "seconds": 46.12168339994969
+  },
+  {
+   "epoch": 6,
+   "train_bits_per_byte": 1.238637917670563,
+   "validation_bits_per_byte": 1.8389617412473964,
+   "held_out_bits_per_byte": 2.4329631965068272,
+   "seconds": 41.820528400014155
+  },
+  {
+   "epoch": 7,
+   "train_bits_per_byte": 1.2112161422732666,
+   "validation_bits_per_byte": 1.8245736702585706,
+   "held_out_bits_per_byte": 2.4297767796280163,
+   "seconds": 44.78462310001487
+  },
+  {
+   "epoch": 8,
+   "train_bits_per_byte": 1.2002360290328375,
+   "validation_bits_per_byte": 1.8222451507157298,
+   "held_out_bits_per_byte": 2.4239365334220246,
+   "seconds": 64.6934374999837
+  }
+ ],
+ "parameters": {
+  "graph": 329344,
+  "byte_table": 16384
+ },
+ "calibration_lines": 256,
+ "files": {
+  "byte-ent": {
+   "f32_sha256": "bbcb759b307649a08db1df8b861ad94a6f16d844970195d033a2fd3f7edc2ff7",
+   "int8_sha256": "53049ef4a41077f655be03c269efbd4cff943c6e3656cb0a6694a125ccacd3cd",
+   "int8_bytes": 337586
+  },
+  "byte-feat": {
+   "f32_sha256": "6924ed18dcc23507a1be24a1e874096f8113ae28e7e3613b7140ea363cd0c3cc",
+   "int8_sha256": "2913de315448c3b2e7096ef037b8b0c5d3bb0fea99532d5fb4d1ad9f17ed2918",
+   "int8_bytes": 141727
+  }
+ },
+ "table_sha256": "970be0c050c561ed4fb0bb058071f7b6a7e9936f0515d508fc1385d7ee4278dd",
+ "seconds": 368.75623619998805
+}

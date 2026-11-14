@@ -126,7 +126,7 @@ def main() -> None:
     ours_raw = spectrum(vectors)
     random_scaled = spectrum(StandardScaler().fit_transform(baseline))
     print("components that hold 95 % of the variance, features scaled to unit variance (log2ml's check):")
-    print(f"    this encoder on the NPU (128 features): {for_share(ours_scaled, 0.95)}; first component {ours_scaled[0]:.3f}, second {ours_scaled[1]:.3f}, third {ours_scaled[2]:.3f}")
+    print(f"    this encoder {eq.SOURCE} (128 features): {for_share(ours_scaled, 0.95)}; first component {ours_scaled[0]:.3f}, second {ours_scaled[1]:.3f}, third {ours_scaled[2]:.3f}")
     print(f"    this encoder, vectors as they are (not scaled): {for_share(ours_raw, 0.95)}; first component {ours_raw[0]:.3f}")
     for name, shares in LOG2ML.items():
         print(f"    {name}: {len(shares)}; first component {shares[0]:.3f} (printed by log2ml's notebook, Sysmon logs, pretrained models without training on labels)")
@@ -152,7 +152,7 @@ def main() -> None:
     shown = 20
     ax = axes[0]
     series = [
-        ("this encoder on the NPU", ours_scaled, eq.SERIES[0]),
+        (f"this encoder {eq.SOURCE}", ours_scaled, eq.SERIES[0]),
         *[(name, np.array(shares), colour) for (name, shares), colour in zip(LOG2ML.items(), eq.SERIES[1:3])],
         ("random unit vectors", random_scaled, eq.MUTED),
     ]
@@ -173,7 +173,7 @@ def main() -> None:
     ax.legend(loc="center right")
 
     ax = axes[1]
-    names = ["this encoder\non the NPU", "random\nunit vectors"]
+    names = [f"this encoder\n{eq.SOURCE}", "random\nunit vectors"]
     bits = [entropy_bits(ours_scaled), entropy_bits(random_scaled)]
     bars = ax.bar(names, bits, color=[eq.SERIES[0], eq.MUTED], width=0.5)
     for bar, value in zip(bars, bits):

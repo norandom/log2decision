@@ -57,6 +57,8 @@ def main() -> None:
         print("   shared vector, inputs: " + " | ".join(repr(i[:80]) for i in sorted(inputs)[:3]))
     sizes = Counter(csic.inputs)
     print(f"texts per input: largest groups {sorted(sizes.values(), reverse=True)[:5]}")
+    kept_vectors = len({as_bytes[i] for i in csic.keep})
+    print(f"input mode {eq.INPUT_MODE}, at most {eq.INPUT_LIMIT} bytes; distinct vectors within the analysis set: {kept_vectors} of {csic.keep.size}")
     print(
         f"analysis set (first text of every distinct non-empty input): {csic.keep.size} texts, "
         f"good {int((~csic.bad[csic.keep]).sum())}, bad {int(csic.bad[csic.keep].sum())}"
@@ -86,7 +88,7 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(8.2, 4.2))
     grid = np.linspace(-1, 1, 801)
     bins = np.linspace(-1, 1, 161)
-    ax.hist(cosine, bins=bins, density=True, color=eq.SERIES[0], alpha=0.35, label="CSIC vectors from the NPU, histogram")
+    ax.hist(cosine, bins=bins, density=True, color=eq.SERIES[0], alpha=0.35, label=f"CSIC vectors {eq.SOURCE}, histogram")
     ax.plot(grid, gaussian_kde(cosine[:50_000])(grid), color=eq.SERIES[0], lw=2, label="CSIC vectors, density estimate")
     ax.plot(grid, gaussian_kde(cosine_random[:50_000])(grid), color=eq.MUTED, lw=2, label="random unit vectors, 128 dimensions")
     ax.axvline(COLLAPSE, color=eq.SERIES[7], lw=2, ls="--", label=f"collapse reference (spike model): {COLLAPSE}")
@@ -110,7 +112,7 @@ def main() -> None:
     print(f"mean per dimension: min {mean.min():.4f}, max {mean.max():.4f}, largest absolute {np.abs(mean).max():.4f}")
     order = np.argsort(-std)
     fig, ax = plt.subplots(figsize=(8.2, 3.8))
-    ax.bar(np.arange(dimension), std[order], width=0.8, color=eq.SERIES[0], label="CSIC vectors from the NPU (dimensions sorted)")
+    ax.bar(np.arange(dimension), std[order], width=0.8, color=eq.SERIES[0], label=f"CSIC vectors {eq.SOURCE} (dimensions sorted)")
     ax.axhline(1 / np.sqrt(dimension), color=eq.MUTED, lw=2, label=f"random unit vectors: 1/sqrt(128) = {1 / np.sqrt(dimension):.3f}")
     ax.set_xlabel("dimension, sorted by standard deviation")
     ax.set_ylabel("standard deviation of the value")
