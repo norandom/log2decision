@@ -37,8 +37,8 @@ pub use paths::ProjectPaths;
 pub use runrecord::{BATCH_PLAN_KEY, Device, Placement, PlacementSource, RunKind, RunRecord};
 pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, LogsFrame, SkippedRecord};
 pub use zip_input::{
-    ArchivePosition, ArchiveSummary, DiskDedup, EntryReport, EntrySkip, SelectedBytes, ZipInput,
-    ZipInputSettings,
+    ArchivePosition, ArchiveSummary, DiskDedup, EntryReport, EntrySkip, FreezeDisk,
+    FreezeDiskCheck, SelectedBytes, ZipInput, ZipInputSettings, most_key_file_bytes,
 };
 
 pub use parts::{PartInfo, PartTable, PartWriter, WorkDir};

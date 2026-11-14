@@ -92,7 +92,19 @@
 //! afterwards. What the caller holds beside the archive ([`ZipInput::hold_beside`])
 //! counts as held from the first batch on. Still refused, with the figures: skipped
 //! records or a directory that do not fit, a frozen set that leaves no room for the
-//! smallest batch, and a partition on disk whose keys do not fit.
+//! smallest batch, and a partition on disk whose distinct keys do not fit (while the
+//! archive is read, checked between batches: task 1.20). What deduplication on disk
+//! is estimated to write is [`SelectedBytes::dedup_disk_bytes`]; with
+//! [`ZipInput::check_disk_at_freeze`] the free disk is compared with it at the freeze.
+//!
+//! A read can also name its work directory without having it made
+//! ([`ZipInput::spill_when_needed`]; task 1.20, remediation): until the set is frozen
+//! it is the read without a directory (nothing made, no disk looked at, nothing more
+//! held); at the freeze, between batches, the directory is made, the disk checked and
+//! the buffers held. While a batch is held the freeze waits for its end as long as the
+//! set can still grow; when it cannot, the buffers must fit the room the batch kept for
+//! the set's growth, or the growth is refused as without a directory. Such a read keeps
+//! no occurrence counts.
 //!
 //! # What a hostile archive can and cannot do
 //!
@@ -130,11 +142,14 @@ use crate::input::{
     parse_csv_records, row_digest,
 };
 use crate::memory::{BatchPlan, Batcher, MemoryBudget, PROCESS_BASELINE_BYTES, exact};
+use crate::parts::{WorkDir, free_disk_bytes, require_free_in};
 use crate::types::{InputSummary, Label, LogsFrame, SkippedRecord};
 use crate::zip_directory::{
     DataFault, DirectoryEntry, EntryKind, locate_data, read_directory, unreadable,
 };
-use crate::zip_spill::{CountFile, Merge, Spill, WRITERS_HELD};
+use crate::zip_spill::{
+    CountFile, Merge, SPILL_HELD, SPILL_HELD_WITHOUT_COUNTS_LEAST, Spill, estimated_disk_bytes,
+};
 
 pub use crate::zip_spill::DiskDedup;
 
@@ -651,6 +666,15 @@ fn text_key(text: &str) -> [u8; 16] {
     key
 }
 
+/// The most bytes the key file of deduplication on disk can take under a memory limit
+/// of `limit_bytes` (a read that keeps occurrence counts, [`ZipInput::spill_into`]).
+/// A key (16 bytes) is written for every text the set in memory takes, and none after
+/// the set is frozen; every text takes a slot of [`SLOT_BYTES`], and the set never
+/// holds more than the memory limit. A bound, not an estimate (task 1.20, review round 2).
+pub fn most_key_file_bytes(limit_bytes: u64) -> u64 {
+    (limit_bytes / SLOT_BYTES).saturating_mul(16)
+}
+
 /// The bytes of a hash table that holds `capacity` keys: its slots are a power of two
 /// and at most seven eighths full.
 pub(crate) fn table_bytes(capacity: usize) -> u64 {
@@ -692,10 +716,44 @@ pub struct ZipInput {
     plan: Option<BatchPlan>,
     /// The line buffer of the entry read last, for the next one.
     spare: Vec<u8>,
-    /// Deduplication on disk, when a directory was named for it.
+    /// Deduplication on disk, when a directory was named for it, or was made at the
+    /// freeze.
     spill: Option<Spill>,
+    /// The work directory to make at the freeze and the most texts the set may take,
+    /// for a read that uses the disk only when it needs it
+    /// ([`ZipInput::spill_when_needed`]); `None` once it is made.
+    pending: Option<(PathBuf, Option<u64>)>,
+    /// The free-disk check to take at the freeze, and the one that was taken.
+    disk_check: Option<FreezeDiskCheck>,
+    freeze_disk: Option<FreezeDisk>,
+    /// What the batch being read was planned to leave held for the archive: the room
+    /// for the set's growth by the batch included.
+    reserved_held: u64,
     /// What the caller holds beside the archive for the whole read.
     beside: u64,
+}
+
+/// The free-disk check taken when the set of distinct texts is frozen and the read
+/// goes on on disk ([`ZipInput::check_disk_at_freeze`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FreezeDiskCheck {
+    /// What the run needs on the same disk beside deduplication on disk, each named
+    /// (the result parts of `baseline score`).
+    pub beside: Vec<(String, u64)>,
+    /// The free space to compare with in place of the operating system's figure.
+    pub free_bytes: Option<u64>,
+}
+
+/// The free-disk check that was taken at the freeze.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreezeDisk {
+    /// The work directory whose volume was looked at.
+    pub directory: PathBuf,
+    /// The free space of that volume at the freeze.
+    pub free_bytes: u64,
+    /// What the run was estimated to need there: deduplication on disk, and what was
+    /// named beside it.
+    pub estimated_bytes: u64,
 }
 
 impl fmt::Debug for ZipInput {
@@ -789,6 +847,10 @@ impl ZipInput {
             plan: None,
             spare: Vec::new(),
             spill: None,
+            pending: None,
+            disk_check: None,
+            freeze_disk: None,
+            reserved_held: 0,
             beside: 0,
         })
     }
@@ -868,6 +930,43 @@ impl ZipInput {
         Ok(())
     }
 
+    /// Names the work directory for deduplication on disk without making it (task
+    /// 1.20, remediation): while the set of distinct texts fits the memory the read is
+    /// the read without a directory, with nothing made, no disk looked at and nothing
+    /// more held. When the set is frozen, the directory `work_dir` is made then (with
+    /// the files in `dedup/` below it), the free-disk check is taken then
+    /// ([`ZipInput::check_disk_at_freeze`]), the buffers of deduplication on disk are
+    /// held from then on, and the read goes on on disk with the rows and counts of a
+    /// read in memory. Call it before [`ZipInput::batches`].
+    ///
+    /// Such a read keeps no occurrence counts of all rows
+    /// ([`ZipInput::occurrence_counts`] is an error): for a command that wants only the
+    /// summary. What was made is removed when the archive is finished or dropped, the
+    /// work directory and the absent directories above it as far as they are empty.
+    ///
+    /// The directory is not checked here: [`crate::parts::WorkDir::check`] does that.
+    /// Failing to make it at the freeze ends the read with that error.
+    pub fn spill_when_needed(&mut self, work_dir: &Path, max_set_texts: Option<u64>) {
+        self.pending = Some((work_dir.to_path_buf(), max_set_texts));
+    }
+
+    /// Has the free space of the work directory's volume checked when the set is
+    /// frozen, against what deduplication on disk is estimated to write
+    /// ([`SelectedBytes::dedup_disk_bytes`]) and what `check` names beside it. A read
+    /// whose set fits the memory takes no check.
+    ///
+    /// The read is then refused at the freeze, before a row is written to disk, with
+    /// both figures and what was read until then ([`L2dError::Refused`]).
+    pub fn check_disk_at_freeze(&mut self, check: FreezeDiskCheck) {
+        self.disk_check = Some(check);
+    }
+
+    /// The free-disk check taken at the freeze; `None` when the set was not frozen or
+    /// no check was asked for.
+    pub fn freeze_disk(&self) -> Option<&FreezeDisk> {
+        self.freeze_disk.as_ref()
+    }
+
     /// Tells the archive what the caller holds in memory beside it for the whole read
     /// (a loaded model, an output buffer): it counts as held from the first batch on.
     pub fn hold_beside(&mut self, bytes: u64) {
@@ -924,19 +1023,88 @@ impl ZipInput {
         self.spill.as_ref().is_some_and(Spill::frozen)
     }
 
-    /// Freezes the set in memory, when a directory for deduplication on disk was
-    /// named.
-    fn freeze(&mut self) {
-        if let Some(spill) = &mut self.spill {
-            spill.freeze(self.counts.len() as u64);
+    /// Whether the read can go on on disk when the set no longer fits: a directory was
+    /// named, or will be made, and the set is not frozen yet.
+    fn can_freeze(&self) -> bool {
+        match &self.spill {
+            Some(spill) => !spill.frozen(),
+            None => self.pending.is_some(),
         }
     }
 
-    fn spill_held(&self) -> u64 {
-        match self.spill {
-            Some(_) => WRITERS_HELD,
-            None => 0,
+    /// The most texts the set may take before the read goes on on disk.
+    fn max_set_texts(&self) -> Option<u64> {
+        match (&self.spill, &self.pending) {
+            (Some(spill), _) => spill.max_set_texts,
+            (None, Some((_, most))) => *most,
+            (None, None) => None,
         }
+    }
+
+    /// Freezes the set in memory, when a directory for deduplication on disk was
+    /// named or is to be made: the directory is made now when it is to be made, with
+    /// buffers that fit `room` where they can, and the free-disk check is taken now,
+    /// before any row goes to disk.
+    fn freeze(&mut self, room: u64) -> Result<(), L2dError> {
+        if !self.can_freeze() {
+            return Ok(());
+        }
+        if self.spill.is_none()
+            && let Some((work_dir, most)) = self.pending.take()
+        {
+            let work = WorkDir::create(&work_dir)?;
+            if let Err(error) = self.check_disk(work.path()) {
+                work.remove_created();
+                return Err(error);
+            }
+            self.spill = Some(Spill::create_in(work, most, room)?);
+        } else if let Some(spill) = &self.spill {
+            let shown = spill.dir().parent().unwrap_or(spill.dir()).to_path_buf();
+            self.check_disk(&shown)?;
+        }
+        if let Some(spill) = &mut self.spill {
+            spill.freeze(self.counts.len() as u64);
+        }
+        Ok(())
+    }
+
+    /// The free-disk check of the freeze, when one was asked for: the volume of `dir`.
+    fn check_disk(&mut self, dir: &Path) -> Result<(), L2dError> {
+        let Some(check) = &self.disk_check else {
+            return Ok(());
+        };
+        let dedup = self.selected_bytes().dedup_disk_bytes();
+        let mut needed: Vec<(&str, u64)> = check
+            .beside
+            .iter()
+            .map(|(what, bytes)| (what.as_str(), *bytes))
+            .collect();
+        needed.push(("deduplication on disk", dedup));
+        let free = match check.free_bytes {
+            Some(free) => free,
+            None => free_disk_bytes(dir)?,
+        };
+        let progress = format!(
+            "the deduplication set of {} distinct texts no longer fits the memory limit, and the \
+             read was to go on on disk; stopped after {} records of {} entries",
+            self.counts.len(),
+            self.records,
+            self.next_entry,
+        );
+        require_free_in(dir, free, &needed, &progress)?;
+        let estimated = needed
+            .iter()
+            .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
+        self.freeze_disk = Some(FreezeDisk {
+            directory: dir.to_path_buf(),
+            free_bytes: free,
+            estimated_bytes: estimated,
+        });
+        Ok(())
+    }
+
+    fn spill_held(&self) -> u64 {
+        self.spill.as_ref().map_or(0, Spill::held)
     }
 
     /// The batch plan of the read, once [`ZipInput::batches`] has been iterated to its
@@ -1008,12 +1176,18 @@ impl ZipInput {
         {
             // The set cannot grow for the next batch and leave room for the smallest
             // batch (`smallest` bytes): with a directory for it, the deduplication
-            // goes on on disk and the set stays as it is.
-            self.freeze();
+            // goes on on disk and the set stays as it is. A directory to be made is
+            // made now, between batches, and its buffers are held from now on: what
+            // is left beside the smallest batch is the room for them.
+            let room = budget
+                .usable_bytes()
+                .saturating_sub(self.held_bytes() + PARSE_BATCH_BYTES + smallest);
+            self.freeze(room)?;
             held = self.held_with_growth(rows);
         }
         let needed = held + PARSE_BATCH_BYTES;
         if needed <= budget.usable_bytes() {
+            self.reserved_held = held;
             return Ok(held);
         }
         Err(L2dError::Refused {
@@ -1049,9 +1223,13 @@ impl ZipInput {
             self.max_record_bytes,
             exact(self.readers_held()),
         ) + &match &self.spill {
-            Some(_) => format!(
+            Some(spill) if spill.held() == SPILL_HELD => format!(
+                ", the buffers of deduplication on disk and of its occurrence counts {}",
+                exact(SPILL_HELD)
+            ),
+            Some(spill) => format!(
                 ", the buffers of deduplication on disk {}",
-                exact(WRITERS_HELD)
+                exact(spill.held())
             ),
             None => String::new(),
         } + &match self.beside {
@@ -1205,26 +1383,58 @@ impl ZipInput {
             .iter()
             .filter(|key| !self.counts.contains_key(*key))
             .count();
-        if let Some(spill) = &self.spill
-            && !spill.frozen()
-        {
-            let over_most = spill
-                .max_set_texts
+        if self.can_freeze() {
+            let over_most = self
+                .max_set_texts()
                 .is_some_and(|most| (self.counts.len() + new) as u64 > most);
             let growth = self.growth_bytes(new as u64);
-            // While it grows the old and the new table exist together; after it the
-            // smallest batch must still fit.
-            let over_memory = growth > 0
-                && self.held_bytes() + growth + PARSE_BATCH_BYTES + smallest
-                    > budget.usable_bytes();
-            if over_most || over_memory {
-                self.freeze();
+            let held = self.held_bytes();
+            let usable = budget.usable_bytes();
+            // The room for buffers made now: what is left beside the smallest batch.
+            let between = usable.saturating_sub(held + PARSE_BATCH_BYTES + smallest);
+            let freeze = match self.spill {
+                // While it grows the old and the new table exist together; after it
+                // the smallest batch must still fit.
+                Some(_) => (over_most
+                    || (growth > 0 && held + growth + PARSE_BATCH_BYTES + smallest > usable))
+                    .then_some(between),
+                // No directory yet, and this batch was planned without its buffers.
+                // While the set can grow it grows, as without a directory, and the
+                // freeze waits for the end of the batch ([`ZipInput::require_held`]).
+                // When it cannot, the buffers take the room that was kept for its
+                // growth by this batch, when the smallest of them fit there; otherwise
+                // the growth is refused as without a directory.
+                None => {
+                    let spare = self.reserved_held.saturating_sub(held);
+                    if over_most {
+                        Some(between)
+                    } else if growth > 0
+                        && held + growth > usable
+                        && SPILL_HELD_WITHOUT_COUNTS_LEAST <= spare
+                    {
+                        Some(spare)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(room) = freeze {
+                self.freeze(room)?;
+                // What is held now, the buffers of a directory made now included,
+                // must leave the fixed memory of a batch.
+                self.require_held(budget, 0)?;
             }
         }
+        let (held, records, entries) = (self.held_bytes(), self.records, self.next_entry);
         if let Some(spill) = &mut self.spill
             && spill.frozen()
         {
-            // The set takes no new text: the rows it does not hold go to disk.
+            // The set takes no new text: the rows it does not hold go to disk. What a
+            // partition's set may take when the partitions are deduplicated is what
+            // the limit leaves now, or less.
+            let room = budget
+                .usable_bytes()
+                .saturating_sub(held + PARSE_BATCH_BYTES);
             let positions = batch
                 .column(LogsFrame::FIRST_POSITION)
                 .and_then(Column::u64)
@@ -1246,6 +1456,18 @@ impl ZipInput {
                     None => spill.spill(key, position, count, text)?,
                 }
             }
+            // The batch is let go: its memory is the room, and a partition whose
+            // distinct keys may no longer fit it is counted there.
+            drop(keys);
+            drop(batch);
+            spill.check_partitions(room).map_err(|error| match error {
+                L2dError::Refused { reason } => L2dError::Refused {
+                    reason: format!(
+                        "{reason}; stopped after {records} records of {entries} entries"
+                    ),
+                },
+                other => other,
+            })?;
             return Ok(None);
         }
         self.grow_for(new as u64, budget)?;
@@ -1304,7 +1526,7 @@ impl ZipInput {
         let room = budget.left_bytes();
         match &mut self.spill {
             Some(spill) => {
-                spill.deduplicate(room, table_bytes)?;
+                spill.deduplicate(room)?;
                 spill.merge().map(Some)
             }
             None => Ok(None),
@@ -1407,6 +1629,21 @@ pub struct SelectedBytes {
     pub packed: u64,
     /// Their bytes unpacked, as the directory declares them.
     pub unpacked: u64,
+}
+
+impl SelectedBytes {
+    /// What deduplication on disk is estimated to write for these entries, in bytes:
+    /// their unpacked bytes, and the 32 bytes a row on disk takes beside its text for
+    /// as many rows as records of 6 bytes would make of them.
+    ///
+    /// It is an estimate, not a bound: the rows of an archive are not known before it
+    /// is read (records shorter than 6 bytes on average take more), a gzip entry
+    /// declares its compressed size only, and a text is written once per batch it
+    /// occurs in. For logs it is high: a text that the set in memory holds is not
+    /// written at all.
+    pub fn dedup_disk_bytes(&self) -> u64 {
+        estimated_disk_bytes(self.unpacked)
+    }
 }
 
 /// The occurrence counts of the rows handed out: see [`ZipInput::occurrence_counts`].
@@ -1693,6 +1930,24 @@ impl ZipBatches<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The key file's bound covers a set that fills the whole limit: one 16-byte key
+    /// per slot the limit can hold, and a full table never holds more texts than slots.
+    #[test]
+    fn the_key_file_bound_covers_a_set_that_fills_the_limit() {
+        assert_eq!(most_key_file_bytes(0), 0);
+        assert_eq!(most_key_file_bytes(21 * 1000), 16 * 1000);
+        for limit in [1u64 << 20, 50_000_000, 2_000_000_000] {
+            // The most texts a table within `limit` holds: seven eighths of its slots.
+            let mut capacity = 1usize;
+            while table_bytes(capacity * 2) <= limit {
+                capacity *= 2;
+            }
+            let texts = (table_bytes(capacity) - 32) / SLOT_BYTES * 7 / 8;
+            assert!(16 * texts <= most_key_file_bytes(limit), "{limit}");
+        }
+        assert_eq!(most_key_file_bytes(u64::MAX), u64::MAX / SLOT_BYTES * 16);
+    }
 
     /// Gives out `good`, then fails as a disk would.
     struct Failing {

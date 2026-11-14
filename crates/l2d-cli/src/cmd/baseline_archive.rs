@@ -9,15 +9,32 @@
 //!
 //! `--work-dir DIR`, or `<project>/work/baseline-score-<UTC time>/` when it is not
 //! given. The directory must be empty or absent; the run creates it and writes nothing
-//! outside it. Before anything is read the free space of its volume is compared with
-//! an estimate of what the run needs, and the run is refused when it is less:
+//! outside it. The free space of its volume is compared with an estimate of what the
+//! run needs, and the run is refused when it is less:
 //!
-//! - for the parts, the bytes the selected entries take in the archive (text
-//!   compressed by zstd in place of deflate), plus 16 bytes per 64 bytes of unpacked
-//!   text for the numbers of a row;
-//! - for deduplication on disk, the unpacked bytes of the selected entries: the texts
-//!   that do not fit the set in memory are written there once per batch they occur in.
-//!   A gzip entry declares its compressed size only, so this is an estimate too.
+//! - before anything is read, for the parts: the bytes the selected entries take in the
+//!   archive (text compressed by zstd in place of deflate), plus 16 bytes per 64 bytes
+//!   of unpacked text for the numbers of a row; and for the key file of the occurrence
+//!   counts, written from the first batch, the most it can take under the memory limit
+//!   (16 bytes per slot of 21 the limit holds; a bound, review round 2 of task 1.20);
+//! - when the set of distinct texts is frozen and the read goes on on disk (task 1.20,
+//!   remediation), for deduplication on disk, what [`super::archive_run`] states (the
+//!   unpacked bytes of the selected entries, and the 32 bytes of a row on disk for as
+//!   many rows as records of 6 bytes would make of them), with the estimate of the
+//!   parts again beside it. A run that stays in memory takes this check not at all.
+//!
+//! The directory, the checks and the deduplication on disk are shared with `l2d
+//! ingest` ([`super::archive_run`]). A run that is refused before it wrote a part
+//! removes the directory again when it made it. The `disk_free_bytes` and
+//! `disk_estimated_bytes` of the output are those of the last check taken.
+//!
+//! # A failure after the first row
+//!
+//! A run can be refused long after its first row (a partition of deduplication on disk
+//! whose keys do not fit, too little free disk at the freeze). With `--json` the
+//! document that was begun is then ended as
+//! a whole document with `"incomplete":true`, and the error envelope follows on the
+//! next line. The parts written until then stay, without a manifest.
 //!
 //! # What is written
 //!
@@ -47,15 +64,18 @@
 //! which is free by then.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
-use l2d_baseline::scorer::{SCORER_KIND, SCORES_NO_FEATURES, SCORES_RATIO};
-use l2d_core::parts::{PartTable, PartWriter, WorkDir, write_manifest};
+use l2d_baseline::scorer::{BaselineScorer, SCORER_KIND, SCORES_NO_FEATURES, SCORES_RATIO};
+use l2d_core::parts::{PartTable, PartWriter, write_manifest};
 use l2d_core::polars::prelude::{Column, DataFrame, PolarsError};
-use l2d_core::{ArchivePosition, DiskDedup, EntryReport, L2dError, LogsFrame, ZipInput};
+use l2d_core::{
+    ArchivePosition, ArchiveSummary, EntryReport, L2dError, LogsFrame, MemoryBudget, ZipInput,
+    ZipInputSettings, most_key_file_bytes,
+};
 use serde::Serialize;
 
+use super::archive_run::{ArchiveRun, DedupReport};
 use super::baseline::ScoreArgs;
 use super::common::{
     Context, DEFAULT_TEXT_LIMIT, MemoryReport, Operation, ScorerReport, TEXT_CHARS, find_model,
@@ -76,51 +96,6 @@ fn polars(error: PolarsError) -> L2dError {
     L2dError::Runtime {
         detail: format!("writing the scores failed: {error}"),
     }
-}
-
-/// `yyyymmddThhmmssZ` of `seconds` since 1970-01-01 UTC.
-fn utc_stamp(seconds: u64) -> String {
-    let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    // Days to a civil date (Howard Hinnant's algorithm), for the proleptic Gregorian
-    // calendar.
-    let shifted = days as i64 + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_shifted = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_shifted + 2) / 5 + 1;
-    let month = if month_shifted < 10 {
-        month_shifted + 3
-    } else {
-        month_shifted - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
-    )
-}
-
-/// The directory of this run: the analyst's, or one named after the command and the
-/// time below the project's work directory.
-fn run_directory(context: &Context, given: Option<&Path>) -> Result<PathBuf, L2dError> {
-    if let Some(given) = given {
-        return Ok(given.to_path_buf());
-    }
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| L2dError::Runtime {
-            detail: format!("the clock of the host is before 1970: {error}"),
-        })?
-        .as_secs();
-    Ok(context
-        .paths()?
-        .work_dir()
-        .join(format!("baseline-score-{}", utc_stamp(seconds))))
 }
 
 /// One scored log of an archive: an element of `scores` in the JSON output.
@@ -147,40 +122,6 @@ struct TableReport<'a> {
     parts: u64,
     bytes: u64,
     rows_sha256: &'a str,
-}
-
-/// Whether the deduplication went on on disk: `parts.deduplication` in the output.
-#[derive(Debug, Serialize)]
-struct DedupReport {
-    on_disk: bool,
-    /// Distinct texts the set in memory held.
-    set_texts: u64,
-    /// Rows written to disk for deduplication, and their bytes.
-    spilled_records: u64,
-    spilled_bytes: u64,
-    /// Distinct texts among them.
-    spilled_distinct: u64,
-}
-
-impl DedupReport {
-    fn of(dedup: Option<DiskDedup>, distinct: u64) -> Self {
-        match dedup {
-            Some(dedup) => Self {
-                on_disk: true,
-                set_texts: dedup.set_texts,
-                spilled_records: dedup.spilled_records,
-                spilled_bytes: dedup.spilled_bytes,
-                spilled_distinct: dedup.spilled_distinct,
-            },
-            None => Self {
-                on_disk: false,
-                set_texts: distinct,
-                spilled_records: 0,
-                spilled_bytes: 0,
-                spilled_distinct: 0,
-            },
-        }
-    }
 }
 
 /// Where the parts are (requirement 13.11): the `parts` object of the output.
@@ -276,28 +217,17 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
 
     // The work directory, and the room on its disk (module documentation).
     let selected = input.selected_bytes();
-    let work = WorkDir::create(&run_directory(context, args.work_dir.as_deref())?)?;
-    let estimate = [
-        (
-            "the result parts",
-            SMALLEST_PARTS_BYTES
-                .saturating_add(selected.packed)
-                .saturating_add(selected.unpacked / NUMBERS_PER_TEXT_BYTES),
-        ),
-        ("deduplication on disk", selected.unpacked),
-    ];
-    let disk_estimated: u64 = estimate.iter().map(|(_, bytes)| bytes).sum();
-    let disk_free = match work.require_free(&estimate) {
-        Ok(free) => free,
-        Err(error) => {
-            // Nothing was written: the directory this run named itself does not stay.
-            if args.work_dir.is_none() {
-                let _ = std::fs::remove_dir(work.path());
-            }
-            return Err(error);
-        }
-    };
-    input.spill_into(&work.path().join("dedup"), None)?;
+    let parts_estimate = SMALLEST_PARTS_BYTES
+        .saturating_add(selected.packed)
+        .saturating_add(selected.unpacked / NUMBERS_PER_TEXT_BYTES);
+    let run = ArchiveRun::prepare(
+        context,
+        input,
+        "baseline-score-<UTC time>",
+        args.work_dir.as_deref(),
+        parts_estimate,
+        most_key_file_bytes(budget.limit_bytes()),
+    )?;
 
     let limit = args.limit.unwrap_or(DEFAULT_TEXT_LIMIT);
     let stdout = io::BufWriter::new(io::stdout().lock());
@@ -330,10 +260,53 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         ScoreOut::Text(text)
     };
 
-    let mut scores_out = PartWriter::new(&work, SCORES_TABLE)?;
+    let scoring = Scoring {
+        scorer: &scorer,
+        report: &report,
+        settings: &settings,
+        limit,
+    };
+    let outcome = write_scores(context, &scoring, run, &mut budget, &mut out);
+    // A run that failed after its first row still ends the document it began.
+    let ended = match (out, &outcome) {
+        (ScoreOut::Json(json), Ok(_)) => json.end(),
+        (ScoreOut::Json(json), Err(_)) => json.cut_off(),
+        (ScoreOut::Text(mut out), _) => out.flush(),
+    };
+    let summary = outcome?;
+    ended.map_err(output_failed)?;
+    fail_when_damaged(&summary, archive)
+}
+
+/// What scoring an archive is done with.
+struct Scoring<'a> {
+    scorer: &'a BaselineScorer,
+    report: &'a ScorerReport,
+    settings: &'a ZipInputSettings,
+    /// Most rows printed.
+    limit: u64,
+}
+
+/// Reads the archive of `run`, scores every new text, writes the parts and the
+/// manifest, and prints the rows and the report of the run to `out`, which the caller
+/// began and ends. Returns the summary of the archive.
+fn write_scores<W: Write>(
+    context: &Context,
+    scoring: &Scoring<'_>,
+    mut run: ArchiveRun,
+    budget: &mut MemoryBudget,
+    out: &mut ScoreOut<W>,
+) -> Result<ArchiveSummary, L2dError> {
+    let Scoring {
+        scorer,
+        report,
+        settings,
+        limit,
+    } = *scoring;
+    let mut scores_out = PartWriter::new(run.work(), SCORES_TABLE)?;
     let mut rows: u64 = 0;
     let mut no_features: u64 = 0;
-    let mut batches = input.batches(&mut budget);
+    let mut batches = run.input.batches(budget);
     while let Some(batch) = batches.next() {
         let logs: LogsFrame = batch?;
         let scores = scorer.score(&logs)?;
@@ -363,7 +336,7 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
                 let text = texts.get(index).unwrap_or_default();
                 let ratio = ratios.get(index).unwrap_or(f32::NAN);
                 let flagged = flagged.get(index).unwrap_or(false);
-                let written = match &mut out {
+                let written = match &mut *out {
                     ScoreOut::Json(json) => json.element(&ArchiveScoreRow {
                         row: rows + index as u64,
                         entry: batches.entry_path(entries[index]).unwrap_or_default(),
@@ -402,9 +375,9 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
     drop(batches);
 
     // The occurrence counts over the archive, known now.
-    let mut occurrences_out = PartWriter::new(&work, OCCURRENCES_TABLE)?;
+    let mut occurrences_out = PartWriter::new(run.work(), OCCURRENCES_TABLE)?;
     let mut counted: u64 = 0;
-    for chunk in input.occurrence_counts() {
+    for chunk in run.input.occurrence_counts() {
         let counts = chunk?;
         let size = counts.len() as u64;
         let mut part = DataFrame::new(vec![
@@ -424,19 +397,23 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         });
     }
 
-    let plan = input
+    let plan = run
+        .input
         .batch_plan()
         .cloned()
         .ok_or_else(|| L2dError::Runtime {
             detail: "the archive was read without a batch plan".into(),
         })?;
-    let dedup = input.disk_dedup();
-    let summary = input.finish();
+    let dedup = run.input.disk_dedup();
+    let (disk_free, disk_estimated) = run.disk_check();
+    // The directory holds the parts from here on, so it stays when `dir` is let go.
+    let (summary, dir) = run.finish();
+    let work = dir.work();
     let (scores_table, occurrences_table) = (scores_out.finish(), occurrences_out.finish());
     let archive_report = ArchiveReport::of(&summary);
     let source_path = summary.input.source_path.to_string_lossy();
     let manifest_path = write_manifest(
-        &work,
+        work,
         &Manifest {
             format: "l2d-result-parts",
             version: 1,
@@ -480,12 +457,12 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         disk_estimated_bytes: disk_estimated,
     };
     let memory = context.memory_report(
-        &budget,
+        budget,
         vec![Operation::batches("read", summary.input.records, plan)],
     );
 
     let omitted = rows.saturating_sub(limit);
-    let written = match &mut out {
+    let written = match &mut *out {
         ScoreOut::Json(json) => (|| {
             json.end_list()?;
             json.field("scored", &rows)?;
@@ -506,12 +483,7 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
         ),
     };
     written.map_err(output_failed)?;
-    match out {
-        ScoreOut::Json(json) => json.end(),
-        ScoreOut::Text(mut out) => out.flush(),
-    }
-    .map_err(output_failed)?;
-    fail_when_damaged(&summary, archive)
+    Ok(summary)
 }
 
 fn table_report(table: &PartTable) -> TableReport<'_> {
@@ -559,40 +531,8 @@ fn text_report(
             human_bytes(table.bytes)
         )?;
     }
-    let dedup = &parts.deduplication;
-    if dedup.on_disk {
-        writeln!(
-            out,
-            "  deduplication: on disk after {} distinct texts in memory ({} rows, {}, written \
-             and removed again; {} further distinct texts)",
-            dedup.set_texts,
-            dedup.spilled_records,
-            human_bytes(dedup.spilled_bytes),
-            dedup.spilled_distinct
-        )?;
-    } else {
-        writeln!(out, "  deduplication: in memory")?;
-    }
-    writeln!(
-        out,
-        "  disk: {} was free, the run was estimated at {}",
-        human_bytes(parts.disk_free_bytes),
-        human_bytes(parts.disk_estimated_bytes)
-    )?;
+    parts
+        .deduplication
+        .write_text(out, parts.disk_free_bytes, parts.disk_estimated_bytes)?;
     memory.write_text(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::utc_stamp;
-
-    #[test]
-    fn a_time_is_stamped_as_a_utc_date_and_time() {
-        assert_eq!(utc_stamp(0), "19700101T000000Z");
-        assert_eq!(utc_stamp(951_782_399), "20000228T235959Z");
-        assert_eq!(utc_stamp(951_782_400), "20000229T000000Z");
-        assert_eq!(utc_stamp(951_868_800), "20000301T000000Z");
-        assert_eq!(utc_stamp(1_794_652_496), "20261114T103456Z");
-        assert_eq!(utc_stamp(4_102_444_799), "20991231T235959Z");
-    }
 }

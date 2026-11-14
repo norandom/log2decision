@@ -9,7 +9,8 @@ use l2d_core::parts::{
 };
 use l2d_core::polars::prelude::{Column, DataFrame};
 use l2d_core::{
-    ArchiveSummary, L2dError, LogsFrame, MemoryBudget, MemorySettings, ZipInput, ZipInputSettings,
+    ArchiveSummary, FreezeDiskCheck, L2dError, LogsFrame, MemoryBudget, MemorySettings, ZipInput,
+    ZipInputSettings,
 };
 use sha2::{Digest, Sha256};
 
@@ -653,4 +654,439 @@ fn what_the_selected_entries_hold_is_known_before_the_read() {
         "{all:?} {logs:?}"
     );
     assert!(all.packed < all.unpacked, "{all:?}");
+}
+
+// --- Task 1.20 -----------------------------------------------------------------------------
+
+/// `count` distinct lines whose keys all fall into partition 0 of deduplication on
+/// disk: the partition of a text is chosen by the first byte of its key, which is the
+/// first byte of its SHA-256.
+fn lines_of_one_partition(count: usize) -> String {
+    let mut lines = String::new();
+    let mut found = 0;
+    let mut index = 0u64;
+    while found < count {
+        let text = format!("h{index}");
+        if Sha256::digest(text.as_bytes())[0] % 64 == 0 {
+            lines.push_str(&text);
+            lines.push('\n');
+            found += 1;
+        }
+        index += 1;
+    }
+    lines
+}
+
+/// Task 1.20: a partition whose keys will not fit is refused as soon as it outgrows
+/// the room, while the archive is still being read, with what is needed and what is
+/// left.
+#[test]
+fn a_partition_whose_keys_do_not_fit_is_refused_while_the_archive_is_read() {
+    let scratch = Scratch::new("partition");
+    let total = 70_000u64;
+    let path = scratch.write(
+        "one-partition.zip",
+        &archive(&[(
+            "hostile.log",
+            lines_of_one_partition(total as usize).as_bytes(),
+        )]),
+    );
+    let settings = ZipInputSettings {
+        max_record_bytes: 1_024,
+        ..ZipInputSettings::default()
+    };
+    // What the limit leaves beside the buffers and a batch holds the keys of fewer
+    // rows than the archive puts into its one partition.
+    let limit = Some(l2d_core::memory::PROCESS_BASELINE_BYTES + 9 * MIB);
+    let mut budget = budget(limit, Some(1_024));
+    let spill = scratch.path("work/dedup");
+    let mut input = ZipInput::open(&path, &settings, &budget).unwrap();
+    // No text in memory: every row goes to disk.
+    input.spill_into(&spill, Some(0)).unwrap();
+    let error = input
+        .batches(&mut budget)
+        .find_map(Result::err)
+        .expect("the partition is refused");
+    assert!(matches!(error, L2dError::Refused { .. }), "{error}");
+    let text = error.to_string();
+    for part in ["partition 0 of 64", "needs", "is left", " bytes)"] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    let summary = input.finish();
+    assert!(
+        summary.input.records < total,
+        "refused after {} of {total} records: {text}",
+        summary.input.records
+    );
+    // Nothing is left of the deduplication on disk.
+    assert!(!spill.exists(), "{:?}", listing(&scratch.dir));
+}
+
+/// Task 1.20: what deduplication on disk holds in memory is counted from the moment
+/// its directory is named, the chunks the occurrence counts are read in included.
+#[test]
+fn the_buffers_of_deduplication_on_disk_and_of_the_counts_are_held() {
+    let scratch = Scratch::new("held");
+    let path = scratch.write("repeating.zip", &repeating());
+    let budget = budget(None, None);
+    let mut input = ZipInput::open(&path, &ZipInputSettings::default(), &budget).unwrap();
+    let before = input.held_bytes();
+    input.spill_into(&scratch.path("spill"), None).unwrap();
+    let held = input.held_bytes() - before;
+    // 66 buffers of 32 KiB; and for the counts a chunk of 65,536 keys of 16 bytes
+    // with its 65,536 counts of 4 bytes.
+    let (buffers, counts) = (66 * 32 * 1_024, 65_536 * (16 + 4));
+    assert!(
+        held >= buffers + counts,
+        "{held} bytes are held, less than {buffers} and {counts}"
+    );
+    assert!(held < buffers + counts + MIB, "{held}");
+}
+
+/// Task 1.20: a work directory below a file is the analyst's error, said plainly.
+#[test]
+fn a_work_directory_below_a_file_is_an_analyst_error() {
+    let scratch = Scratch::new("below-file");
+    let file = scratch.write("plain.txt", b"x");
+    for below in ["run", "a/b/run"] {
+        let error = WorkDir::create(&file.join(below)).unwrap_err();
+        assert!(matches!(error, L2dError::InvalidInput { .. }), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("is a file"), "{text}");
+        assert!(text.contains("plain.txt"), "{text}");
+        assert!(!text.contains("os error"), "{text}");
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"x");
+    assert_eq!(listing(&scratch.dir), ["plain.txt"]);
+}
+
+/// Task 1.20: a run that leaves nothing in its directory removes what it made, and
+/// nothing else.
+#[test]
+fn the_directories_a_run_made_are_removed_as_far_as_they_are_empty() {
+    let scratch = Scratch::new("made");
+    // Absent with absent parents: all of them go again.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), Vec::<String>::new());
+
+    // Something was written: the directory stays, and what is above it.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    std::fs::write(dir.path().join("part.parquet"), b"x").unwrap();
+    dir.remove_created();
+    assert_eq!(
+        listing(&scratch.dir),
+        ["a", "a/b", "a/b/run", "a/b/run/part.parquet"]
+    );
+    std::fs::remove_file(dir.path().join("part.parquet")).unwrap();
+
+    // A directory that was there before is not removed, nor what is above it.
+    let dir = WorkDir::create(&scratch.path("a/b/run")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), ["a", "a/b", "a/b/run"]);
+    // Below one that was there: only what was made.
+    let dir = WorkDir::create(&scratch.path("a/b/run/deeper/still")).unwrap();
+    dir.remove_created();
+    assert_eq!(listing(&scratch.dir), ["a", "a/b", "a/b/run"]);
+}
+
+/// The bytes of the files below `dir`; 0 when it is absent.
+fn bytes_below(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(|entry| entry.unwrap().metadata().map_or(0, |file| file.len()))
+        .sum()
+}
+
+/// Task 1.20: the estimate of what deduplication on disk writes counts the 32 bytes of
+/// a row on disk, so that it holds for an archive of very short lines.
+#[test]
+fn the_disk_estimate_of_deduplication_holds_for_short_lines() {
+    let scratch = Scratch::new("short");
+    // 400,000 distinct lines of 1 to 6 digits, 6.7 bytes each with the line end.
+    let lines = 400_000u64;
+    let content: String = (0..lines).map(|line| format!("{line}\n")).collect();
+    let path = scratch.write("short.zip", &archive(&[("short.log", content.as_bytes())]));
+    let spill = scratch.path("work/dedup");
+    let mut budget = budget(None, None);
+    let mut input = ZipInput::open(&path, &ZipInputSettings::default(), &budget).unwrap();
+    let selected = input.selected_bytes();
+    assert_eq!(selected.unpacked, content.len() as u64);
+    let estimate = selected.dedup_disk_bytes();
+    // The unpacked bytes, and 32 bytes for every 6 of them.
+    assert_eq!(estimate, selected.unpacked + 32 * (selected.unpacked / 6));
+
+    // All but 50,000 texts go to disk.
+    input.spill_into(&spill, Some(50_000)).unwrap();
+    let mut rows = 0;
+    let mut most = 0;
+    for batch in input.batches(&mut budget) {
+        rows += batch.unwrap().len() as u64;
+        most = most.max(bytes_below(&spill));
+    }
+    for chunk in input.occurrence_counts() {
+        chunk.unwrap();
+        most = most.max(bytes_below(&spill));
+    }
+    assert_eq!(rows, lines);
+    let report = input.disk_dedup().expect("the read went on on disk");
+    assert_eq!(report.spilled_records, lines - report.set_texts);
+    // The partitions when they were complete, and the keys of the rows of the read.
+    let written = report.spilled_bytes + 16 * report.set_texts;
+    assert!(
+        report.spilled_bytes > selected.unpacked,
+        "the case: more is written than the archive unpacks to: {report:?}"
+    );
+    assert!(
+        written <= estimate && most <= estimate,
+        "{written} bytes were written, {most} seen at once, {estimate} estimated"
+    );
+    drop(input);
+    assert!(!spill.exists());
+}
+
+// --- Task 1.20, remediation after the review of d03b1db ------------------------------------
+
+/// The archive of the review of d03b1db: 300,000 distinct filler lines, then 1,000,000
+/// rows of only 10 distinct texts, all of whose keys fall into partition 0.
+fn filler_then_ten() -> Vec<u8> {
+    let mut content = String::new();
+    for line in 0..300_000 {
+        content.push_str(&format!("filler line number {line} of the archive\n"));
+    }
+    let mut ten = Vec::new();
+    let mut index = 0u64;
+    while ten.len() < 10 {
+        let text = format!("dup{index}");
+        if Sha256::digest(text.as_bytes())[0] % 64 == 0 {
+            ten.push(text);
+        }
+        index += 1;
+    }
+    for row in 0..1_000_000 {
+        content.push_str(&ten[row % 10]);
+        content.push('\n');
+    }
+    archive(&[("dup.log", content.as_bytes())])
+}
+
+/// Remediation, item 3: the room a partition needs is decided by the distinct keys it
+/// holds, not by its rows on disk, whose number grows as the batches get smaller
+/// (requirement 12.6: the outcome does not depend on the batch size). The archive of
+/// the review, read four times; in batches of 10 that takes minutes in a debug build,
+/// so the test runs on request. The default run has the same case on `Spill` itself
+/// (`zip_spill::tests`).
+///
+/// ```text
+/// cargo test -j 4 -p l2d-core --test result_parts -- --ignored --nocapture distinct_keys
+/// ```
+#[test]
+#[ignore = "on request: reads 1,300,000 records in batches of 10; minutes in a debug build"]
+fn a_partition_is_given_room_by_its_distinct_keys_at_any_batch_size() {
+    let scratch = Scratch::new("ten");
+    let path = scratch.write("dup.zip", &filler_then_ten());
+    let settings = ZipInputSettings::default();
+    let spill = scratch.path("spill");
+    // The directory named before the read (`baseline score`) and made at the freeze
+    // (`ingest`), each under the limit of the review.
+    for when_needed in [false, true] {
+        for batch_rows in [Some(10), Some(64), Some(1_024), None] {
+            let what = format!("made at the freeze: {when_needed}, batches of {batch_rows:?}");
+            let mut budget = budget(Some(42 * MIB), batch_rows);
+            let mut input = ZipInput::open(&path, &settings, &budget).unwrap();
+            match when_needed {
+                false => input.spill_into(&spill, None).unwrap(),
+                true => input.spill_when_needed(&spill, None),
+            }
+            let mut rows = 0u64;
+            for batch in input.batches(&mut budget) {
+                let batch = batch.unwrap_or_else(|error| panic!("{what}: {error}"));
+                rows += batch.len() as u64;
+            }
+            let mut occurrences = 0u64;
+            if !when_needed {
+                for chunk in input.occurrence_counts() {
+                    occurrences += chunk
+                        .unwrap()
+                        .iter()
+                        .map(|count| u64::from(*count))
+                        .sum::<u64>();
+                }
+            }
+            let report = input
+                .disk_dedup()
+                .unwrap_or_else(|| panic!("{what}: the read stayed in memory"));
+            let summary = input.finish();
+            assert_eq!(
+                (summary.input.records, summary.input.distinct_texts, rows),
+                (1_300_000, 300_010, 300_010),
+                "{what}: {report:?}"
+            );
+            if !when_needed {
+                assert_eq!(occurrences, 1_300_000, "{what}");
+            }
+            assert!(!spill.exists(), "{what}: {:?}", listing(&scratch.dir));
+        }
+    }
+}
+
+/// Remediation, item 1: a read that names its work directory for when the set no
+/// longer fits makes nothing, checks no disk and holds nothing more while the set fits.
+#[test]
+fn a_read_that_fits_in_memory_makes_no_directory_and_holds_nothing_more() {
+    let scratch = Scratch::new("fits");
+    let path = scratch.write("repeating.zip", &repeating());
+    let settings = ZipInputSettings {
+        max_record_bytes: 200,
+        ..ZipInputSettings::default()
+    };
+    let reference = read_in_memory(&path, &settings, Some(100));
+    let work = scratch.path("work/run");
+    let mut budget = budget(None, Some(100));
+    let mut input = ZipInput::open(&path, &settings, &budget).unwrap();
+    let held = input.held_bytes();
+    input.spill_when_needed(&work, None);
+    // No free disk at all: a check would refuse the read.
+    input.check_disk_at_freeze(FreezeDiskCheck {
+        beside: Vec::new(),
+        free_bytes: Some(0),
+    });
+    assert_eq!(input.held_bytes(), held, "nothing more is held");
+    let mut rows = Vec::new();
+    for batch in input.batches(&mut budget) {
+        for record in batch.unwrap().records() {
+            rows.push((record.text, record.first_position, 0));
+        }
+        assert!(!scratch.path("work").exists(), "a directory was made");
+    }
+    for row in &mut rows {
+        row.2 = u32::try_from(input.occurrences(&row.0)).unwrap();
+    }
+    assert!(input.disk_dedup().is_none());
+    assert!(input.freeze_disk().is_none());
+    assert_eq!(rows, reference.rows);
+    assert_eq!(input.finish(), reference.summary);
+    assert_eq!(listing(&scratch.dir), ["repeating.zip"]);
+}
+
+/// Remediation, item 1: when the set no longer fits, the directory is made then, the
+/// disk is checked then, the rows are those of a read in memory, and what was made
+/// is gone when the read is finished.
+#[test]
+fn a_read_that_outgrows_the_memory_makes_its_directory_at_the_freeze() {
+    let scratch = Scratch::new("freeze");
+    let path = scratch.write("repeating.zip", &repeating());
+    let settings = ZipInputSettings {
+        max_record_bytes: 200,
+        ..ZipInputSettings::default()
+    };
+    let reference = read_in_memory(&path, &settings, Some(100));
+    let work = scratch.path("a/b/run");
+    let mut budget = budget(None, Some(100));
+    let mut input = ZipInput::open(&path, &settings, &budget).unwrap();
+    input.spill_when_needed(&work, Some(200));
+    input.check_disk_at_freeze(FreezeDiskCheck {
+        beside: vec![("something else".to_string(), 7)],
+        free_bytes: Some(u64::MAX),
+    });
+    let mut rows = Vec::new();
+    let mut made = Vec::new();
+    for batch in input.batches(&mut budget) {
+        for record in batch.unwrap().records() {
+            rows.push((record.text, record.first_position, 0));
+        }
+        made.push(work.exists());
+    }
+    assert_eq!(made.first(), Some(&false), "{made:?}");
+    assert_eq!(made.last(), Some(&true), "{made:?}");
+    let report = input.disk_dedup().expect("the read went on on disk");
+    assert!(report.set_texts <= 200, "{report:?}");
+    assert_eq!(report.set_texts + report.spilled_distinct, 467);
+    let disk = input
+        .freeze_disk()
+        .expect("the disk was checked at the freeze");
+    assert_eq!(disk.directory, work);
+    assert_eq!(disk.free_bytes, u64::MAX);
+    assert_eq!(
+        disk.estimated_bytes,
+        input.selected_bytes().dedup_disk_bytes() + 7
+    );
+    // The occurrence counts of every row are not kept by such a read.
+    let counts = input.occurrence_counts().next().expect("one item");
+    assert!(counts.is_err());
+    let texts = |rows: &[(String, u64, u32)]| {
+        rows.iter()
+            .map(|(text, position, _)| (text.clone(), *position))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(&rows), texts(&reference.rows));
+    assert_eq!(input.finish(), reference.summary);
+    assert_eq!(listing(&scratch.dir), ["repeating.zip"]);
+}
+
+/// Remediation, item 1: too little free disk at the freeze is a refusal there, with
+/// what was read, and nothing is left; a read with its directory named before the read
+/// (`baseline score`) takes the same check at the freeze, and none while the set fits.
+#[test]
+fn too_little_disk_at_the_freeze_is_refused_there_and_leaves_nothing() {
+    let scratch = Scratch::new("freeze-disk");
+    let path = scratch.write("repeating.zip", &repeating());
+    let settings = ZipInputSettings {
+        max_record_bytes: 200,
+        ..ZipInputSettings::default()
+    };
+    let check = || FreezeDiskCheck {
+        beside: vec![("the result parts".to_string(), 5)],
+        free_bytes: Some(1),
+    };
+    let refused = |input: &mut ZipInput, budget: &mut MemoryBudget| {
+        let error = input
+            .batches(budget)
+            .find_map(Result::err)
+            .expect("the read is refused at the freeze");
+        assert!(matches!(error, L2dError::Refused { .. }), "{error}");
+        let text = error.to_string();
+        for part in [
+            "for deduplication on disk",
+            "5 B (5 bytes) for the result parts",
+            "1 B (1 bytes) is free there",
+            "stopped after ",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        assert!(!text.contains("nothing was read"), "{text}");
+    };
+
+    // The directory is made at the freeze.
+    let work = scratch.path("a/run");
+    let mut memory = budget(None, Some(100));
+    let mut input = ZipInput::open(&path, &settings, &memory).unwrap();
+    input.spill_when_needed(&work, Some(200));
+    input.check_disk_at_freeze(check());
+    refused(&mut input, &mut memory);
+    let summary = input.finish();
+    assert!(summary.input.records > 0 && summary.input.records < 2_011);
+    assert_eq!(listing(&scratch.dir), ["repeating.zip"]);
+
+    // The directory is named before the read: no check while the set fits ...
+    let spill = scratch.path("work/dedup");
+    let mut memory = budget(None, Some(100));
+    let mut input = ZipInput::open(&path, &settings, &memory).unwrap();
+    input.spill_into(&spill, None).unwrap();
+    input.check_disk_at_freeze(check());
+    for batch in input.batches(&mut memory) {
+        batch.unwrap();
+    }
+    assert!(input.freeze_disk().is_none());
+    drop(input);
+    // ... and the check at the freeze when it does not.
+    let mut memory = budget(None, Some(100));
+    let mut input = ZipInput::open(&path, &settings, &memory).unwrap();
+    input.spill_into(&spill, Some(200)).unwrap();
+    input.check_disk_at_freeze(check());
+    refused(&mut input, &mut memory);
+    drop(input);
+    assert!(!spill.exists(), "{:?}", listing(&scratch.dir));
 }

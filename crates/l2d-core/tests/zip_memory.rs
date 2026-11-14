@@ -455,21 +455,59 @@ fn archives_stay_within_their_memory_limits() {
 /// as a Parquet part with a column of numbers beside the text (as a scoring run
 /// does), and the heap stays within what the limit leaves, the encoding of the parts
 /// included.
+///
+/// The default run keeps one shape (task 1.20): the long lines under the limit that
+/// leaves 18 MiB. It is the one that goes to disk with lines as long as a log's, and
+/// the one whose heap came nearest to its limit when all six were measured (0.65 of
+/// it). The five others run on request:
+/// `the_other_shapes_of_deduplication_on_disk_stay_within_the_memory_limit`.
 #[test]
 fn deduplication_on_disk_and_writing_parts_stay_within_the_memory_limit() {
-    use l2d_core::parts::{PartWriter, WorkDir};
-    use l2d_core::polars::prelude::{Column, DataFrame};
-
     let _guard = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = Scratch::new("on-disk");
-    let rows = 300_000u64;
-    let short = scratch.lines("short.zip", 2 * rows, |index| {
-        format!("line {}", index % rows)
+    let long = long_lines_twice(&scratch);
+    on_disk_within(&scratch, LONG_LINES, &long, &[(18, true)]);
+}
+
+/// On request: the shapes of
+/// `deduplication_on_disk_and_writing_parts_stay_within_the_memory_limit` that the
+/// default run leaves out, short lines and long lines under limits near the least they
+/// can be read with, and under limits that keep the whole set in memory.
+///
+/// ```text
+/// cargo test -j 4 -p l2d-core --test zip_memory -- --ignored --nocapture the_other_shapes
+/// ```
+#[test]
+#[ignore = "on request: five more shapes of deduplication on disk, about a minute in a debug build"]
+fn the_other_shapes_of_deduplication_on_disk_stay_within_the_memory_limit() {
+    let _guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("on-disk-others");
+    let short = scratch.lines("short.zip", 2 * ON_DISK_ROWS, |index| {
+        format!("line {}", index % ON_DISK_ROWS)
     });
-    let long = scratch.lines("long.zip", 2 * rows, |index| {
-        let index = index % rows;
+    let long = long_lines_twice(&scratch);
+    // The smallest limit of each shape is near the least it can be read with.
+    on_disk_within(
+        &scratch,
+        "300,000 short lines twice",
+        &short,
+        &[(9, true), (16, true), (48, false)],
+    );
+    on_disk_within(&scratch, LONG_LINES, &long, &[(12, true), (64, false)]);
+}
+
+/// The distinct lines of the archives read with deduplication on disk; each twice.
+const ON_DISK_ROWS: u64 = 300_000;
+const LONG_LINES: &str = "300,000 long lines twice";
+
+/// An archive of [`ON_DISK_ROWS`] distinct lines of about 110 bytes, each twice.
+fn long_lines_twice(scratch: &Scratch) -> PathBuf {
+    scratch.lines("long.zip", 2 * ON_DISK_ROWS, |index| {
+        let index = index % ON_DISK_ROWS;
         format!(
             "2026-11-14T10:00:00Z host-{:03} sshd[{}]: Accepted publickey for user{} from \
              10.0.{}.{} port 22 ssh2",
@@ -479,83 +517,78 @@ fn deduplication_on_disk_and_writing_parts_stay_within_the_memory_limit() {
             index % 250,
             index % 199
         )
-    });
+    })
+}
+
+/// Reads `path` with a directory for deduplication on disk under each limit of
+/// `ladder` (MiB left beside the baseline, and whether the read goes to disk), writes
+/// every frame as a part, and checks the rows, the counts and the heap growth.
+fn on_disk_within(scratch: &Scratch, shape: &str, path: &Path, ladder: &[(u64, bool)]) {
+    use l2d_core::parts::{PartWriter, WorkDir};
+    use l2d_core::polars::prelude::{Column, DataFrame};
+
+    let rows = ON_DISK_ROWS;
     let settings = ZipInputSettings::default();
-    // The smallest limit of each shape is near the least it can be read with.
-    let shapes = [
-        (
-            "300,000 short lines twice",
-            &short,
-            [(8, true), (16, true), (48, false)],
-        ),
-        (
-            "300,000 long lines twice",
-            &long,
-            [(12, true), (18, true), (64, false)],
-        ),
-    ];
-    for (shape, path, ladder) in shapes {
-        for (usable, on_disk) in ladder {
-            let usable = usable * MIB;
-            let memory = MemorySettings {
-                memory_limit_bytes: Some(BASELINE + usable),
-                ..MemorySettings::default()
-            };
-            let mut budget = MemoryBudget::observe_with(&memory, || Ok(64 * GIB)).unwrap();
-            let work = WorkDir::create(&scratch.dir.join(format!("run-{usable}"))).unwrap();
-            let started = std::time::Instant::now();
-            let (result, growth) = measure(|| -> Result<_, L2dError> {
-                let mut input = ZipInput::open(path, &settings, &budget)?;
-                input.spill_into(&work.path().join("dedup"), None)?;
-                let mut writer = PartWriter::new(&work, "rows")?;
-                for batch in input.batches(&mut budget) {
-                    let batch = batch?;
-                    let size = batch.len() as u64;
-                    let from = writer.rows();
-                    let mut part = DataFrame::new(vec![
-                        Column::new("row".into(), (from..from + size).collect::<Vec<u64>>()),
-                        batch.frame().column("text").unwrap().clone(),
-                        batch.frame().column("first_position").unwrap().clone(),
-                    ])
-                    .unwrap();
-                    writer.write(&mut part)?;
-                }
-                let mut counted = 0u64;
-                let mut total = 0u64;
-                for chunk in input.occurrence_counts() {
-                    let chunk = chunk?;
-                    counted += chunk.len() as u64;
-                    total += chunk.iter().map(|count| u64::from(*count)).sum::<u64>();
-                }
-                let dedup = input.disk_dedup();
-                Ok((input.finish(), writer.finish(), dedup, counted, total))
-            });
-            let elapsed = started.elapsed();
-            let (summary, table, dedup, counted, total) =
-                result.unwrap_or_else(|error| panic!("{shape} at {usable}: {error}"));
-            eprintln!(
-                "13.12 {shape:<28} usable {:>3} MiB  heap growth {:>5.1} MiB = {:>4.2} x usable  \
+    for &(usable, on_disk) in ladder {
+        let usable = usable * MIB;
+        let memory = MemorySettings {
+            memory_limit_bytes: Some(BASELINE + usable),
+            ..MemorySettings::default()
+        };
+        let mut budget = MemoryBudget::observe_with(&memory, || Ok(64 * GIB)).unwrap();
+        let work = WorkDir::create(&scratch.dir.join(format!("run-{usable}"))).unwrap();
+        let started = std::time::Instant::now();
+        let (result, growth) = measure(|| -> Result<_, L2dError> {
+            let mut input = ZipInput::open(path, &settings, &budget)?;
+            input.spill_into(&work.path().join("dedup"), None)?;
+            let mut writer = PartWriter::new(&work, "rows")?;
+            for batch in input.batches(&mut budget) {
+                let batch = batch?;
+                let size = batch.len() as u64;
+                let from = writer.rows();
+                let mut part = DataFrame::new(vec![
+                    Column::new("row".into(), (from..from + size).collect::<Vec<u64>>()),
+                    batch.frame().column("text").unwrap().clone(),
+                    batch.frame().column("first_position").unwrap().clone(),
+                ])
+                .unwrap();
+                writer.write(&mut part)?;
+            }
+            let mut counted = 0u64;
+            let mut total = 0u64;
+            for chunk in input.occurrence_counts() {
+                let chunk = chunk?;
+                counted += chunk.len() as u64;
+                total += chunk.iter().map(|count| u64::from(*count)).sum::<u64>();
+            }
+            let dedup = input.disk_dedup();
+            Ok((input.finish(), writer.finish(), dedup, counted, total))
+        });
+        let elapsed = started.elapsed();
+        let (summary, table, dedup, counted, total) =
+            result.unwrap_or_else(|error| panic!("{shape} at {usable}: {error}"));
+        eprintln!(
+            "13.12 {shape:<28} usable {:>3} MiB  heap growth {:>5.1} MiB = {:>4.2} x usable  \
                  {elapsed:.1?}  {} parts of {} bytes, on disk: {dedup:?}",
-                usable / MIB,
-                growth as f64 / MIB as f64,
-                growth as f64 / usable as f64,
-                table.parts.len(),
-                table.bytes(),
-            );
-            assert_eq!(summary.input.records, 2 * rows, "{shape}");
-            assert_eq!(summary.input.distinct_texts, rows, "{shape}");
-            assert_eq!(
-                (table.rows, counted, total),
-                (rows, rows, 2 * rows),
-                "{shape}"
-            );
-            assert_eq!(dedup.is_some(), on_disk, "{shape} at {usable}: {dedup:?}");
-            assert!(
-                growth <= usable,
-                "{shape}: the heap grew by {growth} bytes under a limit that leaves {usable}"
-            );
-            std::fs::remove_dir_all(work.path()).unwrap();
-        }
+            usable / MIB,
+            growth as f64 / MIB as f64,
+            growth as f64 / usable as f64,
+            table.parts.len(),
+            table.bytes(),
+        );
+        assert_eq!(summary.input.records, 2 * rows, "{shape}");
+        assert_eq!(summary.input.distinct_texts, rows, "{shape}");
+        assert_eq!(
+            (table.rows, counted, total),
+            (rows, rows, 2 * rows),
+            "{shape}"
+        );
+        assert_eq!(dedup.is_some(), on_disk, "{shape} at {usable}: {dedup:?}");
+        assert!(
+            growth <= usable,
+            "{shape}: the heap grew by {growth} bytes under a limit that leaves {usable}"
+        );
+        std::fs::remove_dir_all(work.path()).unwrap();
     }
 }
 
