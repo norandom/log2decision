@@ -1281,6 +1281,8 @@ The four criteria:
 3. **Streaming where possible.** Input is read as a stream and results are written as they are produced (parts on disk, a manifest last), so that the cost in memory is that of one batch and not of the input. A step that cannot stream says why in its design.
 4. **One hungry process at a time, by a resource-aware gate.** Training, evaluation over folds, a fill of the store, scoring a large archive and any measurement of speed are hungry processes. Before one starts it looks at the host (free memory, whether the NPU is in use, whether another hungry process of this project runs) and then runs, waits, or refuses with the reason. Two of them do not run side by side on one machine, and a measurement is not taken beside another load.
 
+**The reference host enforces this.** It is set up as a field machine: when the use of physical memory reaches 92 %, a guard on the host kills processes, so that Windows itself does not fail (owner, 2026-11-14). A process that grows without a limit is therefore ended without a message of its own. That is what happened to the Python training runs of task 2.16 (exit code -536870911, which is 0xE0000001), and the same code is recorded in `Cargo.toml` for linker runs of an earlier task. Two consequences: the memory limit of a process, together with what else runs on the host, has to stay clear of that line (the tool's default uses half of the free memory and keeps a quarter free; a development script has no such default and needs one); and a process that ends with that code was killed for memory, which is a fault of the pipeline to be fixed by batching, not an event to restart around.
+
 Where the design stands against them:
 
 | Criterion | Met today | Not met, or not built |
