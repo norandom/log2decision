@@ -24,7 +24,9 @@
 //! | `occurrences` | INTEGER | 1 to 4,294,967,295 |
 //! | `label` | TEXT, indexed | `good`, `bad` or `unknown` |
 //! | `group_key` | TEXT, nullable | the group key |
-//! | `truncated` | INTEGER | 0 or 1 |
+//! | `truncated` | INTEGER | 0 or 1: the part of the text the encoder reads was cut |
+//! | `text_longer_than_input` | INTEGER | 0 or 1: the whole text is longer than the encoder's input |
+//! | `empty` | INTEGER | 0 or 1: no byte other than padding reached the model |
 //! | `vector` | BLOB | `dimension` 32-bit floats, little-endian: `4 * dimension` bytes |
 //! | `encoder_revision` | TEXT | the revision of the store's encoder |
 //!
@@ -49,14 +51,23 @@
 //!
 //! # Format 1
 //!
-//! Format 2 (task 2.7) added the column `runtime_release` to `meta` and nothing else.
+//! Format 2 (task 2.7) added the column `runtime_release` to `meta` and the columns
+//! `text_longer_than_input` and `empty` to `logs`, and nothing else. A file that says it
+//! is of format 2 and lacks one of the three is not opened (the two flag columns were
+//! added to the format before any store of real vectors was written in it, so there is
+//! no third format for them).
+//!
 //! A file of format 1 ([`OLDEST_SCHEMA_VERSION`]), written before the release was
-//! recorded, is still opened, as a store without a release: it takes and compares
-//! vectors without a release as before and refuses vectors made under any release,
-//! because nothing says under which release, if any, its own were made. It is not
-//! migrated: it keeps its format number and its columns. A version of the tool that
-//! knows format 1 only does not open a file of format 2, so it cannot add vectors to
-//! one without the check of the release.
+//! recorded, is still opened and stays usable as it was built (owner decision of
+//! 2026-11-14): nothing is written to it when it is opened, it is searched by phrase,
+//! and it takes and compares vectors without a release as before. It refuses vectors
+//! made under any release, saying that it is of format 1, because nothing says under
+//! which release, if any, its own were made. It is not migrated: it keeps its format
+//! number and its columns. Its logs have the flag `truncated` only: the two other flags
+//! are read back as absent values, which means unknown and not false, and those two
+//! flags of rows added to it are not kept. A version of the tool that knows format 1
+//! only does not open a file of format 2, so it cannot add vectors to one without the
+//! check of the release.
 
 use std::path::Path;
 use std::time::Duration;
@@ -101,6 +112,9 @@ pub(crate) struct Meta {
     pub runtime_release: Option<String>,
 }
 
+/// The columns of `logs` that format 2 added, in the order they are written and read.
+pub(crate) const FLAG_COLUMNS: [&str; 2] = ["text_longer_than_input", "empty"];
+
 /// The statements that make an empty database a store for vectors of `dimension`.
 fn schema_sql(dimension: u16) -> String {
     let vector_bytes = 4 * u32::from(dimension);
@@ -124,6 +138,9 @@ fn schema_sql(dimension: u16) -> String {
             label TEXT NOT NULL CHECK (label IN ('good', 'bad', 'unknown')),
             group_key TEXT,
             truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            text_longer_than_input INTEGER NOT NULL
+                CHECK (text_longer_than_input IN (0, 1)),
+            empty INTEGER NOT NULL CHECK (empty IN (0, 1)),
             vector BLOB NOT NULL CHECK (length(vector) = {vector_bytes}),
             encoder_revision TEXT NOT NULL
         ) STRICT;
@@ -166,8 +183,8 @@ pub(crate) fn create(
     identity: &EncoderIdentity,
     runtime_release: Option<&str>,
     tool_version: &str,
-) -> Result<(Connection, Meta), String> {
-    let run = || -> rusqlite::Result<(Connection, Meta)> {
+) -> Result<(Connection, Meta, u32), String> {
+    let run = || -> rusqlite::Result<(Connection, Meta, u32)> {
         let mut connection = connect(path)?;
         let transaction = connection.transaction()?;
         transaction.execute_batch(&schema_sql(identity.dimension))?;
@@ -185,13 +202,14 @@ pub(crate) fn create(
         )?;
         transaction.commit()?;
         let meta = read_meta(&connection)?;
-        Ok((connection, meta))
+        Ok((connection, meta, SCHEMA_VERSION))
     };
     run().map_err(|error| error.to_string())
 }
 
-/// Opens the store file `path` after checking that it is one, of this format.
-pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
+/// Opens the store file `path` after checking that it is one, of a format this version
+/// reads and writes; the format is returned beside what `meta` says.
+pub(crate) fn open(path: &Path) -> Result<(Connection, Meta, u32), String> {
     let connection = connect(path).map_err(|error| error.to_string())?;
     let pragma = |name: &str| -> Result<i64, String> {
         connection
@@ -225,30 +243,38 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Meta), String> {
             "{tables} of the tables meta, logs and logs_fts are there, not all three"
         ));
     }
-    let has_release = has_release_column(&connection).map_err(|error| error.to_string())?;
-    if has_release != (version == i64::from(SCHEMA_VERSION)) {
-        return Err(format!(
-            "it has the store format {version}, but its meta table has {} column \
-             runtime_release; that column is what format {SCHEMA_VERSION} added",
-            if has_release { "the" } else { "no" }
-        ));
+    // The columns format 2 added are there in format 2 and in no older format.
+    let newer = version == i64::from(SCHEMA_VERSION);
+    let added = [("meta", "runtime_release")]
+        .into_iter()
+        .chain(FLAG_COLUMNS.map(|column| ("logs", column)));
+    for (table, column) in added {
+        let has = has_column(&connection, table, column).map_err(|error| error.to_string())?;
+        if has != newer {
+            return Err(format!(
+                "it has the store format {version}, but its {table} table has {} column \
+                 {column}; that column is what format {SCHEMA_VERSION} added",
+                if has { "the" } else { "no" }
+            ));
+        }
     }
     let meta = read_meta(&connection).map_err(|error| format!("reading meta: {error}"))?;
-    Ok((connection, meta))
+    // The range was checked above.
+    Ok((connection, meta, version as u32))
 }
 
-/// Whether `meta` has the column of format 2.
-fn has_release_column(connection: &Connection) -> rusqlite::Result<bool> {
+/// Whether `table` has the column `column`.
+fn has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     connection.query_row(
-        "SELECT count(*) FROM pragma_table_info('meta') WHERE name = 'runtime_release'",
-        [],
+        "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
         |row| row.get::<_, i64>(0).map(|columns| columns > 0),
     )
 }
 
 /// What the file says about the store now. A file of format 1 has no release.
 pub(crate) fn read_meta(connection: &Connection) -> rusqlite::Result<Meta> {
-    let release = if has_release_column(connection)? {
+    let release = if has_column(connection, "meta", "runtime_release")? {
         "runtime_release"
     } else {
         "NULL"

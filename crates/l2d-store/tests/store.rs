@@ -22,9 +22,9 @@ use l2d_core::{
     LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
 };
 use l2d_store::{
-    ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, Filter, IDLE_BYTES, MAX_NAME_BYTES,
-    MAX_TEXT_BYTES, RELEASE_TEXT_BYTES, SCHEMA_VERSION, Store, StoreError, VECTOR, log_id,
-    rows_frame, rows_schema,
+    ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, Filter, IDLE_BYTES, LogFlags, MAX_NAME_BYTES,
+    MAX_TEXT_BYTES, RELEASE_TEXT_BYTES, SCHEMA_VERSION, Store, StoreError, VECTOR, VectorOrigin,
+    log_id, rows_frame, rows_schema,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -190,9 +190,19 @@ fn vectors_of(logs: &LogsFrame, salt: u64, dimension: u16) -> Vec<f32> {
 /// A log longer than this many bytes counts as truncated in these tests.
 const INPUT_BYTES: usize = 120;
 
-fn truncated_of(logs: &LogsFrame) -> Vec<bool> {
+/// The three flags of a text in these tests: made up from its length, so that the
+/// three columns differ from each other.
+fn flags_for(text: &str) -> LogFlags {
+    LogFlags {
+        truncated: text.len() > INPUT_BYTES,
+        text_longer_than_input: text.len() > INPUT_BYTES / 2,
+        empty: text.len().is_multiple_of(3),
+    }
+}
+
+fn flags_of(logs: &LogsFrame) -> Vec<LogFlags> {
     logs.records()
-        .map(|record| record.text.len() > INPUT_BYTES)
+        .map(|record| flags_for(&record.text))
         .collect()
 }
 
@@ -203,7 +213,7 @@ fn rows(logs: &LogsFrame, source: &str, salt: u64) -> DataFrame {
         source,
         &vectors_of(logs, salt, DIM),
         DIM,
-        &truncated_of(logs),
+        &flags_of(logs),
     )
     .expect("the logs make a rows frame")
 }
@@ -226,6 +236,8 @@ struct Raw {
     label: String,
     group_key: Option<String>,
     truncated: i64,
+    text_longer_than_input: i64,
+    empty: i64,
     vector: Vec<u8>,
     encoder_revision: String,
 }
@@ -241,7 +253,7 @@ fn dump(path: &Path) -> Vec<Raw> {
     let mut statement = connection
         .prepare(
             "SELECT seq, id, text, source, occurrences, label, group_key, truncated, vector, \
-             encoder_revision FROM logs ORDER BY seq",
+             encoder_revision, text_longer_than_input, empty FROM logs ORDER BY seq",
         )
         .expect("the logs table has the documented columns");
     statement
@@ -257,6 +269,8 @@ fn dump(path: &Path) -> Vec<Raw> {
                 truncated: row.get(7)?,
                 vector: row.get(8)?,
                 encoder_revision: row.get(9)?,
+                text_longer_than_input: row.get(10)?,
+                empty: row.get(11)?,
             })
         })
         .unwrap()
@@ -273,7 +287,9 @@ fn expected(logs: &LogsFrame, source: &str, salt: u64) -> Vec<Raw> {
             seq: index as i64 + 1,
             id: log_id(source, &record.text),
             vector: le_bytes(&unit_vector(&record.text, salt, DIM)),
-            truncated: i64::from(record.text.len() > INPUT_BYTES),
+            truncated: i64::from(flags_for(&record.text).truncated),
+            text_longer_than_input: i64::from(flags_for(&record.text).text_longer_than_input),
+            empty: i64::from(flags_for(&record.text).empty),
             text: record.text,
             source: source.to_string(),
             occurrences: i64::from(record.occurrences),
@@ -428,7 +444,12 @@ fn the_bundled_sqlite_has_fts5_with_the_trigram_tokenizer() {
 fn create_writes_one_database_file_with_the_identity_in_meta() {
     let scratch = Scratch::new("create");
     let paths = scratch.paths();
-    let store = Store::create(&paths, "fixture", &identity()).expect("the store is created");
+    let store = Store::create(
+        &paths,
+        "fixture",
+        VectorOrigin::without_release(&identity()),
+    )
+    .expect("the store is created");
 
     let path = paths.stores_dir().join("fixture.db");
     assert_eq!(paths.store_path("fixture"), path);
@@ -487,7 +508,7 @@ fn create_writes_one_database_file_with_the_identity_in_meta() {
 fn the_schema_has_the_tables_columns_and_indexes_of_the_task() {
     let scratch = Scratch::new("schema");
     let paths = scratch.paths();
-    drop(Store::create(&paths, "s", &identity()).unwrap());
+    drop(Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap());
     let connection = read_only(&paths.store_path("s"));
 
     let columns = |table: &str| -> Vec<String> {
@@ -511,6 +532,8 @@ fn the_schema_has_the_tables_columns_and_indexes_of_the_task() {
             "label",
             "group_key",
             "truncated",
+            "text_longer_than_input",
+            "empty",
             "vector",
             "encoder_revision"
         ]
@@ -590,16 +613,24 @@ fn the_longest_stored_text_is_known_also_for_a_store_without_its_index() {
     let scratch = Scratch::new("longest");
     let paths = scratch.paths();
     let path = paths.store_path("s");
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     assert_eq!(store.longest_text_bytes().unwrap(), 0);
     let short = three_logs();
     store
-        .add_with(&rows(&short, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(store.longest_text_bytes().unwrap(), longest_text(&short));
     let long = logs_of(&[record(&"é".repeat(2_500), Label::Bad, None, 1)]);
     store
-        .add_with(&rows(&long, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&long, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(
         store.longest_text_bytes().unwrap(),
@@ -608,14 +639,22 @@ fn the_longest_stored_text_is_known_also_for_a_store_without_its_index() {
     );
     // Adding the same long text again changes nothing; a failed add neither.
     store
-        .add_with(&rows(&long, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&long, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let spoiled = logs_of(&[
         record(&"x".repeat(9_000), Label::Bad, None, 1),
         record("GET /zero", Label::Good, None, 0),
     ]);
     store
-        .add_with(&rows(&spoiled, "c.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&spoiled, "c.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap_err();
     assert_eq!(store.longest_text_bytes().unwrap(), 5_000);
     drop(store);
@@ -652,7 +691,11 @@ fn the_longest_stored_text_is_known_also_for_a_store_without_its_index() {
     // The next add brings the index.
     let longer = logs_of(&[record(&"y".repeat(7_000), Label::Good, None, 1)]);
     store
-        .add_with(&rows(&longer, "d.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&longer, "d.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert!(has_index());
     assert_eq!(store.longest_text_bytes().unwrap(), 7_000);
@@ -672,9 +715,14 @@ fn create_refuses_a_name_that_exists_and_leaves_the_store_as_it_was() {
     let scratch = Scratch::new("exists");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "kept", &identity()).unwrap();
+    let mut store =
+        Store::create(&paths, "kept", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     drop(store);
     let before = dump(&paths.store_path("kept"));
@@ -683,7 +731,8 @@ fn create_refuses_a_name_that_exists_and_leaves_the_store_as_it_was() {
         name: "other".to_string(),
         ..identity()
     };
-    let error = Store::create(&paths, "kept", &other).expect_err("the name is taken");
+    let error = Store::create(&paths, "kept", VectorOrigin::without_release(&other))
+        .expect_err("the name is taken");
     match &error {
         StoreError::Exists { name, at } => {
             assert_eq!(name, "kept");
@@ -736,7 +785,8 @@ fn names_that_are_not_plain_file_names_are_rejected() {
         "", ".hidden", "a/b", "a\\b", "..", "a b", "a:b", "größe", &too_long,
     ] {
         for error in [
-            Store::create(&paths, name, &identity()).expect_err("create refuses the name"),
+            Store::create(&paths, name, VectorOrigin::without_release(&identity()))
+                .expect_err("create refuses the name"),
             Store::open(&paths, name).expect_err("open refuses the name"),
         ] {
             assert!(
@@ -751,8 +801,14 @@ fn names_that_are_not_plain_file_names_are_rejected() {
     }
     assert!(!paths.stores_dir().exists(), "nothing was created");
     let longest = "n".repeat(MAX_NAME_BYTES);
-    Store::create(&paths, &longest, &identity()).expect("a name of the longest length is fine");
-    Store::create(&paths, "csic-2010_v1.a", &identity()).expect("the allowed characters");
+    Store::create(&paths, &longest, VectorOrigin::without_release(&identity()))
+        .expect("a name of the longest length is fine");
+    Store::create(
+        &paths,
+        "csic-2010_v1.a",
+        VectorOrigin::without_release(&identity()),
+    )
+    .expect("the allowed characters");
 }
 
 #[test]
@@ -774,7 +830,8 @@ fn create_refuses_an_identity_that_cannot_be_one() {
         },
     ];
     for given in unusable {
-        let error = Store::create(&paths, "s", &given).expect_err("the identity is unusable");
+        let error = Store::create(&paths, "s", VectorOrigin::without_release(&given))
+            .expect_err("the identity is unusable");
         assert!(
             matches!(error, StoreError::InvalidIdentity { .. }),
             "{given:?}: {error:?}"
@@ -804,7 +861,7 @@ fn open_refuses_a_file_that_is_not_a_store() {
         .unwrap();
     drop(foreign);
     // A store written by a later version of the tool.
-    drop(Store::create(&paths, "newer", &identity()).unwrap());
+    drop(Store::create(&paths, "newer", VectorOrigin::without_release(&identity())).unwrap());
     let newer = Connection::open(paths.store_path("newer")).unwrap();
     newer
         .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
@@ -835,7 +892,7 @@ fn open_refuses_a_file_that_is_not_a_store() {
         );
         // The name stays taken.
         assert!(matches!(
-            Store::create(&paths, name, &identity()),
+            Store::create(&paths, name, VectorOrigin::without_release(&identity())),
             Err(StoreError::Exists { .. })
         ));
     }
@@ -884,19 +941,20 @@ fn the_rows_frame_has_the_documented_schema() {
             "label",
             "group",
             "truncated",
+            "text_longer_than_input",
+            "empty",
             "vector"
         ]
     );
     assert_eq!(frame.height(), 3);
 
     let vectors = vectors_of(&logs, 1, DIM);
-    let truncated = truncated_of(&logs);
+    let flags = flags_of(&logs);
     // One vector too few, one flag too few.
     let short = &vectors[..vectors.len() - usize::from(DIM)];
-    let detail = invalid_rows(rows_frame(&logs, "a.log", short, DIM, &truncated).unwrap_err());
+    let detail = invalid_rows(rows_frame(&logs, "a.log", short, DIM, &flags).unwrap_err());
     assert!(detail.contains('3') && detail.contains('2'), "{detail}");
-    let detail =
-        invalid_rows(rows_frame(&logs, "a.log", &vectors, DIM, &truncated[..2]).unwrap_err());
+    let detail = invalid_rows(rows_frame(&logs, "a.log", &vectors, DIM, &flags[..2]).unwrap_err());
     assert!(detail.contains('3') && detail.contains('2'), "{detail}");
     // No rows is a frame too.
     let none = rows_frame(&LogsFrame::empty(), "a.log", &[], DIM, &[]).unwrap();
@@ -910,10 +968,19 @@ fn added_logs_survive_a_restart_unchanged() {
     let paths = scratch.paths();
     let logs = fixture_logs();
 
-    let mut store = Store::create(&paths, "fixture", &identity()).unwrap();
+    let mut store = Store::create(
+        &paths,
+        "fixture",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     let created_at = store.created_at().to_string();
     let report: AddReport = store
-        .add_with(&rows(&logs, SOURCE, 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, SOURCE, 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .expect("the fixture is added");
     assert_eq!((report.rows, report.added, report.repeated), (169, 169, 0));
     assert_eq!(store.len().unwrap(), 169);
@@ -943,6 +1010,13 @@ fn added_logs_survive_a_restart_unchanged() {
     assert!(
         stored.iter().any(|row| row.truncated == 1) && stored.iter().any(|row| row.truncated == 0)
     );
+    // The three flags are three columns: each holds what was given for it.
+    assert!(
+        stored
+            .iter()
+            .any(|row| row.text_longer_than_input == 1 && row.truncated == 0)
+    );
+    assert!(stored.iter().any(|row| row.empty == 1) && stored.iter().any(|row| row.empty == 0));
     assert!(stored.iter().any(|row| row.occurrences > 1));
     assert!(stored.iter().any(|row| row.label == "unknown"));
 }
@@ -952,9 +1026,12 @@ fn the_default_add_observes_the_host_and_reports_its_plan() {
     let scratch = Scratch::new("default-add");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let report = store
-        .add(&rows(&logs, "a.log", 1), &identity())
+        .add(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+        )
         .expect("the host has memory for three rows");
     assert_eq!((report.rows, report.added, report.repeated), (3, 3, 0));
     // Requirement 12.3: free memory observed, limit applied, batch size chosen.
@@ -972,9 +1049,13 @@ fn adding_an_existing_id_adds_its_occurrences_and_changes_nothing_else() {
     let scratch = Scratch::new("repeat");
     let paths = scratch.paths();
     let first = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&first, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&first, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let before = dump(&paths.store_path("s"));
 
@@ -993,7 +1074,11 @@ fn adding_an_existing_id_adds_its_occurrences_and_changes_nothing_else() {
     );
     frame.vstack_mut(&twice).unwrap();
     let report = store
-        .add_with(&frame, &identity(), &mut budget())
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .expect("repeated ids are not an error");
     assert_eq!((report.rows, report.added, report.repeated), (4, 1, 3));
     assert_eq!(store.len().unwrap(), 4);
@@ -1014,6 +1099,8 @@ fn adding_an_existing_id_adds_its_occurrences_and_changes_nothing_else() {
         label: "bad".to_string(),
         group_key: None,
         truncated: 0,
+        text_longer_than_input: 0,
+        empty: 0,
         vector: le_bytes(&unit_vector("GET /new", 2, DIM)),
         encoder_revision: REVISION.to_string(),
     });
@@ -1031,12 +1118,20 @@ fn the_same_text_from_another_source_is_another_log() {
     let scratch = Scratch::new("sources");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&logs, "monday.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "monday.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let report = store
-        .add_with(&rows(&logs, "tuesday.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "tuesday.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!((report.rows, report.added, report.repeated), (3, 3, 0));
     drop(store);
@@ -1059,11 +1154,11 @@ fn the_same_text_from_another_source_is_another_log() {
 fn an_empty_frame_adds_nothing() {
     let scratch = Scratch::new("empty-frame");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let report = store
         .add_with(
             &rows(&LogsFrame::empty(), "a.log", 1),
-            &identity(),
+            VectorOrigin::without_release(&identity()),
             &mut budget(),
         )
         .expect("no rows is not an error");
@@ -1080,9 +1175,13 @@ fn vectors_of_another_identity_are_refused_with_both_identities_named() {
     let scratch = Scratch::new("mismatch");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     drop(store);
     let before = dump(&paths.store_path("s"));
@@ -1111,7 +1210,7 @@ fn vectors_of_another_identity_are_refused_with_both_identities_named() {
             1,
         );
         let error = store
-            .add_with(&more, &given, &mut budget())
+            .add_with(&more, VectorOrigin::without_release(&given), &mut budget())
             .expect_err("another identity is refused");
         assert_eq!(
             error,
@@ -1154,9 +1253,18 @@ fn fts5_queries_match_the_stored_text_also_after_a_restart() {
     let scratch = Scratch::new("fts");
     let paths = scratch.paths();
     let logs = fixture_logs();
-    let mut store = Store::create(&paths, "fixture", &identity()).unwrap();
+    let mut store = Store::create(
+        &paths,
+        "fixture",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     store
-        .add_with(&rows(&logs, SOURCE, 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, SOURCE, 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     drop(store);
     // A restart in between.
@@ -1198,17 +1306,25 @@ fn fts5_queries_match_the_stored_text_also_after_a_restart() {
 fn the_text_index_follows_every_add() {
     let scratch = Scratch::new("fts-adds");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let first = logs_of(&[
         record("GET /a?name=señor+núñez", Label::Good, None, 1),
         record("line one\nline two with a\ttab", Label::Unknown, None, 1),
     ]);
     store
-        .add_with(&rows(&first, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&first, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let second = logs_of(&[record("GET /b?name=núñez", Label::Bad, None, 1)]);
     store
-        .add_with(&rows(&second, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&second, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     drop(store);
     let path = paths.store_path("s");
@@ -1236,12 +1352,16 @@ fn a_frame_with_another_schema_is_not_added() {
     let scratch = Scratch::new("schema-mismatch");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
 
     // The logs frame itself: no source, flag or vector.
     let detail = invalid_rows(
         store
-            .add_with(logs.frame(), &identity(), &mut budget())
+            .add_with(
+                logs.frame(),
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("vector"), "{detail}");
@@ -1252,7 +1372,11 @@ fn a_frame_with_another_schema_is_not_added() {
         .unwrap();
     let detail = invalid_rows(
         store
-            .add_with(&wrong, &identity(), &mut budget())
+            .add_with(
+                &wrong,
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("occurrences"), "{detail}");
@@ -1266,7 +1390,11 @@ fn a_frame_with_another_schema_is_not_added() {
         .unwrap();
     let detail = invalid_rows(
         store
-            .add_with(&absent, &identity(), &mut budget())
+            .add_with(
+                &absent,
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("source"), "{detail}");
@@ -1277,7 +1405,11 @@ fn a_frame_with_another_schema_is_not_added() {
         .unwrap();
     let detail = invalid_rows(
         store
-            .add_with(&label, &identity(), &mut budget())
+            .add_with(
+                &label,
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(
@@ -1290,7 +1422,11 @@ fn a_frame_with_another_schema_is_not_added() {
         .unwrap();
     let detail = invalid_rows(
         store
-            .add_with(&none, &identity(), &mut budget())
+            .add_with(
+                &none,
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("row 3"), "{detail}");
@@ -1313,7 +1449,7 @@ fn a_vector_that_is_not_one_of_the_stores_dimension_is_not_added() {
         let text = logs.records().nth(index).unwrap().text;
         unit_vector(&text, 1, DIM)
     };
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
 
     let cases: [(&str, Option<Vec<Option<f32>>>); 6] = [
         ("7 values", present(good(1)[..7].to_vec())),
@@ -1342,7 +1478,11 @@ fn a_vector_that_is_not_one_of_the_stores_dimension_is_not_added() {
         );
         // One row to a batch: the first row is already written when the second fails.
         let error = store
-            .add_with(&frame, &identity(), &mut budget_with(None, Some(1)))
+            .add_with(
+                &frame,
+                VectorOrigin::without_release(&identity()),
+                &mut budget_with(None, Some(1)),
+            )
             .expect_err(what);
         let detail = invalid_rows(error);
         if what == "no vector" {
@@ -1363,7 +1503,8 @@ fn a_vector_that_is_not_one_of_the_stores_dimension_is_not_added() {
     let insert = |label: &str, vector: Vec<u8>| {
         connection.execute(
             "INSERT INTO logs (id, text, source, occurrences, label, group_key, truncated, \
-             vector, encoder_revision) VALUES ('x', 't', 's', 1, ?1, NULL, 0, ?2, 'r')",
+             text_longer_than_input, empty, vector, encoder_revision) \
+             VALUES ('x', 't', 's', 1, ?1, NULL, 0, 0, 0, ?2, 'r')",
             rusqlite::params![label, vector],
         )
     };
@@ -1380,15 +1521,23 @@ fn occurrences_beyond_32_bits_fail_and_leave_the_store_unchanged() {
         record("GET /a", Label::Good, None, 1),
         record("GET /b", Label::Good, None, u32::MAX),
     ]);
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let before = dump(&paths.store_path("s"));
     assert_eq!(before[1].occurrences, i64::from(u32::MAX));
 
     let error = store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .expect_err("the count does not fit 32 bits");
     assert!(matches!(error, StoreError::Failed { .. }), "{error:?}");
     drop(store);
@@ -1408,9 +1557,16 @@ fn the_stored_rows_do_not_depend_on_the_batch_size() {
     for batch_rows in [Some(1), Some(7), Some(64), Some(169), Some(1024), None] {
         let scratch = Scratch::new("batch-size");
         let paths = scratch.paths();
-        let mut store = Store::create(&paths, "s", &identity()).unwrap();
+        let mut store =
+            Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
         let mut budget = budget_with(None, batch_rows);
-        let report = store.add_with(&frame, &identity(), &mut budget).unwrap();
+        let report = store
+            .add_with(
+                &frame,
+                VectorOrigin::without_release(&identity()),
+                &mut budget,
+            )
+            .unwrap();
         assert_eq!((report.rows, report.added, report.repeated), (169, 169, 0));
         let largest = batch_rows.unwrap_or(65_536);
         assert_eq!(report.plan.batch_rows, largest, "{batch_rows:?}");
@@ -1437,9 +1593,18 @@ fn free_memory_is_read_before_every_batch_and_the_batch_follows_it() {
 
     // Steady memory: the reference.
     let steady = Scratch::new("steady");
-    let mut store = Store::create(&steady.paths(), "s", &identity()).unwrap();
+    let mut store = Store::create(
+        &steady.paths(),
+        "s",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
     let report = store
-        .add_with(&frame, &identity(), &mut budget_with(None, Some(2_048)))
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut budget_with(None, Some(2_048)),
+        )
         .unwrap();
     assert!(report.plan.changes.is_empty());
     drop(store);
@@ -1463,8 +1628,19 @@ fn free_memory_is_read_before_every_batch_and_the_batch_follows_it() {
     })
     .unwrap();
     let moving = Scratch::new("moving");
-    let mut store = Store::create(&moving.paths(), "s", &identity()).unwrap();
-    let report = store.add_with(&frame, &identity(), &mut budget).unwrap();
+    let mut store = Store::create(
+        &moving.paths(),
+        "s",
+        VectorOrigin::without_release(&identity()),
+    )
+    .unwrap();
+    let report = store
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
+        .unwrap();
     drop(store);
 
     // Once at the start and once before each of the four batches.
@@ -1506,7 +1682,7 @@ fn an_add_that_does_not_fit_the_memory_limit_is_refused_before_anything_is_writt
     let scratch = Scratch::new("refused");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let before = std::fs::read(paths.store_path("s")).unwrap();
 
     // 33 MiB: 32 MiB are the tool's own, 1 MiB is left, less than the store's own share.
@@ -1515,7 +1691,11 @@ fn an_add_that_does_not_fit_the_memory_limit_is_refused_before_anything_is_writt
     let mut budget = budget_with(Some(limit), None);
     let left = budget.left_bytes();
     let error = store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget)
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
         .expect_err("one mebibyte is not enough");
     let StoreError::Memory(inner) = &error else {
         panic!("expected Memory, got {error:?}");
@@ -1539,7 +1719,11 @@ fn an_add_that_does_not_fit_the_memory_limit_is_refused_before_anything_is_writt
     let mut store = Store::open(&paths, "s").unwrap();
     let mut enough = budget_with(Some(32 * MIB + ADD_FIXED_BYTES + MIB), None);
     store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut enough)
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut enough,
+        )
         .expect("the store's share and a mebibyte for the rows");
 }
 
@@ -1548,7 +1732,7 @@ fn add_counts_its_own_share_on_top_of_what_the_caller_holds_and_hands_it_back() 
     let scratch = Scratch::new("held");
     let paths = scratch.paths();
     let logs = three_logs();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
 
     // The caller holds a logs frame of 20 MiB within a limit of 64 MiB: 12 MiB are left,
     // less than the store's share.
@@ -1562,7 +1746,11 @@ fn add_counts_its_own_share_on_top_of_what_the_caller_holds_and_hands_it_back() 
     };
     let left = budget.left_bytes();
     let error = store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget)
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
         .expect_err("what the caller holds counts");
     assert!(matches!(
         error,
@@ -1574,7 +1762,11 @@ fn add_counts_its_own_share_on_top_of_what_the_caller_holds_and_hands_it_back() 
     budget.hold(MIB);
     let left = budget.left_bytes();
     store
-        .add_with(&rows(&logs, "a.log", 1), &identity(), &mut budget)
+        .add_with(
+            &rows(&logs, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
         .unwrap();
     assert_eq!(budget.left_bytes(), left);
     assert_eq!(store.len().unwrap(), 3);
@@ -1589,10 +1781,14 @@ fn a_refusal_between_batches_rolls_the_add_back_and_hands_the_budget_back() {
     let paths = scratch.paths();
     let logs = synthetic_logs(5_000);
     let frame = rows(&logs, "synthetic", 1);
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let already = logs_of(&[record("already there", Label::Good, None, 1)]);
     store
-        .add_with(&rows(&already, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&already, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     let before = std::fs::read(paths.store_path("s")).unwrap();
 
@@ -1614,7 +1810,11 @@ fn a_refusal_between_batches_rolls_the_add_back_and_hands_the_budget_back() {
     let left = budget.left_bytes();
 
     let error = store
-        .add_with(&frame, &identity(), &mut budget)
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
         .expect_err("1,000 free bytes are not enough for a batch");
     let StoreError::Memory(L2dError::Refused { reason }) = &error else {
         panic!("expected a memory refusal, got {error:?}");
@@ -1644,7 +1844,11 @@ fn a_refusal_between_batches_rolls_the_add_back_and_hands_the_budget_back() {
 
     let mut store = Store::open(&paths, "s").unwrap();
     let report = store
-        .add_with(&frame, &identity(), &mut budget_with(None, Some(1_024)))
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut budget_with(None, Some(1_024)),
+        )
         .expect("with memory the same frame is added");
     assert_eq!((report.added, report.repeated), (5_000, 0));
     drop(store);
@@ -1664,7 +1868,7 @@ fn longest_text(logs: &LogsFrame) -> u64 {
 fn a_text_with_a_nul_character_is_not_added() {
     let scratch = Scratch::new("nul");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     for (text, at) in [("a\0bcdef\0ghi", 2), ("\0", 1), ("GET /a?x=1\0", 11)] {
         let logs = logs_of(&[
             record("GET /first", Label::Good, None, 1),
@@ -1674,7 +1878,7 @@ fn a_text_with_a_nul_character_is_not_added() {
         let error = store
             .add_with(
                 &rows(&logs, "a.log", 1),
-                &identity(),
+                VectorOrigin::without_release(&identity()),
                 &mut budget_with(None, Some(1)),
             )
             .expect_err("a NUL in the text");
@@ -1695,7 +1899,7 @@ fn a_text_with_a_nul_character_is_not_added() {
 fn a_text_longer_than_the_longest_measured_is_not_added() {
     let scratch = Scratch::new("too-long");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let before = std::fs::read(paths.store_path("s")).unwrap();
     let limit = usize::try_from(MAX_TEXT_BYTES).unwrap();
 
@@ -1707,7 +1911,11 @@ fn a_text_longer_than_the_longest_measured_is_not_added() {
     let mut budget = budget();
     let left = budget.left_bytes();
     let error = store
-        .add_with(&rows(&too_long, "a.log", 1), &identity(), &mut budget)
+        .add_with(
+            &rows(&too_long, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget,
+        )
         .expect_err("one byte too many");
     let detail = invalid_rows(error);
     assert!(detail.contains("row 3"), "{detail}");
@@ -1729,7 +1937,7 @@ fn a_text_longer_than_the_longest_measured_is_not_added() {
 fn the_longest_text_of_the_frame_decides_the_adds_own_share() {
     let scratch = Scratch::new("long-share");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let before = std::fs::read(paths.store_path("s")).unwrap();
 
     const LONG: u64 = 100_000;
@@ -1748,7 +1956,11 @@ fn the_longest_text_of_the_frame_decides_the_adds_own_share() {
     let mut short = budget_with(Some(32 * MIB + own - 1), None);
     let left = short.left_bytes();
     let error = store
-        .add_with(&frame, &identity(), &mut short)
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut short,
+        )
         .expect_err("one byte short");
     let StoreError::Memory(L2dError::Refused { reason }) = &error else {
         panic!("expected a memory refusal, got {error:?}");
@@ -1770,7 +1982,11 @@ fn the_longest_text_of_the_frame_decides_the_adds_own_share() {
     // With room for the share and the batch, the add happens and reports its share.
     let mut enough = budget_with(Some(32 * MIB + own + 4 * MIB), None);
     let report = store
-        .add_with(&frame, &identity(), &mut enough)
+        .add_with(
+            &frame,
+            VectorOrigin::without_release(&identity()),
+            &mut enough,
+        )
         .expect("the share and four mebibytes for the rows");
     assert_eq!((report.added, report.repeated), (300, 0));
     assert_eq!(report.longest_text_bytes, LONG);
@@ -1785,7 +2001,11 @@ fn the_longest_text_of_the_frame_decides_the_adds_own_share() {
     let short_logs = three_logs();
     let mut store = Store::open(&paths, "s").unwrap();
     let report = store
-        .add_with(&rows(&short_logs, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short_logs, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(report.longest_text_bytes, longest_text(&short_logs));
     assert_eq!(
@@ -1802,7 +2022,7 @@ fn the_longest_text_of_the_frame_decides_the_adds_own_share() {
 fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
     let scratch = Scratch::new("still-held");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     assert_eq!(store.retained_bytes(), IDLE_BYTES);
 
     const EARLIER: u64 = 10_000;
@@ -1812,7 +2032,11 @@ fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
         record(&"abcdefghij".repeat(1_000), Label::Bad, None, 1),
     ]);
     let report = store
-        .add_with(&rows(&first, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&first, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(report.longest_text_bytes, EARLIER);
     assert_eq!(
@@ -1825,7 +2049,11 @@ fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
     let short = three_logs();
     let own = ADD_FIXED_BYTES + ADD_TEXT_FACTOR * EARLIER;
     let report = store
-        .add_with(&rows(&short, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(report.longest_text_bytes, longest_text(&short));
     assert_eq!(report.held_bytes, own);
@@ -1833,7 +2061,11 @@ fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
     // And it is named when the share does not fit.
     let mut tight = budget_with(Some(32 * MIB + own - 1), None);
     let error = store
-        .add_with(&rows(&short, "c.log", 1), &identity(), &mut tight)
+        .add_with(
+            &rows(&short, "c.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut tight,
+        )
         .expect_err("one byte short");
     let StoreError::Memory(L2dError::Refused { reason }) = &error else {
         panic!("expected a memory refusal, got {error:?}");
@@ -1849,7 +2081,11 @@ fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
     // A store opened anew holds no such table.
     let mut store = Store::open(&paths, "s").unwrap();
     let report = store
-        .add_with(&rows(&short, "c.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short, "c.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(
         report.held_bytes,
@@ -1864,7 +2100,7 @@ fn a_text_the_open_store_still_holds_a_table_for_counts_in_later_adds() {
 fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connection() {
     let scratch = Scratch::new("reopened");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     let created_at = store.created_at().to_string();
 
     const LONG: u64 = 100_000;
@@ -1875,7 +2111,11 @@ fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connect
         record("GET /third", Label::Unknown, None, 3),
     ]);
     let report = store
-        .add_with(&rows(&long, "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&long, "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!((report.added, report.repeated), (3, 0));
     assert_eq!(report.held_bytes, ADD_FIXED_BYTES + ADD_TEXT_FACTOR * LONG);
@@ -1890,7 +2130,11 @@ fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connect
     // A later add of short texts holds the fixed share and what its own texts need.
     let short = three_logs();
     let report = store
-        .add_with(&rows(&short, "b.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short, "b.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!((report.added, report.repeated), (3, 0));
     assert_eq!(
@@ -1899,7 +2143,11 @@ fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connect
     );
     // Repeated ids are still found: the long text again, after the connection changed.
     let report = store
-        .add_with(&rows(&long, "a.log", 2), &identity(), &mut budget())
+        .add_with(
+            &rows(&long, "a.log", 2),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!((report.added, report.repeated), (0, 3));
 
@@ -1912,14 +2160,22 @@ fn after_a_text_above_the_release_threshold_the_store_goes_on_with_a_new_connect
     ]);
     let detail = invalid_rows(
         store
-            .add_with(&rows(&spoiled, "c.log", 1), &identity(), &mut budget())
+            .add_with(
+                &rows(&spoiled, "c.log", 1),
+                VectorOrigin::without_release(&identity()),
+                &mut budget(),
+            )
             .unwrap_err(),
     );
     assert!(detail.contains("row 2"), "{detail}");
     assert_eq!(store.retained_bytes(), IDLE_BYTES);
     assert_eq!(dump(&paths.store_path("s")), before);
     let report = store
-        .add_with(&rows(&short, "d.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&short, "d.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
     assert_eq!(
         report.held_bytes,
@@ -1957,9 +2213,13 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     let scratch = Scratch::new("identity-changed");
     let paths = scratch.paths();
     let path = paths.store_path("s");
-    let mut store = Store::create(&paths, "s", &identity()).unwrap();
+    let mut store = Store::create(&paths, "s", VectorOrigin::without_release(&identity())).unwrap();
     store
-        .add_with(&rows(&three_logs(), "a.log", 1), &identity(), &mut budget())
+        .add_with(
+            &rows(&three_logs(), "a.log", 1),
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap();
 
     let set_revision = |revision: &str| {
@@ -1993,7 +2253,11 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     for frame in [&short, &long, &short.head(Some(0))] {
         changed(
             store
-                .add_with(frame, &identity(), &mut budget())
+                .add_with(
+                    frame,
+                    VectorOrigin::without_release(&identity()),
+                    &mut budget(),
+                )
                 .unwrap_err(),
         );
     }
@@ -2008,7 +2272,14 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     // Searches read nothing either.
     let query = unit_vector("q", 1, DIM);
     changed(store.text_search(&Filter::default(), 10).unwrap_err());
-    changed(store.vectors(&Filter::default()).unwrap_err());
+    changed(
+        store
+            .vectors(
+                VectorOrigin::without_release(&identity()),
+                &Filter::default(),
+            )
+            .unwrap_err(),
+    );
     changed(
         store
             .matching_with(&Filter::default(), 10, &mut budget())
@@ -2016,7 +2287,12 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     );
     changed(
         store
-            .nearest(&query, &identity(), 3, &Filter::default())
+            .nearest(
+                &query,
+                VectorOrigin::without_release(&identity()),
+                3,
+                &Filter::default(),
+            )
             .unwrap_err(),
     );
     changed(store.explain(&Filter::default()).unwrap_err());
@@ -2027,7 +2303,11 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
         .execute("UPDATE meta SET created_at = '2001-01-01T00:00:00Z'", [])
         .unwrap();
     let error = store
-        .add_with(&short, &identity(), &mut budget())
+        .add_with(
+            &short,
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .unwrap_err();
     assert!(
         matches!(&error, StoreError::Failed { detail } if detail.contains("2001-01-01T00:00:00Z")),
@@ -2041,10 +2321,20 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
         .execute("UPDATE meta SET created_at = ?1", [store.created_at()])
         .unwrap();
     let report = store
-        .add_with(&short, &identity(), &mut budget())
+        .add_with(
+            &short,
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
         .expect("the file is the store's again");
     assert_eq!(report.added, 3);
-    let report = store.add_with(&long, &identity(), &mut budget()).unwrap();
+    let report = store
+        .add_with(
+            &long,
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
+        .unwrap();
     assert_eq!(report.added, 1);
     assert_eq!(store.retained_bytes(), IDLE_BYTES);
     assert_eq!(
@@ -2053,7 +2343,12 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     );
     assert_eq!(
         store
-            .nearest(&query, &identity(), 3, &Filter::default())
+            .nearest(
+                &query,
+                VectorOrigin::without_release(&identity()),
+                3,
+                &Filter::default()
+            )
             .unwrap()
             .hits
             .height(),

@@ -13,7 +13,10 @@
 //! by the AMD runtime); vectors of another release are refused, naming both
 //! ([`StoreError::ReleaseMismatch`]), and encoding the logs again under one release is
 //! the way out. Vectors without a release (made elsewhere) and vectors with one are kept
-//! apart in both directions.
+//! apart in both directions. An origin is always stated: [`VectorOrigin::made_under`] or
+//! [`VectorOrigin::without_release`], nothing converts into one silently. The store
+//! asks for it wherever vectors go in or come out to be compared: [`Store::add`],
+//! [`Store::begin_fill`], [`Store::nearest`] and [`Store::vectors`].
 //!
 //! Everything is synchronous and in this process: SQLite is compiled in, there is no
 //! background service and no asynchronous runtime. At rest a store is its one file.
@@ -30,16 +33,28 @@
 //! | `occurrences` | UInt32 | no | how often the text occurred, at least 1 |
 //! | `label` | String | no | `good`, `bad` or `unknown` |
 //! | `group` | String | yes | the group key |
-//! | `truncated` | Boolean | no | whether the encoder saw only the start of the text |
+//! | `truncated` | Boolean | no | the part of the text the encoder reads was cut |
+//! | `text_longer_than_input` | Boolean | no | the whole text is longer than the encoder's input |
+//! | `empty` | Boolean | no | no byte other than padding reached the model |
 //! | `vector` | List(Float32) | no | the vector, exactly `dimension` finite values |
+//!
+//! The three flags are what the encoder says about its input for the log
+//! ([`LogFlags`]; requirement 1.5 for the first two). They are stored per log and come
+//! back with every stored row and every hit. A store of format 1 (see [`sqlite`]) has
+//! the first only: the two others come back as absent values there, which means
+//! unknown, not false.
 //!
 //! The store derives the identity of a log itself: [`log_id`], the SHA-256 of source
 //! and text. Adding a log whose id is stored already adds its occurrences to the stored
-//! row and leaves text, label, group, flag and vector of that row as they are. The
+//! row and leaves text, label, group, flags and vector of that row as they are. The
 //! encoder revision of a row is that of the store.
 //!
 //! An add is all or nothing: it is one database transaction, and a row that cannot be
-//! stored, a refusal or a failure part-way leaves the store as it was.
+//! stored, a refusal or a failure part-way leaves the store as it was. Several adds
+//! that belong together (the batches of one encoding run) go into one transaction
+//! through a [`Fill`] ([`Store::begin_fill`]): it is committed as a whole, and dropped
+//! without a commit, or after an add that failed, it leaves the store as it was before
+//! the first of its adds.
 //!
 //! The schema of the database file is described in [`sqlite`].
 //!
@@ -60,8 +75,17 @@
 //!   so that an add that cannot fit is refused before anything is written. A text
 //!   longer than [`MAX_TEXT_BYTES`] is not stored at all.
 //!
-//! An add ends, whatever its outcome, by giving SQLite's memory back, so that an open
-//! store keeps no more than [`IDLE_BYTES`] between adds ([`Store::retained_bytes`]):
+//! While a [`Fill`] is open, SQLite keeps between its adds what the adds took (the
+//! pages of the open transaction up to [`CACHE_BYTES`], and the table of the text
+//! index): the caller of a fill keeps [`Store::add_share_bytes`] for the longest text
+//! of the whole fill held between the adds, and each add of the fill asks for its own
+//! share on top of what the caller holds while it runs, as an add on its own does.
+//! What a long transaction writes goes to the file as the page cache fills, so the
+//! heap does not grow with the number of rows of a fill.
+//!
+//! An add on its own and a fill end, whatever their outcome, by giving SQLite's memory
+//! back, so that an open store keeps no more than [`IDLE_BYTES`] between them
+//! ([`Store::retained_bytes`]):
 //! the page cache is released, and when a text longer than [`RELEASE_TEXT_BYTES`] was
 //! indexed the connection is closed and opened again, because the text index keeps a
 //! table sized for the longest text it has indexed for as long as its connection
@@ -126,8 +150,15 @@ pub const OCCURRENCES: &str = LogsFrame::OCCURRENCES;
 pub const LABEL: &str = LogsFrame::LABEL;
 /// Column of the rows frame: the group key.
 pub const GROUP: &str = LogsFrame::GROUP;
-/// Column of the rows frame: whether the encoder saw only the start of the text.
+/// Column of the rows frame: the part of the text the encoder reads was cut
+/// ([`LogFlags::truncated`]).
 pub const TRUNCATED: &str = "truncated";
+/// Column of the rows frame: the whole text is longer than the encoder's input
+/// ([`LogFlags::text_longer_than_input`]).
+pub const TEXT_LONGER_THAN_INPUT: &str = "text_longer_than_input";
+/// Column of the rows frame: no byte other than padding reached the model
+/// ([`LogFlags::empty`]).
+pub const EMPTY: &str = "empty";
 /// Column of the rows frame: the vector.
 pub const VECTOR: &str = "vector";
 
@@ -260,18 +291,14 @@ pub enum StoreError {
         given: EncoderIdentity,
     },
     /// The vectors given were made under another release of the AMD runtime than the
-    /// store's, or one of the two has no release (task 2.7).
-    #[error(
-        "the store holds vectors made under {}, but the vectors given were made under {}; \
-         the AMD runtime compiles the model per release and the vectors differ between \
-         releases, so vectors of different releases are never stored together or compared; \
-         encode the logs again under one release, into a new store",
-        describe_release(.store),
-        describe_release(.given)
-    )]
+    /// store's, or one of the two has no release (task 2.7). `store_format` is the
+    /// format of the store's file: a store of format 1 was written before releases were
+    /// recorded, and the message says so.
+    #[error("{}", release_mismatch(.store, .given, *.store_format))]
     ReleaseMismatch {
         store: Option<String>,
         given: Option<String>,
+        store_format: u32,
     },
     /// There is no store of that name.
     #[error("missing store {name}: expected at {}", .expected_at.display())]
@@ -319,12 +346,33 @@ fn describe_release(release: &Option<String>) -> String {
     }
 }
 
+/// The message of [`StoreError::ReleaseMismatch`].
+fn release_mismatch(store: &Option<String>, given: &Option<String>, store_format: u32) -> String {
+    const WAY_OUT: &str = "the AMD runtime compiles the model per release and the vectors \
+                           differ between releases, so vectors of different releases are never \
+                           stored together or compared; encode the logs again under one \
+                           release, into a new store";
+    match (store, given) {
+        (None, Some(given)) if store_format < SCHEMA_VERSION => format!(
+            "the store is of format {store_format}, written before the AMD runtime release of \
+             a store's vectors was recorded, so nothing says under which release, if any, its \
+             vectors were made; the vectors given were made under the AMD runtime release \
+             {given}; {WAY_OUT}"
+        ),
+        _ => format!(
+            "the store holds vectors made under {}, but the vectors given were made under {}; \
+             {WAY_OUT}",
+            describe_release(store),
+            describe_release(given)
+        ),
+    }
+}
+
 /// Where vectors are from: the encoder that produced them and, for vectors made by the
 /// AMD runtime through this tool, the release of that runtime.
 ///
-/// A reference to an [`EncoderIdentity`] converts into the origin without a release,
-/// which is what vectors made elsewhere have (the synthetic vectors of tests, vectors
-/// brought in from another tool).
+/// Every caller states which of the two it is, with one of the two constructors:
+/// nothing converts into an origin, so that "no release" is never meant by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VectorOrigin<'a> {
     pub identity: &'a EncoderIdentity,
@@ -340,15 +388,35 @@ impl<'a> VectorOrigin<'a> {
             runtime_release: Some(release),
         }
     }
-}
 
-impl<'a> From<&'a EncoderIdentity> for VectorOrigin<'a> {
-    fn from(identity: &'a EncoderIdentity) -> Self {
+    /// Vectors of the encoder `identity` that were not made by the AMD runtime through
+    /// this tool, so that no release is known for them: the synthetic vectors of tests,
+    /// vectors brought in from another tool, the vectors of a store of format 1. They
+    /// and vectors of a release are kept apart in both directions.
+    pub fn without_release(identity: &'a EncoderIdentity) -> Self {
         Self {
             identity,
             runtime_release: None,
         }
     }
+}
+
+/// What the encoder says about its input for one log; stored with the log.
+///
+/// The first two are the two flags of requirement 1.5: an encoder that reads only a
+/// part of the text (its input mode) says separately whether that part was cut and
+/// whether the whole text is longer than its input. The store does not interpret them.
+/// For vectors that no encoder input stands behind, the caller states what holds; the
+/// default is three times no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LogFlags {
+    /// The part of the text the encoder reads is longer than its input, so the end of
+    /// that part is not in the vector.
+    pub truncated: bool,
+    /// The whole log text is longer than the encoder's input, whatever part is read.
+    pub text_longer_than_input: bool,
+    /// No byte other than padding reached the model.
+    pub empty: bool,
 }
 
 impl From<StoreError> for L2dError {
@@ -426,6 +494,8 @@ pub fn rows_schema() -> Schema {
         Field::new(LABEL.into(), DataType::String),
         Field::new(GROUP.into(), DataType::String),
         Field::new(TRUNCATED.into(), DataType::Boolean),
+        Field::new(TEXT_LONGER_THAN_INPUT.into(), DataType::Boolean),
+        Field::new(EMPTY.into(), DataType::Boolean),
         Field::new(VECTOR.into(), DataType::List(Box::new(DataType::Float32))),
     ])
 }
@@ -433,15 +503,15 @@ pub fn rows_schema() -> Schema {
 /// The store rows frame for `logs`, all from `source`.
 ///
 /// `vectors` holds the vectors of the logs one after the other in the order of the
-/// frame, `dimension` values each; `truncated` holds one flag per log. Other lengths are
-/// [`StoreError::InvalidRows`]. The text, label, group and occurrence columns are
-/// shared with `logs`, not copied.
+/// frame, `dimension` values each; `flags` holds the three flags of each log. Other
+/// lengths are [`StoreError::InvalidRows`]. The text, label, group and occurrence
+/// columns are shared with `logs`, not copied.
 pub fn rows_frame(
     logs: &LogsFrame,
     source: &str,
     vectors: &[f32],
     dimension: u16,
-    truncated: &[bool],
+    flags: &[LogFlags],
 ) -> Result<DataFrame, StoreError> {
     let rows = logs.len();
     let width = usize::from(dimension);
@@ -456,14 +526,17 @@ pub fn rows_frame(
             ),
         });
     }
-    if truncated.len() != rows {
+    if flags.len() != rows {
         return Err(StoreError::InvalidRows {
             detail: format!(
-                "{rows} logs need {rows} truncation flags; {} were given",
-                truncated.len()
+                "{rows} logs need the flags of {rows} logs; those of {} were given",
+                flags.len()
             ),
         });
     }
+    let flag = |name: &str, of: fn(&LogFlags) -> bool| {
+        Column::new(name.into(), flags.iter().map(of).collect::<Vec<bool>>())
+    };
     let mut builder = ListPrimitiveChunkedBuilder::<Float32Type>::new(
         VECTOR.into(),
         rows,
@@ -482,7 +555,9 @@ pub fn rows_frame(
         column(LogsFrame::OCCURRENCES)?,
         column(LogsFrame::LABEL)?,
         column(LogsFrame::GROUP)?,
-        Column::new(TRUNCATED.into(), truncated),
+        flag(TRUNCATED, |flags| flags.truncated),
+        flag(TEXT_LONGER_THAN_INPUT, |flags| flags.text_longer_than_input),
+        flag(EMPTY, |flags| flags.empty),
         builder.finish().into_column(),
     ])
     .map_err(|error| not_rows(&error))
@@ -589,6 +664,8 @@ pub struct Store {
     name: String,
     path: PathBuf,
     meta: sqlite::Meta,
+    /// The format of the file when it was created or opened.
+    format: u32,
     /// The longest text indexed on this connection since it was opened: the text index
     /// keeps a table of that size (see [`RELEASE_TEXT_BYTES`]).
     indexed_text_bytes: u64,
@@ -597,8 +674,8 @@ pub struct Store {
 impl Store {
     /// Creates the store `name` for vectors of `origin`, as `stores/<name>.db` below the
     /// project root: the encoder identity, and the release of the AMD runtime the vectors
-    /// are made under ([`VectorOrigin::made_under`]). A reference to an identity alone
-    /// creates a store for vectors without a release.
+    /// are made under ([`VectorOrigin::made_under`]), or none
+    /// ([`VectorOrigin::without_release`]).
     ///
     /// - A name that is not 1 to [`MAX_NAME_BYTES`] letters, digits, `.`, `_` or `-`, or
     ///   that starts with a dot, is [`StoreError::InvalidName`].
@@ -612,15 +689,15 @@ impl Store {
     /// there first; tables and identity are then written in one transaction. After a
     /// failure the file is removed again. A process that is killed in between leaves an
     /// empty file, which [`Store::open`] reports as such.
-    pub fn create<'a>(
+    pub fn create(
         paths: &ProjectPaths,
         name: &str,
-        origin: impl Into<VectorOrigin<'a>>,
+        origin: VectorOrigin<'_>,
     ) -> Result<Self, StoreError> {
         let VectorOrigin {
             identity,
             runtime_release,
-        } = origin.into();
+        } = origin;
         validate_name(name)?;
         validate_identity(identity)?;
         validate_release(runtime_release)?;
@@ -642,11 +719,12 @@ impl Store {
             Err(error) => return Err(failed("creating", &path, error)),
         }
         match sqlite::create(&path, identity, runtime_release, env!("CARGO_PKG_VERSION")) {
-            Ok((connection, meta)) => Ok(Self {
+            Ok((connection, meta, format)) => Ok(Self {
                 connection,
                 name: name.to_string(),
                 path,
                 meta,
+                format,
                 indexed_text_bytes: 0,
             }),
             Err(detail) => {
@@ -663,8 +741,8 @@ impl Store {
     /// it was expected. A file that is not a store of this tool and of a format from
     /// [`OLDEST_SCHEMA_VERSION`] to [`SCHEMA_VERSION`] is [`StoreError::Failed`]; it is
     /// not changed. A store of format 1, written before the runtime release was
-    /// recorded, opens as a store without a release and is not migrated (see
-    /// [`sqlite`]).
+    /// recorded, opens as a store without a release and stays usable as it was built;
+    /// it is not migrated and nothing is written to it by opening it (see [`sqlite`]).
     pub fn open(paths: &ProjectPaths, name: &str) -> Result<Self, StoreError> {
         validate_name(name)?;
         let path = paths.store_path(name);
@@ -685,13 +763,14 @@ impl Store {
                  leaves such a file); remove it and create the store again",
             ));
         }
-        let (connection, meta) =
+        let (connection, meta, format) =
             sqlite::open(&path).map_err(|detail| failed("opening the store", &path, detail))?;
         Ok(Self {
             connection,
             name: name.to_string(),
             path,
             meta,
+            format,
             indexed_text_bytes: 0,
         })
     }
@@ -716,6 +795,13 @@ impl Store {
     /// written before the release was recorded (format 1).
     pub fn runtime_release(&self) -> Option<&str> {
         self.meta.runtime_release.as_deref()
+    }
+
+    /// The format of the store's file: [`SCHEMA_VERSION`] for a store this version
+    /// created, [`OLDEST_SCHEMA_VERSION`] for one written before the runtime release
+    /// and the flags `text_longer_than_input` and `empty` were recorded.
+    pub fn format(&self) -> u32 {
+        self.format
     }
 
     /// When the store was created: UTC, `YYYY-MM-DDTHH:MM:SSZ`.
@@ -765,8 +851,9 @@ impl Store {
     /// itself, in its own transaction ([`Store::require_same_file`]).
     fn release(&mut self) {
         if self.indexed_text_bytes > RELEASE_TEXT_BYTES
-            && let Ok((connection, meta)) = sqlite::open(&self.path)
+            && let Ok((connection, meta, format)) = sqlite::open(&self.path)
             && meta == self.meta
+            && format == self.format
         {
             // The old connection is closed when it is dropped by the assignment.
             self.connection = connection;
@@ -850,13 +937,11 @@ impl Store {
     /// Unless vectors of `origin` belong in this store: [`StoreError::IdentityMismatch`]
     /// for another encoder identity (checked first), [`StoreError::ReleaseMismatch`] for
     /// another release of the AMD runtime, or when only one of the two has a release.
-    /// Both sides are named. Every add and every search by vector starts with this; a
-    /// caller that encodes for a store asks it before it encodes.
-    pub fn require_origin<'a>(
-        &self,
-        origin: impl Into<VectorOrigin<'a>>,
-    ) -> Result<(), StoreError> {
-        let origin = origin.into();
+    /// Both sides are named, and a store of format 1 says that it was written before
+    /// releases were recorded. Every add, every fill, every search by vector and every
+    /// export of vectors starts with this; a caller that encodes for a store asks it
+    /// before it encodes.
+    pub fn require_origin(&self, origin: VectorOrigin<'_>) -> Result<(), StoreError> {
         self.require_identity(origin.identity)?;
         if origin.runtime_release == self.runtime_release() {
             Ok(())
@@ -864,6 +949,7 @@ impl Store {
             Err(StoreError::ReleaseMismatch {
                 store: self.meta.runtime_release.clone(),
                 given: origin.runtime_release.map(str::to_string),
+                store_format: self.format,
             })
         }
     }
@@ -885,10 +971,10 @@ impl Store {
     /// for callers whose frame is small. A caller that read its logs under a budget, or
     /// holds a frame of any size that matters, passes that budget to
     /// [`Store::add_with`], so that the frame counts against the same limit.
-    pub fn add<'a>(
+    pub fn add(
         &mut self,
         rows: &DataFrame,
-        origin: impl Into<VectorOrigin<'a>>,
+        origin: VectorOrigin<'_>,
     ) -> Result<AddReport, StoreError> {
         let mut budget =
             MemoryBudget::observe(&MemorySettings::default()).map_err(StoreError::Memory)?;
@@ -897,8 +983,7 @@ impl Store {
 
     /// Adds the logs of the store rows frame `rows` (see the crate description), whose
     /// vectors are of `origin`: the encoder that produced them and, if they were made by
-    /// the AMD runtime, its release (a reference to an identity alone stands for vectors
-    /// without a release).
+    /// the AMD runtime, its release.
     ///
     /// - Another identity than the store's is [`StoreError::IdentityMismatch`].
     /// - Another runtime release than the store's, or a release where the store has
@@ -919,23 +1004,59 @@ impl Store {
     ///   with the memory needed and the memory left.
     ///
     /// - When the file no longer describes this open store (another program changed
-    ///   its `meta` row: encoder identity, creation time or tool version), the add is
-    ///   [`StoreError::Failed`], naming what the store was opened as and what the file
-    ///   says now, and nothing is written. This is read inside the add's transaction,
-    ///   before the first row, for every add.
+    ///   its `meta` row: encoder identity, creation time or tool version), the add is [`StoreError::Failed`], naming what the store was opened
+    ///   as and what the file says now, and nothing is written. This is read inside the
+    ///   add's transaction, before the first row, for every add.
     ///
     /// The frame is written in batches in row order; the free memory is read again
     /// before each batch. The stored rows do not depend on the batches. Whatever the
     /// outcome, the budget holds afterwards what it held before, the store has given
     /// back what the add took of SQLite's memory ([`Store::retained_bytes`]), and after
     /// anything but success the stored rows are as they were.
-    pub fn add_with<'a>(
+    ///
+    /// The add is a [`Fill`] of one add. A store of format 1 has no place for the flags
+    /// `text_longer_than_input` and `empty`: those two of the rows are not kept there.
+    pub fn add_with(
         &mut self,
         rows: &DataFrame,
-        origin: impl Into<VectorOrigin<'a>>,
+        origin: VectorOrigin<'_>,
         budget: &mut MemoryBudget,
     ) -> Result<AddReport, StoreError> {
+        let mut fill = self.begin_fill(origin)?;
+        let report = fill.add_with(rows, budget)?;
+        fill.commit()?;
+        Ok(report)
+    }
+
+    /// Begins a fill: one transaction for several adds of vectors of `origin`, which is
+    /// checked here as [`Store::add_with`] checks it. See [`Fill`].
+    ///
+    /// The file must still describe this open store ([`StoreError::Failed`] otherwise,
+    /// as for an add); that is read inside the transaction, before anything is written.
+    /// Nothing is written by beginning a fill.
+    pub fn begin_fill(&mut self, origin: VectorOrigin<'_>) -> Result<Fill<'_>, StoreError> {
         self.require_origin(origin)?;
+        self.connection
+            .execute_batch("BEGIN")
+            .map_err(|error| failed("adding to the store", &self.path, error))?;
+        // From here on the transaction is ended by the fill, also when it is dropped.
+        let fill = Fill {
+            store: self,
+            open: true,
+            failed: false,
+        };
+        fill.store.require_same_file(&fill.store.connection)?;
+        Ok(fill)
+    }
+
+    /// One add inside the open transaction of a fill: everything of
+    /// [`Store::add_with`] but the origin, the transaction and the giving back of
+    /// SQLite's memory.
+    fn add_rows(
+        &mut self,
+        rows: &DataFrame,
+        budget: &mut MemoryBudget,
+    ) -> Result<AddReport, StoreError> {
         check_rows(rows)?;
         let longest = longest_text(rows)?;
         if longest.bytes > MAX_TEXT_BYTES {
@@ -977,14 +1098,12 @@ impl Store {
         // What the caller holds already (its frames) stays counted during the add.
         let held = budget.usable_bytes() - left;
         budget.hold(held + own);
-        let result = self.add_in_batches(rows, budget, own, longest.bytes);
-        // Whatever the outcome: SQLite's memory is given back before the budget is.
-        self.release();
+        let result = self.write_in_batches(rows, budget, own, longest.bytes);
         budget.hold(held);
         result
     }
 
-    fn add_in_batches(
+    fn write_in_batches(
         &mut self,
         rows: &DataFrame,
         budget: &mut MemoryBudget,
@@ -1004,57 +1123,154 @@ impl Store {
             longest_text_bytes,
             plan: plan.clone(),
         };
+        if total == 0 {
+            return Ok(report);
+        }
         let path = self.path.clone();
         let fail = |error: rusqlite::Error| failed("adding to the store", &path, error);
         let dimension = usize::from(self.meta.identity.dimension);
         let revision = self.meta.identity.revision.clone();
-        // Dropped without a commit, the transaction is rolled back: an add is all or
-        // nothing.
-        let transaction = self.connection.unchecked_transaction().map_err(fail)?;
-        // Before anything is written: the file must still be this store's.
-        self.require_same_file(&transaction)?;
-        if total == 0 {
-            return Ok(report);
-        }
+        // A file of format 1 has no columns for the two flags that format 2 added.
+        let with_flags = self.format >= SCHEMA_VERSION;
         // From here on texts are indexed, also by an add that fails later.
         self.indexed_text_bytes = self.indexed_text_bytes.max(longest_text_bytes);
         // A store written before the index over the text lengths existed gets it with
         // its first add; otherwise this does nothing.
-        transaction
+        self.connection
             .execute_batch(sqlite::TEXT_BYTES_INDEX_SQL)
             .map_err(fail)?;
-        {
-            let mut writer = Writer {
-                insert: transaction
-                    .prepare(
-                        "INSERT INTO logs (id, text, source, occurrences, label, group_key, \
-                         truncated, vector, encoder_revision) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-                         ON CONFLICT (id) DO NOTHING",
-                    )
-                    .map_err(fail)?,
-                repeat: transaction
-                    .prepare("UPDATE logs SET occurrences = occurrences + ?2 WHERE id = ?1")
-                    .map_err(fail)?,
-                dimension,
-                revision: &revision,
-                path: &path,
-                blob: Vec::with_capacity(dimension * 4),
-            };
-            let mut done = 0u64;
-            while done < total {
-                let batch_rows = budget
-                    .next_batch_rows(&mut plan, done)
-                    .map_err(|error| refused_between_batches(error, own, done))?
-                    .min(total - done);
-                let batch = rows.slice(done as i64, batch_rows as usize);
-                writer.write(&batch, done, &mut report)?;
-                done += batch_rows;
-            }
+        let insert = if with_flags {
+            "INSERT INTO logs (id, text, source, occurrences, label, group_key, truncated, \
+             vector, encoder_revision, text_longer_than_input, empty) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             ON CONFLICT (id) DO NOTHING"
+        } else {
+            "INSERT INTO logs (id, text, source, occurrences, label, group_key, truncated, \
+             vector, encoder_revision) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT (id) DO NOTHING"
+        };
+        let mut writer = Writer {
+            insert: self.connection.prepare(insert).map_err(fail)?,
+            repeat: self
+                .connection
+                .prepare("UPDATE logs SET occurrences = occurrences + ?2 WHERE id = ?1")
+                .map_err(fail)?,
+            dimension,
+            revision: &revision,
+            path: &path,
+            with_flags,
+            blob: Vec::with_capacity(dimension * 4),
+        };
+        let mut done = 0u64;
+        while done < total {
+            let batch_rows = budget
+                .next_batch_rows(&mut plan, done)
+                .map_err(|error| refused_between_batches(error, own, done))?
+                .min(total - done);
+            let batch = rows.slice(done as i64, batch_rows as usize);
+            writer.write(&batch, done, &mut report)?;
+            done += batch_rows;
         }
-        transaction.commit().map_err(fail)?;
         report.plan = plan;
         Ok(report)
+    }
+}
+
+/// Several adds to one store in one database transaction ([`Store::begin_fill`]): the
+/// batches of one encoding run, which are stored together or not at all.
+///
+/// - [`Fill::add_with`] adds a rows frame as [`Store::add_with`] does. Nothing of it is
+///   kept in memory by the fill: each add writes its rows to the transaction.
+/// - [`Fill::commit`] makes all of them stored.
+/// - A fill that is dropped without a commit (an early return, a failure of whatever
+///   produces the vectors) is rolled back: the store, its text index included, is as
+///   it was before the fill began. So is a fill of which one add failed: it takes no
+///   further add and cannot be committed.
+///
+/// Whatever the outcome, the end of a fill gives back what its adds took of SQLite's
+/// memory ([`Store::retained_bytes`]). While it is open, SQLite keeps that memory
+/// between the adds: the caller keeps [`Store::add_share_bytes`] for the longest text
+/// of the whole fill held in its budget between the adds (and not during them: an add
+/// asks for its own share on top of what the caller holds).
+///
+/// A long transaction costs no memory per row: SQLite writes changed pages to the
+/// file when its page cache ([`CACHE_BYTES`]) is full, and its rollback journal holds
+/// the pages of the file as they were before the fill, which for a store that only
+/// grows is little. Until the commit the file on disk holds pages of the fill that a
+/// rollback, or the next opening after a crash, takes out again.
+#[derive(Debug)]
+pub struct Fill<'s> {
+    store: &'s mut Store,
+    /// Whether the transaction is still open.
+    open: bool,
+    /// Whether an add failed: the fill can then only be dropped.
+    failed: bool,
+}
+
+impl Fill<'_> {
+    /// The store that is being filled, for what a caller has to ask it between adds
+    /// ([`Store::add_share_bytes`], [`Store::name`]). [`Store::len`] counts the rows of
+    /// the fill so far with the stored ones. The searches are not for use through
+    /// this: each begins a transaction of its own, which SQLite refuses while the
+    /// fill's is open.
+    pub fn store(&self) -> &Store {
+        self.store
+    }
+
+    /// Adds the logs of the store rows frame `rows`, whose vectors are of the origin
+    /// the fill was begun with: as [`Store::add_with`], inside the fill's transaction.
+    ///
+    /// After an error nothing of the whole fill will be stored: every later add of
+    /// this fill and its commit are [`StoreError::Failed`]. The budget holds
+    /// afterwards what it held before.
+    pub fn add_with(
+        &mut self,
+        rows: &DataFrame,
+        budget: &mut MemoryBudget,
+    ) -> Result<AddReport, StoreError> {
+        if self.failed {
+            return Err(self.after_failure());
+        }
+        let result = self.store.add_rows(rows, budget);
+        self.failed = result.is_err();
+        result
+    }
+
+    /// Makes every add of the fill stored, in one step. When the commit fails, or an
+    /// add of the fill failed before, the result is [`StoreError::Failed`] and the
+    /// fill is rolled back.
+    pub fn commit(mut self) -> Result<(), StoreError> {
+        if self.failed {
+            return Err(self.after_failure());
+        }
+        self.store
+            .connection
+            .execute_batch("COMMIT")
+            .map_err(|error| failed("adding to the store", &self.store.path, error))?;
+        self.open = false;
+        Ok(())
+    }
+
+    fn after_failure(&self) -> StoreError {
+        failed(
+            "adding to the store",
+            &self.store.path,
+            "an earlier add of this fill failed, so nothing of the fill is stored: the fill \
+             takes no further rows and is rolled back",
+        )
+    }
+}
+
+impl Drop for Fill<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // Without a commit nothing of the fill stays. A rollback that fails leaves
+            // the transaction to SQLite, which undoes it when the connection closes.
+            let _ = self.store.connection.execute_batch("ROLLBACK");
+        }
+        // SQLite's memory is given back whatever the outcome.
+        self.store.release();
     }
 }
 
@@ -1109,6 +1325,9 @@ struct Writer<'a> {
     dimension: usize,
     revision: &'a str,
     path: &'a Path,
+    /// Whether the file has the columns `text_longer_than_input` and `empty` (format 2)
+    /// and the insert statement takes them.
+    with_flags: bool,
     /// The vector of the row being written, as it is stored; reused from row to row.
     blob: Vec<u8>,
 }
@@ -1129,19 +1348,25 @@ impl Writer<'_> {
         let labels = column(LABEL)?.str().map_err(|e| not_rows(&e))?;
         let groups = column(GROUP)?.str().map_err(|e| not_rows(&e))?;
         let truncated = column(TRUNCATED)?.bool().map_err(|e| not_rows(&e))?;
+        let longer = column(TEXT_LONGER_THAN_INPUT)?
+            .bool()
+            .map_err(|e| not_rows(&e))?;
+        let empty = column(EMPTY)?.bool().map_err(|e| not_rows(&e))?;
         let vectors = column(VECTOR)?.list().map_err(|e| not_rows(&e))?;
 
+        let flags = truncated.iter().zip(longer.iter()).zip(empty.iter());
         let values = texts
             .iter()
             .zip(sources.iter())
             .zip(occurrences.iter())
             .zip(labels.iter())
             .zip(groups.iter())
-            .zip(truncated.iter())
+            .zip(flags)
             .zip(vectors.amortized_iter());
         for (index, value) in values.enumerate() {
             let row = rows_before + index as u64 + 1;
-            let ((((((text, source), occurrences), label), group), truncated), vector) = value;
+            let ((((((text, source), occurrences), label), group), flags), vector) = value;
+            let ((truncated, longer), empty) = flags;
             let invalid = |what: String| StoreError::InvalidRows {
                 detail: format!("row {row}: {what}"),
             };
@@ -1151,6 +1376,8 @@ impl Writer<'_> {
             let occurrences = occurrences.ok_or_else(|| absent(OCCURRENCES))?;
             let label = label.ok_or_else(|| absent(LABEL))?;
             let truncated = truncated.ok_or_else(|| absent(TRUNCATED))?;
+            let longer = longer.ok_or_else(|| absent(TEXT_LONGER_THAN_INPUT))?;
+            let empty = empty.ok_or_else(|| absent(EMPTY))?;
             let vector = vector.ok_or_else(|| absent(VECTOR))?;
 
             if let Some(at) = text.find('\0') {
@@ -1207,9 +1434,23 @@ impl Writer<'_> {
                     format!("row {row}: {error}"),
                 )
             };
-            let inserted = self
-                .insert
-                .execute(rusqlite::params![
+            let inserted = if self.with_flags {
+                self.insert.execute(rusqlite::params![
+                    id,
+                    text,
+                    source,
+                    occurrences,
+                    label,
+                    group,
+                    truncated,
+                    self.blob.as_slice(),
+                    self.revision,
+                    longer,
+                    empty,
+                ])
+            } else {
+                // Format 1: the file has no place for the two other flags.
+                self.insert.execute(rusqlite::params![
                     id,
                     text,
                     source,
@@ -1220,7 +1461,8 @@ impl Writer<'_> {
                     self.blob.as_slice(),
                     self.revision,
                 ])
-                .map_err(fail)?;
+            }
+            .map_err(fail)?;
             if inserted == 1 {
                 report.added += 1;
                 continue;

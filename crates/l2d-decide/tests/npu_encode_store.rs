@@ -4,9 +4,12 @@
 //! - `the_fixture_is_encoded_on_the_npu_and_stored`: the task's done-when on the device.
 //!   The 169 distinct logs of `tests/fixtures/mini-labelled.csv` are encoded and added to
 //!   a new store; the stored vectors are unit vectors of the identity's dimension and are
-//!   bit for bit what the session gives the same texts in one call; adding the same logs
-//!   again only adds their occurrences; a store of another runtime release refuses the
-//!   session's vectors before a text is encoded; the run record is printed.
+//!   bit for bit, and in order, what the session gives the same texts in one call; the
+//!   three flags of every stored log are what the session reports for its text (also for
+//!   three texts that are not the fixture's: two of 60,000 bytes and a short one); adding
+//!   the same logs again only adds their occurrences; a store of another runtime release
+//!   refuses the session's vectors before a text is encoded; the run record is printed;
+//!   the store opened again records the session's runtime release.
 //!
 //! What is asserted about the encoder is read from the session (identity, dimension,
 //! release): the test packages the published model of task 2.1 because that is the model
@@ -34,8 +37,8 @@ use std::path::{Path, PathBuf};
 
 use l2d_core::polars::prelude::DataFrame;
 use l2d_core::{
-    InputAdapter, LabelledAdapter, LabelledFormat, LogsFrame, MemoryBudget, MemorySettings,
-    ProjectPaths,
+    InputAdapter, Label, LabelledAdapter, LabelledFormat, LogRecord, LogsFrame, MemoryBudget,
+    MemorySettings, ProjectPaths,
 };
 use l2d_decide::{FillCause, encode_into_store};
 use l2d_encoder::{
@@ -87,19 +90,40 @@ fn fixture_logs() -> LogsFrame {
     logs
 }
 
-/// Text, occurrences, truncation flag and vector bits of every stored log, in order.
-fn stored(store: &Store) -> Vec<(String, u32, bool, Vec<u32>)> {
-    let frame: DataFrame = store.vectors(&Filter::default()).unwrap();
+fn long_record(text: &str, position: u64) -> LogRecord {
+    LogRecord {
+        text: text.to_string(),
+        label: Label::Unknown,
+        group: None,
+        first_position: position,
+        occurrences: 1,
+    }
+}
+
+/// The three flags of a stored log: `truncated`, `text_longer_than_input`, `empty`.
+type Flags = (bool, bool, bool);
+
+/// Text, occurrences, the three flags and vector bits of every stored log, in order,
+/// read as vectors of `origin`.
+fn stored(store: &Store, origin: VectorOrigin<'_>) -> Vec<(String, u32, Flags, Vec<u32>)> {
+    let frame: DataFrame = store.vectors(origin, &Filter::default()).unwrap();
     let text = frame.column(l2d_store::TEXT).unwrap().str().unwrap();
     let occurrences = frame.column(l2d_store::OCCURRENCES).unwrap().u32().unwrap();
-    let truncated = frame.column(l2d_store::TRUNCATED).unwrap().bool().unwrap();
+    let flag = |name: &str| frame.column(name).unwrap().bool().unwrap().clone();
+    let truncated = flag(l2d_store::TRUNCATED);
+    let longer = flag(l2d_store::TEXT_LONGER_THAN_INPUT);
+    let empty = flag(l2d_store::EMPTY);
     let vector = frame.column(l2d_store::VECTOR).unwrap().list().unwrap();
     (0..frame.height())
         .map(|row| {
             (
                 text.get(row).unwrap().to_string(),
                 occurrences.get(row).unwrap(),
-                truncated.get(row).unwrap(),
+                (
+                    truncated.get(row).unwrap(),
+                    longer.get(row).expect("the store records the flag"),
+                    empty.get(row).expect("the store records the flag"),
+                ),
                 vector
                     .get_as_series(row)
                     .unwrap()
@@ -232,17 +256,30 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
     let direct = session
         .encode(&borrowed)
         .unwrap_or_else(|error| panic!("{error}"));
-    let first = stored(&store);
+    let first = stored(&store, origin);
     assert_eq!(first.len(), texts.len());
     let mut longest_off_unit = 0f64;
-    for (((text, _, truncated, vector), expected_text), encoded) in
+    let mut flag_counts = (0u64, 0u64, 0u64);
+    for (((text, _, flags, vector), expected_text), encoded) in
         first.iter().zip(&texts).zip(&direct)
     {
         assert_eq!(text, expected_text);
         assert_eq!(vector.len(), dimension);
         let expected: Vec<u32> = encoded.vector.iter().map(|value| value.to_bits()).collect();
         assert_eq!(vector, &expected, "{text}");
-        assert_eq!(*truncated, encoded.input.truncated, "{text}");
+        // The three flags are stored as the session reports them for the text.
+        assert_eq!(
+            *flags,
+            (
+                encoded.input.truncated,
+                encoded.input.text_longer_than_input,
+                encoded.input.empty
+            ),
+            "{text}"
+        );
+        flag_counts.0 += u64::from(flags.0);
+        flag_counts.1 += u64::from(flags.1);
+        flag_counts.2 += u64::from(flags.2);
         let length = vector
             .iter()
             .map(|bits| f64::from(f32::from_bits(*bits)).powi(2))
@@ -251,6 +288,20 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
         longest_off_unit = longest_off_unit.max((length - 1.0).abs());
     }
     assert!(longest_off_unit < 1e-5, "unit vectors: {longest_off_unit}");
+    assert_eq!(
+        flag_counts,
+        (
+            report.truncated,
+            report.longer_than_input,
+            report.empty_inputs
+        ),
+        "the stored flags are the ones the report counted"
+    );
+    println!(
+        "{TAG}: the three flags are stored as the session reports them: {} truncated, {} \
+         longer than the input, {} empty",
+        flag_counts.0, flag_counts.1, flag_counts.2
+    );
     println!(
         "{TAG}: {} stored vectors of dimension {dimension}, bit-identical to the session's \
          own; furthest from length 1: {longest_off_unit:.2e}",
@@ -262,7 +313,7 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!((again.added, again.repeated), (0, rows));
     assert_eq!(store.len().unwrap(), rows);
-    let second = stored(&store);
+    let second = stored(&store, origin);
     for (before, after) in first.iter().zip(&second) {
         assert_eq!(after.1, 2 * before.1, "{}", before.0);
         assert_eq!(
@@ -287,7 +338,7 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
     assert!(
         matches!(
             &*error.cause,
-            FillCause::Store(StoreError::ReleaseMismatch { store, given })
+            FillCause::Store(StoreError::ReleaseMismatch { store, given, .. })
                 if store.as_deref() == Some(other_release.as_str())
                     && given.as_deref() == Some(release.as_str())
         ),
@@ -295,6 +346,47 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
     );
     assert_eq!(session.stats().texts, encoded_before, "nothing was encoded");
     assert!(other.is_empty().unwrap());
+
+    // --- Long texts: the flags of requirement 1.5 are stored as the session reports. ---
+    // The fixture's texts are short. These are long in their payload, long before it,
+    // and short; which flags that sets is the encoder's to say, and is not asserted.
+    let long = LogsFrame::from_records(&[
+        long_record(&format!("GET /long?q={}", "a".repeat(60_000)), 1),
+        long_record(&format!("GET /{}?q=1", "p".repeat(60_000)), 2),
+        long_record("GET /short?q=1", 3),
+    ])
+    .unwrap();
+    let long_texts: Vec<String> = long.records().map(|record| record.text).collect();
+    let borrowed: Vec<&str> = long_texts.iter().map(String::as_str).collect();
+    let direct = session
+        .encode(&borrowed)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut long_store = Store::create(&paths, "long", origin).unwrap();
+    let long_report = encode_into_store(&mut session, &mut long_store, &long, SOURCE, &mut budget)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(long_report.added, 3);
+    for ((text, _, flags, vector), encoded) in stored(&long_store, origin).iter().zip(&direct) {
+        assert_eq!(
+            *flags,
+            (
+                encoded.input.truncated,
+                encoded.input.text_longer_than_input,
+                encoded.input.empty
+            ),
+            "a text of {} bytes",
+            text.len()
+        );
+        let expected: Vec<u32> = encoded.vector.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(vector, &expected, "a text of {} bytes", text.len());
+        println!(
+            "{TAG}: a text of {} bytes: stored truncated {}, text_longer_than_input {}, empty \
+             {}, as the session reports",
+            text.len(),
+            flags.0,
+            flags.1,
+            flags.2
+        );
+    }
 
     // --- The run record. ---
     let mut record = session.finish();
@@ -306,6 +398,17 @@ fn the_fixture_is_encoded_on_the_npu_and_stored() {
     );
     assert_eq!(record.settings["store"]["added"], rows);
     println!("{TAG}: run record:\n{}", record.to_json().unwrap());
+
+    // --- The file itself records the session's runtime release. ---
+    drop(store);
+    let reopened = Store::open(&paths, "fixture").unwrap();
+    assert_eq!(reopened.runtime_release(), Some(release.as_str()));
+    assert_eq!(reopened.identity(), &identity);
+    assert_eq!(stored(&reopened, origin), second);
+    println!(
+        "{TAG}: opened again: the store records AMD Ryzen AI {release} and holds the same \
+         {rows} logs, vectors and flags"
+    );
     println!(
         "{TAG}: PASSED: {rows} fixture logs encoded on the NPU and stored under {identity}, \
          AMD Ryzen AI {release}"

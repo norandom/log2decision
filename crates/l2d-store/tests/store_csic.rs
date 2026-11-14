@@ -31,9 +31,9 @@ use l2d_core::{
 };
 use l2d_store::{
     ADD_FIXED_BYTES, ADD_TEXT_FACTOR, AddReport, DISTANCE, Filter, IDLE_BYTES, INDEX_TEXT_FACTOR,
-    MAX_TEXT_BYTES, Nearest, PHRASE_BYTE_BYTES, RELEASE_TEXT_BYTES, RETAINED_TEXT_FACTOR,
-    SCHEMA_VERSION, SEARCH_FIXED_BYTES, Store, StoreError, TEXT, TEXT_READ_FACTOR, log_id,
-    rows_frame,
+    LogFlags, MAX_TEXT_BYTES, Nearest, PHRASE_BYTE_BYTES, RELEASE_TEXT_BYTES, RETAINED_TEXT_FACTOR,
+    SCHEMA_VERSION, SEARCH_FIXED_BYTES, Store, StoreError, TEXT, TEXT_READ_FACTOR, VectorOrigin,
+    log_id, rows_frame,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -233,16 +233,20 @@ fn vectors_of(logs: &LogsFrame, dimension: u16) -> Vec<f32> {
 }
 
 fn rows_of(logs: &LogsFrame, source: &str, dimension: u16) -> DataFrame {
-    let truncated: Vec<bool> = logs
+    let flags: Vec<LogFlags> = logs
         .records()
-        .map(|record| record.text.len() > 256)
+        .map(|record| LogFlags {
+            truncated: record.text.len() > 256,
+            text_longer_than_input: record.text.len() > 256,
+            empty: false,
+        })
         .collect();
     rows_frame(
         logs,
         source,
         &vectors_of(logs, dimension),
         dimension,
-        &truncated,
+        &flags,
     )
     .expect("the logs make a rows frame")
 }
@@ -341,7 +345,8 @@ fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
         let batch_rows = Some(1_024);
         let scratch = Scratch::new(&one, "synthetic");
         let paths = scratch.paths();
-        let mut store = Store::create(&paths, "s", &identity(128)).unwrap();
+        let mut store =
+            Store::create(&paths, "s", VectorOrigin::without_release(&identity(128))).unwrap();
         let settings = MemorySettings {
             max_batch_rows: batch_rows,
             ..MemorySettings::default()
@@ -356,10 +361,14 @@ fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
         let empty = std::fs::read(paths.store_path("s")).unwrap();
         let mut vectors = vectors_of(&logs, 128);
         *vectors.last_mut().unwrap() = f32::NAN;
-        let truncated = vec![false; logs.len()];
-        let spoiled = rows_frame(&logs, "synthetic", &vectors, 128, &truncated).unwrap();
+        let flags = vec![LogFlags::default(); logs.len()];
+        let spoiled = rows_frame(&logs, "synthetic", &vectors, 128, &flags).unwrap();
         drop(vectors);
-        match store.add_with(&spoiled, &identity(128), &mut budget) {
+        match store.add_with(
+            &spoiled,
+            VectorOrigin::without_release(&identity(128)),
+            &mut budget,
+        ) {
             Err(StoreError::InvalidRows { detail }) => {
                 assert!(detail.contains("row 12000"), "{detail}");
             }
@@ -370,7 +379,13 @@ fn an_add_takes_no_more_memory_than_it_asks_of_the_budget() {
         assert_eq!(std::fs::read(paths.store_path("s")).unwrap(), empty);
 
         let started = Instant::now();
-        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(128), &mut budget));
+        let (report, taken) = measure(&one, || {
+            store.add_with(
+                &rows,
+                VectorOrigin::without_release(&identity(128)),
+                &mut budget,
+            )
+        });
         let report = report.expect("the logs are added");
         let seconds = started.elapsed().as_secs_f64();
         drop(store);
@@ -551,12 +566,19 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
     let one = alone();
     let scratch = Scratch::new(&one, "give-back");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+    let mut store =
+        Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
     let mut budget = roomy_budget();
     let left = budget.left_bytes();
 
     let long = rows_with_long_texts(Kind::Distinct, 256 * 1024, 1);
-    let (first, taken) = measure(&one, || store.add_with(&long, &identity(8), &mut budget));
+    let (first, taken) = measure(&one, || {
+        store.add_with(
+            &long,
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
+    });
     let first = first.expect("the long text is added");
     let idle = one.sqlite_used();
     println!(
@@ -578,7 +600,11 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
 
     // The same open store, short texts only.
     let (second, taken) = measure(&one, || {
-        store.add_with(&short_rows("later"), &identity(8), &mut budget)
+        store.add_with(
+            &short_rows("later"),
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
     });
     let second = second.expect("the short texts are added");
     println!(
@@ -618,9 +644,13 @@ fn an_open_store_gives_the_memory_of_a_long_text_back() {
     .unwrap();
     let mut vectors = vectors_of(&logs, 8);
     *vectors.last_mut().unwrap() = f32::INFINITY;
-    let spoiled = rows_frame(&logs, "spoiled", &vectors, 8, &[false, false]).unwrap();
+    let spoiled = rows_frame(&logs, "spoiled", &vectors, 8, &[LogFlags::default(); 2]).unwrap();
     assert!(matches!(
-        store.add_with(&spoiled, &identity(8), &mut budget),
+        store.add_with(
+            &spoiled,
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget
+        ),
         Err(StoreError::InvalidRows { .. })
     ));
     assert!(
@@ -663,7 +693,7 @@ fn retained_memory_measured() {
         // The plain connection.
         let scratch = Scratch::new(&one, "retained-plain");
         let paths = scratch.paths();
-        drop(Store::create(&paths, "s", &identity(8)).unwrap());
+        drop(Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap());
         assert_eq!(one.sqlite_used(), 0);
         let connection =
             Connection::open_with_flags(paths.store_path("s"), OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -678,7 +708,8 @@ fn retained_memory_measured() {
         connection
             .execute(
                 "INSERT INTO logs (id, text, source, occurrences, label, group_key, truncated, \
-                 vector, encoder_revision) VALUES ('x', ?1, 's', 1, 'good', NULL, 0, ?2, 'r')",
+                 text_longer_than_input, empty, vector, encoder_revision) \
+                 VALUES ('x', ?1, 's', 1, 'good', NULL, 0, 0, 0, ?2, 'r')",
                 rusqlite::params![text, vec![0u8; 32]],
             )
             .unwrap();
@@ -694,7 +725,8 @@ fn retained_memory_measured() {
         // The store.
         let scratch = Scratch::new(&one, "retained-store");
         let paths = scratch.paths();
-        let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+        let mut store =
+            Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
         let mut budget = roomy_budget();
         let logs = LogsFrame::from_records(&[LogRecord {
             text: text.clone(),
@@ -705,12 +737,20 @@ fn retained_memory_measured() {
         }])
         .unwrap();
         store
-            .add_with(&rows_of(&logs, "long", 8), &identity(8), &mut budget)
+            .add_with(
+                &rows_of(&logs, "long", 8),
+                VectorOrigin::without_release(&identity(8)),
+                &mut budget,
+            )
             .expect("the text is added");
         let idle = one.sqlite_used();
         let retains = store.retained_bytes();
         let (later, taken) = measure(&one, || {
-            store.add_with(&short_rows("later"), &identity(8), &mut budget)
+            store.add_with(
+                &short_rows("later"),
+                VectorOrigin::without_release(&identity(8)),
+                &mut budget,
+            )
         });
         let later = later.expect("the short texts are added");
         drop(store);
@@ -804,9 +844,16 @@ fn a_long_text_among_short_ones_stays_within_the_adds_own_share() {
         let rows = rows_with_long_texts(kind, bytes, 1);
         let scratch = Scratch::new(&one, "long-row");
         let paths = scratch.paths();
-        let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+        let mut store =
+            Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
         let mut budget = roomy_budget();
-        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
+        let (report, taken) = measure(&one, || {
+            store.add_with(
+                &rows,
+                VectorOrigin::without_release(&identity(8)),
+                &mut budget,
+            )
+        });
         let report = report.expect("the rows are added");
         drop(store);
         println!(
@@ -870,11 +917,17 @@ fn long_texts_measured() {
             let rows = rows_with_long_texts(kind, bytes, count);
             let scratch = Scratch::new(&one, "long");
             let paths = scratch.paths();
-            let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+            let mut store =
+                Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
             let mut budget = roomy_budget();
             let started = Instant::now();
-            let (report, taken) =
-                measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
+            let (report, taken) = measure(&one, || {
+                store.add_with(
+                    &rows,
+                    VectorOrigin::without_release(&identity(8)),
+                    &mut budget,
+                )
+            });
             let seconds = started.elapsed().as_secs_f64();
             let report = report.expect("the rows are added");
             drop(store);
@@ -937,10 +990,17 @@ fn long_texts_measured() {
         drop(records);
         let scratch = Scratch::new(&one, "long");
         let paths = scratch.paths();
-        let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+        let mut store =
+            Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
         let mut budget = roomy_budget();
         let started = Instant::now();
-        let (report, taken) = measure(&one, || store.add_with(&rows, &identity(8), &mut budget));
+        let (report, taken) = measure(&one, || {
+            store.add_with(
+                &rows,
+                VectorOrigin::without_release(&identity(8)),
+                &mut budget,
+            )
+        });
         let seconds = started.elapsed().as_secs_f64();
         let report = report.expect("the rows are added");
         drop(store);
@@ -996,13 +1056,22 @@ fn csic_populates_a_store_within_its_memory_share() {
 
     let scratch = Scratch::new(&one, "csic");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "csic", &identity(DIMENSION)).unwrap();
+    let mut store = Store::create(
+        &paths,
+        "csic",
+        VectorOrigin::without_release(&identity(DIMENSION)),
+    )
+    .unwrap();
     let mut budget =
         MemoryBudget::observe(&MemorySettings::default()).expect("the host has free memory");
 
     let started = Instant::now();
     let (report, taken) = measure(&one, || {
-        store.add_with(&rows, &identity(DIMENSION), &mut budget)
+        store.add_with(
+            &rows,
+            VectorOrigin::without_release(&identity(DIMENSION)),
+            &mut budget,
+        )
     });
     let report = report.expect("the logs are added");
     let seconds = started.elapsed().as_secs_f64();
@@ -1034,7 +1103,11 @@ fn csic_populates_a_store_within_its_memory_share() {
     // The same logs again: every id is stored already.
     let started = Instant::now();
     let (again, taken) = measure(&one, || {
-        store.add_with(&rows, &identity(DIMENSION), &mut budget)
+        store.add_with(
+            &rows,
+            VectorOrigin::without_release(&identity(DIMENSION)),
+            &mut budget,
+        )
     });
     let again = again.expect("the logs are added again");
     println!(
@@ -1118,7 +1191,8 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
     let scratch = Scratch::new(&one, "reopen-fails");
     let paths = scratch.paths();
     let path = paths.store_path("s");
-    let mut store = Store::create(&paths, "s", &identity(8)).unwrap();
+    let mut store =
+        Store::create(&paths, "s", VectorOrigin::without_release(&identity(8))).unwrap();
     let mut budget = roomy_budget();
     let left = budget.left_bytes();
 
@@ -1133,7 +1207,11 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
 
     let long = rows_with_long_texts(Kind::Distinct, 256 * 1024, 1);
     let first = store
-        .add_with(&long, &identity(8), &mut budget)
+        .add_with(
+            &long,
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
         .expect("the add stands although the store could not be opened again");
     assert_eq!((first.added, first.repeated), (201, 0));
     assert_eq!(budget.left_bytes(), left);
@@ -1177,7 +1255,13 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
             .matching_with(&Filter::default(), 10, &mut short)
             .unwrap_err(),
         store
-            .nearest_with(&queries, &identity(8), 3, &Filter::default(), &mut short)
+            .nearest_with(
+                &queries,
+                VectorOrigin::without_release(&identity(8)),
+                3,
+                &Filter::default(),
+                &mut short,
+            )
             .unwrap_err(),
     ] {
         let StoreError::Memory(L2dError::Refused { reason }) = &error else {
@@ -1196,7 +1280,13 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
         10
     );
     let found = store
-        .nearest_with(&queries, &identity(8), 3, &Filter::default(), &mut enough)
+        .nearest_with(
+            &queries,
+            VectorOrigin::without_release(&identity(8)),
+            3,
+            &Filter::default(),
+            &mut enough,
+        )
         .unwrap();
     assert!(found.held_bytes >= explained.held_bytes);
     assert!(one.sqlite_used() <= kept);
@@ -1205,7 +1295,11 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
     // which tries again and fails again.
     assert_eq!(store.len().unwrap(), 201);
     let second = store
-        .add_with(&short_rows("second"), &identity(8), &mut budget)
+        .add_with(
+            &short_rows("second"),
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
         .expect("the store takes adds on the connection it kept");
     assert_eq!((second.added, second.repeated), (300, 0));
     assert_eq!(
@@ -1220,7 +1314,11 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
     // there while it runs, and ends by opening the store again.
     set_format(SCHEMA_VERSION);
     let third = store
-        .add_with(&short_rows("third"), &identity(8), &mut budget)
+        .add_with(
+            &short_rows("third"),
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
         .unwrap();
     assert_eq!(
         third.held_bytes,
@@ -1237,7 +1335,11 @@ fn a_reopening_that_fails_leaves_the_add_standing_and_what_is_kept_counted() {
         SEARCH_FIXED_BYTES
     );
     let fourth = store
-        .add_with(&short_rows("fourth"), &identity(8), &mut budget)
+        .add_with(
+            &short_rows("fourth"),
+            VectorOrigin::without_release(&identity(8)),
+            &mut budget,
+        )
         .unwrap();
     assert!(fourth.held_bytes < ADD_FIXED_BYTES + 64 * 1024);
     assert_eq!(store.len().unwrap(), 201 + 900);
@@ -1376,7 +1478,11 @@ fn read_within(
         .expect("the matching rows are counted");
     let (frame, taken) = measure(one, || match limit {
         Some(limit) => store.text_search_with(filter, limit, budget),
-        None => store.vectors_with(filter, budget),
+        None => store.vectors_with(
+            VectorOrigin::without_release(store.identity()),
+            filter,
+            budget,
+        ),
     });
     let frame = frame.expect("the rows are read");
     let explained = store.explain(filter).unwrap();
@@ -1439,11 +1545,16 @@ fn store_with_long_text(scratch: &Scratch, name: &str, text: &str) -> Store {
         first_position: 201,
         occurrences: 1,
     });
-    let mut store = Store::create(&scratch.paths(), name, &identity(8)).unwrap();
+    let mut store = Store::create(
+        &scratch.paths(),
+        name,
+        VectorOrigin::without_release(&identity(8)),
+    )
+    .unwrap();
     store
         .add_with(
             &rows_of(&LogsFrame::from_records(&records).unwrap(), "long", 8),
-            &identity(8),
+            VectorOrigin::without_release(&identity(8)),
             &mut roomy_budget(),
         )
         .expect("the long text is added");
@@ -1508,7 +1619,13 @@ fn assert_phrase_search_within(one: &Alone, what: &str, store: &Store, filter: &
 
     let queries = query_vectors(1, 8);
     let (found, nearest) = measure(one, || {
-        store.nearest_with(&queries, &identity(8), 3, filter, &mut budget)
+        store.nearest_with(
+            &queries,
+            VectorOrigin::without_release(&identity(8)),
+            3,
+            filter,
+            &mut budget,
+        )
     });
     let found = found.expect("the nearest logs are found");
     assert_eq!(found.candidates, matching.rows);
@@ -1656,12 +1773,17 @@ fn a_search_takes_no_more_memory_than_it_asks_of_the_budget() {
     const DIMENSION: u16 = 64;
     const ROWS: u64 = 4_000;
     let logs = search_logs(ROWS);
-    let mut store = Store::create(&paths, "s", &identity(DIMENSION)).unwrap();
+    let mut store = Store::create(
+        &paths,
+        "s",
+        VectorOrigin::without_release(&identity(DIMENSION)),
+    )
+    .unwrap();
     let mut budget = roomy_budget();
     store
         .add_with(
             &rows_of(&logs, "search", DIMENSION),
-            &identity(DIMENSION),
+            VectorOrigin::without_release(&identity(DIMENSION)),
             &mut budget,
         )
         .unwrap();
@@ -1694,7 +1816,13 @@ fn a_search_takes_no_more_memory_than_it_asks_of_the_budget() {
         let mut budget = fixed_budget(None, *batch_rows);
         let left = budget.left_bytes();
         let (found, taken) = measure(&one, || {
-            store.nearest_with(&queries, &identity(DIMENSION), 10, filter, &mut budget)
+            store.nearest_with(
+                &queries,
+                VectorOrigin::without_release(&identity(DIMENSION)),
+                10,
+                filter,
+                &mut budget,
+            )
         });
         let found = found.expect("the nearest logs are found");
         assert!(found.candidates > 0, "{what}");
@@ -1781,7 +1909,13 @@ fn a_phrase_search_over_a_long_repetitive_text_stays_within_what_it_holds() {
                 .text_search_with(&filter, usize::MAX, &mut short)
                 .unwrap_err(),
             store
-                .nearest_with(&queries, &identity(8), 3, &filter, &mut short)
+                .nearest_with(
+                    &queries,
+                    VectorOrigin::without_release(&identity(8)),
+                    3,
+                    &filter,
+                    &mut short,
+                )
                 .unwrap_err(),
         ] {
             let StoreError::Memory(L2dError::Refused { reason }) = &error else {
@@ -1830,13 +1964,22 @@ fn csic_searches_measured() {
     let width = usize::from(DIMENSION);
     let scratch = Scratch::new(&one, "csic-search");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "csic", &identity(DIMENSION)).unwrap();
+    let mut store = Store::create(
+        &paths,
+        "csic",
+        VectorOrigin::without_release(&identity(DIMENSION)),
+    )
+    .unwrap();
     let mut budget =
         MemoryBudget::observe(&MemorySettings::default()).expect("the host has free memory");
     {
         let rows = rows_of(&logs, SOURCE, DIMENSION);
         store
-            .add_with(&rows, &identity(DIMENSION), &mut budget)
+            .add_with(
+                &rows,
+                VectorOrigin::without_release(&identity(DIMENSION)),
+                &mut budget,
+            )
             .expect("the logs are added");
     }
     let stored_vectors = vectors_of(&logs, DIMENSION);
@@ -1899,7 +2042,7 @@ fn csic_searches_measured() {
         let (found, taken) = measure(&one, || {
             store.nearest_with(
                 query,
-                &identity(DIMENSION),
+                VectorOrigin::without_release(&identity(DIMENSION)),
                 10,
                 &Filter::default(),
                 &mut budget,
@@ -1954,7 +2097,7 @@ fn csic_searches_measured() {
     let (found, taken) = measure(&one, || {
         store.nearest_with(
             &queries,
-            &identity(DIMENSION),
+            VectorOrigin::without_release(&identity(DIMENSION)),
             10,
             &Filter::default(),
             &mut budget,
@@ -1992,7 +2135,7 @@ fn csic_searches_measured() {
     let whole = store
         .nearest_with(
             query,
-            &identity(DIMENSION),
+            VectorOrigin::without_release(&identity(DIMENSION)),
             10,
             &Filter::default(),
             &mut budget,
@@ -2002,7 +2145,7 @@ fn csic_searches_measured() {
     let (batched, taken) = measure(&one, || {
         store.nearest_with(
             query,
-            &identity(DIMENSION),
+            VectorOrigin::without_release(&identity(DIMENSION)),
             10,
             &Filter::default(),
             &mut small,
@@ -2047,7 +2190,13 @@ fn csic_searches_measured() {
         let query = &queries[..width];
         let started = Instant::now();
         let (found, taken) = measure(&one, || {
-            store.nearest_with(query, &identity(DIMENSION), 10, &filter, &mut budget)
+            store.nearest_with(
+                query,
+                VectorOrigin::without_release(&identity(DIMENSION)),
+                10,
+                &filter,
+                &mut budget,
+            )
         });
         let elapsed = started.elapsed().as_secs_f64();
         let found = found.expect("the nearest logs are found");
@@ -2139,7 +2288,11 @@ fn csic_searches_measured() {
         let started = Instant::now();
         let again = match limit {
             Some(limit) => store.text_search_with(filter, *limit, &mut budget),
-            None => store.vectors_with(filter, &mut budget),
+            None => store.vectors_with(
+                VectorOrigin::without_release(store.identity()),
+                filter,
+                &mut budget,
+            ),
         }
         .unwrap();
         println!(
@@ -2209,11 +2362,16 @@ fn phrase_memory_measured() {
     let mut budget = roomy_budget();
     let mut worst = 0.0f64;
     for (name, adds) in [("one", 1usize), ("many", 16), ("more", 256)] {
-        let mut store = Store::create(&paths, name, &identity(8)).unwrap();
+        let mut store =
+            Store::create(&paths, name, VectorOrigin::without_release(&identity(8))).unwrap();
         let step = rows.height().div_ceil(adds);
         for start in (0..rows.height()).step_by(step) {
             store
-                .add_with(&rows.slice(start as i64, step), &identity(8), &mut budget)
+                .add_with(
+                    &rows.slice(start as i64, step),
+                    VectorOrigin::without_release(&identity(8)),
+                    &mut budget,
+                )
                 .unwrap();
         }
         assert_eq!(store.len().unwrap(), 25_608);
@@ -2378,11 +2536,12 @@ fn index_piece_selectivity_measured() {
     let texts: Vec<String> = logs.records().map(|record| record.text).collect();
     let scratch = Scratch::new(&one, "piece-selectivity");
     let paths = scratch.paths();
-    let mut store = Store::create(&paths, "csic", &identity(8)).unwrap();
+    let mut store =
+        Store::create(&paths, "csic", VectorOrigin::without_release(&identity(8))).unwrap();
     store
         .add_with(
             &rows_of(&logs, "data/csic-2010/csic_database.csv", 8),
-            &identity(8),
+            VectorOrigin::without_release(&identity(8)),
             &mut roomy_budget(),
         )
         .unwrap();

@@ -56,8 +56,8 @@ use l2d_core::polars::prelude::{Column, DataFrame};
 use l2d_core::{BatchPlan, MemoryBudget, MemorySettings};
 
 use crate::query::{
-    Compiled, DISTANCE, QUERY, READ_FIXED_BYTES, ROW_COLUMNS, RowsBuilder, TEXT_READ_FACTOR,
-    decode, row_bytes,
+    Compiled, DISTANCE, QUERY, READ_FIXED_BYTES, RowsBuilder, TEXT_READ_FACTOR, decode, row_bytes,
+    row_columns,
 };
 use crate::{Filter, Store, StoreError, VectorOrigin, failed};
 
@@ -165,10 +165,10 @@ fn rank(
 impl Store {
     /// [`Store::nearest_with`] under a budget observed now with the default settings,
     /// in which nothing is held: for callers that hold nothing that matters.
-    pub fn nearest<'a>(
+    pub fn nearest(
         &self,
         queries: &[f32],
-        origin: impl Into<VectorOrigin<'a>>,
+        origin: VectorOrigin<'_>,
         k: usize,
         filter: &Filter,
     ) -> Result<Nearest, StoreError> {
@@ -183,8 +183,8 @@ impl Store {
     ///
     /// `queries` holds the query vectors one after the other, each of the store's
     /// dimension, of `origin`: the encoder that produced them and, if they were made by
-    /// the AMD runtime, its release (a reference to an identity alone stands for vectors
-    /// without a release).
+    /// the AMD runtime, its release ([`VectorOrigin::made_under`]; otherwise
+    /// [`VectorOrigin::without_release`]).
     ///
     /// - Another identity than the store's is [`StoreError::IdentityMismatch`], naming
     ///   both (requirement 5.6); it is checked before anything else.
@@ -204,10 +204,10 @@ impl Store {
     ///
     /// The hits do not depend on the batch size. Nothing in the store is changed, and
     /// the budget holds afterwards what it held before.
-    pub fn nearest_with<'a>(
+    pub fn nearest_with(
         &self,
         queries: &[f32],
-        origin: impl Into<VectorOrigin<'a>>,
+        origin: VectorOrigin<'_>,
         k: usize,
         filter: &Filter,
         budget: &mut MemoryBudget,
@@ -403,7 +403,10 @@ impl Store {
         let mut distances: Vec<f32> = Vec::with_capacity(total);
         let mut fetch = self
             .connection
-            .prepare(&format!("SELECT {ROW_COLUMNS} FROM logs WHERE seq = ?1"))
+            .prepare(&format!(
+                "SELECT {} FROM logs WHERE seq = ?1",
+                row_columns(self.format())
+            ))
             .map_err(fail)?;
         for (query, hits) in best.iter().enumerate() {
             for near in hits {
