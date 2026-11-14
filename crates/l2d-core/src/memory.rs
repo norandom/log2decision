@@ -823,6 +823,17 @@ impl<'b> Batcher<'b> {
         self.budget
     }
 
+    /// What the smallest batch is estimated to take, in bytes; 0 before the plan is
+    /// made from the first records.
+    pub fn smallest_batch_bytes(&self) -> u64 {
+        self.plan.as_ref().map_or(0, |plan| {
+            self.budget
+                .min_batch_rows()
+                .min(plan.batch_rows)
+                .saturating_mul(plan.bytes_per_row)
+        })
+    }
+
     /// The rows of the batches processed so far.
     pub fn rows_done(&self) -> u64 {
         self.rows_done
@@ -881,6 +892,20 @@ impl<'b> Batcher<'b> {
         self.plan.ok_or_else(|| L2dError::Runtime {
             detail: "the batch plan was not made".into(),
         })
+    }
+
+    /// The plan with the changes recorded during the run, and the budget the batches
+    /// were cut within: for an operation that goes on within it after its last batch.
+    pub fn finish(mut self) -> Result<(BatchPlan, &'b mut MemoryBudget), L2dError> {
+        if self.plan.is_none() {
+            self.make_plan()?;
+        }
+        match self.plan.take() {
+            Some(plan) => Ok((plan, self.budget)),
+            None => Err(L2dError::Runtime {
+                detail: "the batch plan was not made".into(),
+            }),
+        }
     }
 
     fn make_plan(&mut self) -> Result<(), L2dError> {

@@ -4,6 +4,7 @@ use l2d_core::L2dError;
 
 pub mod assess;
 pub mod baseline;
+pub mod baseline_archive;
 pub mod calibrate;
 pub mod common;
 pub mod encoder;

@@ -16,11 +16,13 @@ pub mod adapters;
 pub mod error;
 pub mod input;
 pub mod memory;
+pub mod parts;
 pub mod paths;
 pub mod runrecord;
 pub mod types;
 mod zip_directory;
 pub mod zip_input;
+mod zip_spill;
 
 pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
@@ -35,5 +37,8 @@ pub use paths::ProjectPaths;
 pub use runrecord::{BATCH_PLAN_KEY, Device, Placement, PlacementSource, RunKind, RunRecord};
 pub use types::{EncoderIdentity, InputSummary, Label, LogRecord, LogsFrame, SkippedRecord};
 pub use zip_input::{
-    ArchivePosition, ArchiveSummary, EntryReport, EntrySkip, ZipInput, ZipInputSettings,
+    ArchivePosition, ArchiveSummary, DiskDedup, EntryReport, EntrySkip, SelectedBytes, ZipInput,
+    ZipInputSettings,
 };
+
+pub use parts::{PartInfo, PartTable, PartWriter, WorkDir};

@@ -16,6 +16,8 @@
 /runtime/ryzenai/
 /runtime/cache/
 /reports/
+# Result parts of runs over batched inputs (`--work-dir` default)
+/work/
 
 # Local environment
 .env
