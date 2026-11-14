@@ -60,6 +60,8 @@ struct StandIn {
     seen: Seen,
     /// Fail the run with this number (from 0).
     fail_at: Option<usize>,
+    /// In the run with this number (from 0), every value of this row's output is this.
+    spoil: Option<(usize, usize, f32)>,
 }
 
 impl ImageModel for StandIn {
@@ -83,6 +85,13 @@ impl ImageModel for StandIn {
             }
             for (d, value) in formula(&input, channels, width).into_iter().enumerate() {
                 output[d * rows + n] = value;
+            }
+        }
+        if let Some((at, row, value)) = self.spoil
+            && at == run
+        {
+            for d in 0..DIMENSION {
+                output[d * rows + row] = value;
             }
         }
         Ok(())
@@ -323,6 +332,46 @@ fn a_failed_run_is_an_error_and_leaves_the_callers_buffers_as_they_were() {
     );
     assert_eq!(vectors, [1.0, 2.0]);
     assert!(flags.is_empty());
+}
+
+#[test]
+fn a_model_output_that_is_zero_or_not_finite_is_an_error_and_no_vector() {
+    for (value, expected) in [
+        (0.0f32, "length 0"),
+        (f32::NAN, "length NaN"),
+        (f32::INFINITY, "length inf"),
+    ] {
+        // The second image (texts 4 to 7), its row 2: text 6.
+        let model = StandIn {
+            spoil: Some((1, 2, value)),
+            ..StandIn::default()
+        };
+        let mut encoder = ImageEncoder::new(tiny_codec(InputMode::Whole), DIMENSION, ROWS, model);
+        let mut vectors = vec![1.0f32, 2.0];
+        let mut flags = Vec::new();
+        let error = encoder
+            .encode_into(&TEXTS, &mut vectors, &mut flags)
+            .unwrap_err();
+        let EncoderError::Failed { detail } = &error else {
+            panic!("{error}");
+        };
+        assert!(
+            detail.contains("text 6") && detail.contains(expected),
+            "{value}: {detail}"
+        );
+        // The callers' buffers are as they were, and only the first image is counted.
+        assert_eq!(vectors, [1.0, 2.0]);
+        assert!(flags.is_empty());
+        assert_eq!((encoder.stats().texts, encoder.stats().images), (4, 1));
+    }
+    // A spoiled row after the last text of an image that is not full is not a text's
+    // vector and is not looked at: the third image holds three texts.
+    let model = StandIn {
+        spoil: Some((2, 3, f32::NAN)),
+        ..StandIn::default()
+    };
+    let mut encoder = ImageEncoder::new(tiny_codec(InputMode::Whole), DIMENSION, ROWS, model);
+    assert_eq!(encoder.encode(&TEXTS).unwrap().len(), TEXTS.len());
 }
 
 #[test]
@@ -596,6 +645,82 @@ fn the_first_run_must_have_been_executed_by_the_npu_provider() {
         let error = ExecutedNodes::parse(bad).unwrap_err();
         assert!(error.contains(expected), "{bad}: {error}");
     }
+}
+
+#[test]
+fn only_compiled_parts_and_the_two_ends_count_as_a_run_on_the_npu() {
+    let read = |nodes: &[(&str, &str)]| ExecutedNodes::parse(&profile(nodes)).unwrap();
+    // An operator of the graph executed through the Vitis AI provider is not a part the
+    // provider compiled for the NPU: only its own `vitis_ai_ep_<n>` nodes are.
+    let conv_alone = read(&[
+        ("QuantizeLinear", VITIS),
+        ("Conv", VITIS),
+        ("DequantizeLinear", VITIS),
+    ]);
+    let error = conv_alone.npu_only().unwrap_err();
+    assert!(
+        error.contains("Conv (VitisAIExecutionProvider)") && error.contains("0 of them"),
+        "{error}"
+    );
+    // Also beside a compiled part.
+    let conv_beside = read(&[
+        ("QuantizeLinear", VITIS),
+        ("vitis_ai_ep_0", VITIS),
+        ("Conv", VITIS),
+        ("DequantizeLinear", VITIS),
+    ]);
+    let error = conv_beside.npu_only().unwrap_err();
+    assert!(
+        error.contains("Conv (VitisAIExecutionProvider)") && error.contains("1 of them"),
+        "{error}"
+    );
+    // Several compiled parts are a run on the NPU.
+    assert_eq!(
+        read(&[
+            ("QuantizeLinear", VITIS),
+            ("vitis_ai_ep_0", VITIS),
+            ("vitis_ai_ep_1", VITIS),
+            ("DequantizeLinear", CPU),
+        ])
+        .npu_only(),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_node_on_an_unknown_provider_is_not_a_run_on_the_npu() {
+    let read = |nodes: &[(&str, &str)]| ExecutedNodes::parse(&profile(nodes)).unwrap();
+    // A node on a provider that is neither the Vitis AI provider nor the CPU provider is
+    // refused, whatever its operator: also one of the two ends.
+    for nodes in [
+        &[
+            ("QuantizeLinear", "DmlExecutionProvider"),
+            ("vitis_ai_ep_0", VITIS),
+            ("DequantizeLinear", CPU),
+        ][..],
+        &[
+            ("QuantizeLinear", VITIS),
+            ("vitis_ai_ep_0", VITIS),
+            ("DequantizeLinear", "SomeOtherExecutionProvider"),
+        ],
+        &[
+            ("vitis_ai_ep_0", VITIS),
+            ("vitis_ai_ep_1", "DmlExecutionProvider"),
+        ],
+    ] {
+        let error = read(nodes).npu_only().unwrap_err();
+        assert!(error.contains("ExecutionProvider)"), "{nodes:?}: {error}");
+    }
+    let error = read(&[
+        ("QuantizeLinear", "DmlExecutionProvider"),
+        ("vitis_ai_ep_0", VITIS),
+    ])
+    .npu_only()
+    .unwrap_err();
+    assert!(
+        error.contains("QuantizeLinear (DmlExecutionProvider)"),
+        "{error}"
+    );
 }
 
 // --- The model handed to the provider ---------------------------------------------------

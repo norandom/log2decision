@@ -335,9 +335,18 @@ impl RowImage {
 /// `used` rows, `vector[d] = output[d * rows + n]`, L2-normalized, written to `vectors`
 /// one after the other (`used * dimension` values).
 ///
+/// Returns the first of those rows whose output cannot be made a unit vector, with the
+/// length it had: zero, or not finite (a value that is not a number or infinite). All
+/// rows are written either way; none when every row is a unit vector.
+///
 /// # Panics
 /// When the lengths do not fit.
-pub fn read_rows(output: &[f32], rows: usize, used: usize, vectors: &mut [f32]) {
+pub fn read_rows(
+    output: &[f32],
+    rows: usize,
+    used: usize,
+    vectors: &mut [f32],
+) -> Option<(usize, f32)> {
     assert!(used <= rows && rows > 0, "{used} of {rows} rows");
     assert_eq!(
         output.len() % rows,
@@ -346,12 +355,17 @@ pub fn read_rows(output: &[f32], rows: usize, used: usize, vectors: &mut [f32]) 
     );
     let dimension = output.len() / rows;
     assert_eq!(vectors.len(), used * dimension, "the vector buffer");
+    let mut no_unit_vector = None;
     for (n, vector) in vectors.chunks_exact_mut(dimension).enumerate() {
         for (d, value) in vector.iter_mut().enumerate() {
             *value = output[d * rows + n];
         }
-        l2_normalize(vector);
+        let length = l2_normalize(vector);
+        if no_unit_vector.is_none() && !(length.is_finite() && length > 0.0) {
+            no_unit_vector = Some((n, length));
+        }
     }
+    no_unit_vector
 }
 
 /// The name of the provider's cache folder for one compiled model: the first twelve
@@ -544,12 +558,21 @@ mod tests {
         // dimension 2, rows 3: output[d * rows + n].
         let output = [3.0f32, 0.0, 1.0, 4.0, 0.0, 1.0];
         let mut vectors = [9.0f32; 4];
-        read_rows(&output, 3, 2, &mut vectors);
+        // Row 1 is all zeros: it stays all zeros and is reported with its length.
+        assert_eq!(read_rows(&output, 3, 2, &mut vectors), Some((1, 0.0)));
         assert_eq!(vectors, [0.6, 0.8, 0.0, 0.0]);
         let mut all = [0.0f32; 6];
         read_rows(&output, 3, 3, &mut all);
         let half = 0.5f32.sqrt();
         assert_eq!(all[4..], [half, half]);
+        // Only the rows that are read are looked at.
+        assert_eq!(read_rows(&output, 3, 1, &mut vectors[..2]), None);
+        // A value that is not a number, or an infinite one: the first such row.
+        let output = [3.0f32, f32::NAN, 1.0, 4.0, 0.0, f32::INFINITY];
+        let found = read_rows(&output, 3, 3, &mut all);
+        assert!(matches!(found, Some((1, length)) if length.is_nan()));
+        let output = [3.0f32, 1.0, 1.0, 4.0, 0.0, f32::INFINITY];
+        assert_eq!(read_rows(&output, 3, 3, &mut all), Some((2, f32::INFINITY)));
     }
 
     #[test]

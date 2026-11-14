@@ -31,7 +31,18 @@
 //! seven times slower and with other vectors, beside a report that said 33 of 35 nodes
 //! on the NPU (found in task 2.6). So every open also runs the model once, on an image
 //! without a text, with ONNX Runtime's profiling on, and reads from the profile which
-//! provider executed each node. Profiling ends with that run.
+//! provider executed each node. Profiling ends with that run. Accepted are the
+//! provider's own nodes of the parts it compiled (`vitis_ai_ep_<n>`, at least one) and
+//! the quantize nodes at the two ends, through the provider or one each on ONNX
+//! Runtime's CPU provider; every other node is refused.
+//!
+//! The session is also created with ONNX Runtime's `session.disable_cpu_ep_fallback=1`.
+//! With AMD Ryzen AI 1.9.0 on the reference host the session on the NPU opens with it,
+//! and the session of the unreadable `context.json` is then refused by ONNX Runtime
+//! itself when it is created; the report and the profile are checked all the same.
+//!
+//! A model output that is all zeros or not finite for a text is an error of the run
+//! ([`EncoderError::Failed`]), not a vector.
 //!
 //! # What runs
 //!
@@ -314,6 +325,15 @@ impl PlacementReport {
 /// The name ONNX Runtime gives the Vitis AI provider.
 pub const VITIS_PROVIDER: &str = "VitisAIExecutionProvider";
 
+/// The name ONNX Runtime gives its CPU provider. The session never registers it; ONNX
+/// Runtime has it in every session, and a profile may attribute the quantize nodes at
+/// the two ends of the graph to it.
+pub const CPU_PROVIDER: &str = "CPUExecutionProvider";
+
+/// How the Vitis AI provider names, in a profile, the node it made of a part of the
+/// graph it compiled: this prefix and a number.
+pub const COMPILED_PART_PREFIX: &str = "vitis_ai_ep_";
+
 /// Which provider executed the nodes of one run, from ONNX Runtime's own profile of that
 /// run. This is evidence of the session that is open, where the placement report is the
 /// plan of the compilation that filled the cache folder, possibly an earlier one: with a
@@ -362,53 +382,68 @@ impl ExecutedNodes {
         Ok(executed)
     }
 
-    /// Whether the run was a run on the NPU: the Vitis AI provider executed a node that
-    /// is not a quantize node (the part of the graph it compiled), and what another
-    /// provider executed is at most the two quantize nodes at the ends of the graph (one
-    /// `QuantizeLinear`, one `DequantizeLinear`). Anything else is refused, with the
-    /// reason.
+    /// Whether the run was a run on the NPU. Only this is accepted:
+    ///
+    /// - through the Vitis AI provider: nodes the provider made of the parts of the
+    ///   graph it compiled (named [`COMPILED_PART_PREFIX`]`<n>`), at least one of them,
+    ///   and the quantize nodes at the two ends of the graph (`QuantizeLinear`,
+    ///   `DequantizeLinear`);
+    /// - through [`CPU_PROVIDER`]: at most one `QuantizeLinear` and at most one
+    ///   `DequantizeLinear`.
+    ///
+    /// Every other node is refused and named in the reason: any other operator through
+    /// the Vitis AI provider, any other or further node on the CPU provider, and any
+    /// node on a provider that is neither of the two.
     ///
     /// On the reference host a session on the NPU shows three nodes through the
     /// provider (`QuantizeLinear`, `vitis_ai_ep_<n>`, `DequantizeLinear`) and none
     /// elsewhere; the session that fell back shows the two quantize nodes through the
     /// provider and nine nodes on the CPU provider (`Transpose`, `QLinearConv`, ...).
     pub fn npu_only(&self) -> Result<(), String> {
-        let count = |operator: &str| {
-            self.elsewhere
-                .iter()
-                .filter(|(found, _)| found == operator)
-                .count()
-        };
-        let ends = count("QuantizeLinear") <= 1
-            && count("DequantizeLinear") <= 1
-            && count("QuantizeLinear") + count("DequantizeLinear") == self.elsewhere.len();
-        // The compiled part of the graph is a node of the provider's own making; the
-        // quantize nodes at the ends run through the provider too, also in a session
-        // that fell back to the CPU, so they do not count.
-        let compiled = self
-            .on_provider
-            .iter()
-            .any(|operator| operator != "QuantizeLinear" && operator != "DequantizeLinear");
-        if compiled && ends {
+        let mut refused: Vec<String> = Vec::new();
+        // The quantize nodes at the ends run through the provider also in a session
+        // that fell back to the CPU, so they are accepted but are no evidence.
+        let mut compiled = 0usize;
+        for operator in &self.on_provider {
+            if operator.starts_with(COMPILED_PART_PREFIX) {
+                compiled += 1;
+            } else if operator != "QuantizeLinear" && operator != "DequantizeLinear" {
+                refused.push(format!("{operator} ({VITIS_PROVIDER})"));
+            }
+        }
+        let (mut quantize, mut dequantize) = (0usize, 0usize);
+        for (operator, provider) in &self.elsewhere {
+            let seen = match operator.as_str() {
+                "QuantizeLinear" if provider == CPU_PROVIDER => &mut quantize,
+                "DequantizeLinear" if provider == CPU_PROVIDER => &mut dequantize,
+                _ => {
+                    refused.push(format!("{operator} ({provider})"));
+                    continue;
+                }
+            };
+            *seen += 1;
+            if *seen > 1 {
+                refused.push(format!("{operator} ({provider})"));
+            }
+        }
+        if compiled > 0 && refused.is_empty() {
             return Ok(());
         }
-        let listed: Vec<String> = self
-            .elsewhere
-            .iter()
-            .take(6)
-            .map(|(operator, provider)| format!("{operator} ({provider})"))
-            .collect();
+        let listed = if refused.is_empty() {
+            "no node of a compiled part was executed".to_string()
+        } else {
+            format!(
+                "not accepted: {}{}",
+                refused[..refused.len().min(6)].join(", "),
+                if refused.len() > 6 { ", ..." } else { "" }
+            )
+        };
         Err(format!(
             "in a run of the open session ONNX Runtime executed {} node(s) through \
-             {VITIS_PROVIDER} and {} through other providers: {}{}",
+             {VITIS_PROVIDER}, {compiled} of them compiled parts \
+             (`{COMPILED_PART_PREFIX}<n>`), and {} through other providers; {listed}",
             self.on_provider.len(),
             self.elsewhere.len(),
-            listed.join(", "),
-            if self.elsewhere.len() > listed.len() {
-                ", ..."
-            } else {
-                ""
-            }
         ))
     }
 }
@@ -607,8 +642,8 @@ impl<M: ImageModel> ImageEncoder<M> {
     }
 
     /// Encodes `texts` and hands each text's unit vector and flags to `each`, in the
-    /// order of the texts. When a run fails, the texts of the images before it were
-    /// handed over already.
+    /// order of the texts. When a run fails, or the model's output for a text is all
+    /// zeros or not finite, the texts of the images before it were handed over already.
     pub fn encode_each(
         &mut self,
         texts: &[&str],
@@ -617,7 +652,7 @@ impl<M: ImageModel> ImageEncoder<M> {
         let started = Instant::now();
         let rows = self.image.rows();
         let mut outcome = Ok(());
-        for image in texts.chunks(rows) {
+        for (index, image) in texts.chunks(rows).enumerate() {
             let begun = Instant::now();
             self.image.fill(image);
             let written = Instant::now();
@@ -629,8 +664,20 @@ impl<M: ImageModel> ImageEncoder<M> {
             let ran = Instant::now();
             self.stats.run_seconds += (ran - written).as_secs_f64();
             let vectors = &mut self.vectors[..image.len() * self.dimension];
-            encode::read_rows(&self.output, rows, image.len(), vectors);
+            let no_unit_vector = encode::read_rows(&self.output, rows, image.len(), vectors);
             self.stats.read_seconds += ran.elapsed().as_secs_f64();
+            // An output that is all zeros or not finite has no direction: it is an
+            // error of the run, not a vector, and no text of its image is handed over.
+            if let Some((row, length)) = no_unit_vector {
+                outcome = Err(EncoderError::Failed {
+                    detail: format!(
+                        "the model's output for text {} of this call (from 0; row {row} of \
+                         its image) has the length {length} and cannot be a unit vector",
+                        index * rows + row
+                    ),
+                });
+                break;
+            }
             for (vector, flags) in vectors.chunks_exact(self.dimension).zip(self.image.flags()) {
                 each(vector, *flags);
             }
@@ -930,6 +977,10 @@ impl EncoderSession {
                 .map_err(|error| failed("creating the session builder", error))?
                 .with_profiling(cache_dir.join(&profile_name))
                 .map_err(|error| failed("enabling the profile of the first run", error))?
+                // `session.disable_cpu_ep_fallback=1`: ONNX Runtime itself refuses to
+                // create a session in which a node is left to its CPU provider.
+                .with_disable_cpu_fallback()
+                .map_err(|error| failed("disabling ONNX Runtime's CPU fallback", error))?
                 .with_execution_providers([provider.build().error_on_failure()])
                 .map_err(|error| {
                     unavailable("the Vitis AI provider could not be registered", &error)
