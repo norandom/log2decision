@@ -14,13 +14,19 @@ measured as unstable or flawed:
   (`masked_mean`), as the pooling of bytes into patches is before it. 2.16's line graph
   (strided convolutions and an average over all 128 positions, padding included) was
   not the same arithmetic on the NPU as in ONNX Runtime on the CPU.
-- The objective keeps local detail (`masked`): from the line vector and a position, a
-  small decoder must pick the pooled features of that patch among all patches of the
-  batch, for the masked patches (masked-patch prediction) and for as many visible ones
-  (the vector holds what the line says). 2.16's contrastive loss stays as the control.
+- The objective (`masked`) is patch-level byte prediction: 30 % of a line's patches
+  are blanked; from the unit line vector, an embedding of the patch position and one
+  of the byte position inside the patch, a small training-only decoder predicts every
+  byte (at most 32) of each blanked patch and of as many visible ones, cross-entropy
+  over 256 byte values, no label. (A first version picked pooled patch features by
+  InfoNCE among the batch's patches; it collapsed and was replaced, see
+  `train_line_model`.) 2.16's contrastive loss stays as the control.
 - Every dataset is streamed: the texts are memory-mapped bytes; byte features are never
   stored, only the pooled patch features, appended to a file as they are produced and
-  read back memory-mapped by the batch maker. No checkpoint and no resume.
+  read back memory-mapped by the batch maker. No checkpoint and no resume. Held whole,
+  as stated and bounded needs: the vectors of a corpus (`float_vectors`,
+  `onnx_vectors`, the evaluation; 25,608 x 128 float32, about 13 MB), the patch starts
+  (`PatchBytes`, about 3 MB), and the baseline's sparse feature rows in `refs`.
 - Seeds: numpy and torch are seeded per run, deterministic torch algorithms are asked
   for, no DataLoader workers exist, the thread count is fixed and recorded.
 """

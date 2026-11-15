@@ -18,40 +18,64 @@ then one vector per line, no cutting of the line, n dimensions.
 
 ## The answer
 
-**The vectors are now stable and reproducible, but they still do not classify on
-endpoints they have not seen.** With five folds by endpoint and three seeds (15
-encoders, each trained without the held-out endpoints), a classifier fitted
-afterwards on the 8-bit vectors reaches a ROC AUC of **0.722 ± 0.070** (linear; range
-0.54 to 0.81) and **0.688 ± 0.061** (boosted trees) on unseen endpoints, against 0.948
-with boosted trees on seen ones. On the same folds the **baseline scorer reaches 0.923
-± 0.089** and the **published encoder 0.969 ± 0.025** (which saw most of these
-endpoints' labels in its training; on the one large endpoint it never saw, 0.933,
-the baseline 0.996, this encoder 0.740). The task says to stop here and bring the
-measurements to the owner; this document does.
+**The vectors are now stable and reproducible, but they do not classify on endpoints
+they have not seen: the baseline scorer beats them on every fold.** Five folds by
+endpoint and three seeds (15 encoders, each trained without its held-out endpoints);
+classifiers fitted afterwards on the 8-bit vectors; ROC AUC good against bad:
+
+| Scorer | Seen endpoints | Unseen endpoints | Seen to unseen |
+|---|---|---|---|
+| Masked-byte encoder, linear head | 0.786 ± 0.032 | **0.722 ± 0.070** (0.54 to 0.81) | -0.06 |
+| Masked-byte encoder, boosted trees | 0.948 ± 0.016 | 0.688 ± 0.061 | -0.26 |
+| Baseline scorer (no seed; n = 5 folds) | 0.961 | **0.923 ± 0.097** | -0.04 |
+| Published encoder, linear head (n = 5 folds; saw most of these endpoints' labels in its training) | 0.973 | 0.969 ± 0.027 | |
+
+The baseline is ahead of the masked-byte encoder's linear head on every fold, by
++0.19, +0.08, +0.09, +0.39 and +0.26. On the one large endpoint none of them saw,
+`anadir.jsp`: encoder 0.740 (seeds 0.68 to 0.80), published 0.933, baseline 0.996.
+The spread of the encoder's figures is over folds and seeds; over seeds alone, inside
+a fold, it is about 0.03 (linear and boosted). The task says to stop here and bring
+the measurements to the owner; this document does.
 
 1. **(a) Randomness is ruled out.** The same encoder gives the same bits twice in a
    process, in another process, in another batch composition and in other image rows,
    in float, in 8 bits and on the NPU (three NPU processes, every vector and patch
    start identical); a training repeated with the same seed in new processes gives
    the same weights and files, SHA-256 for SHA-256.
-2. **(b) Stability passes.** The cut is now the 8-bit byte graph's, for every
-   precision: cuts identical for 100 % of lines float to 8 bits (by construction) and
-   8 bits to NPU (25,680 of 25,680, measured); median cosine float to 8 bits 0.9999
-   (all 15 encoders), 8 bits to NPU 1.000000 (1st percentile 0.999999, 97.6 %
-   bit-identical). The float model's own cut agrees with the 8-bit cut on only 29 % of
-   the lines on average, so it cannot be the cut. 2.16 had 0.24 and 0.97.
-3. **(c) The detail-keeping objective helps, but not enough.** Predicting the bytes of
-   blanked and visible patches from the line vector (no label) beats 2.16's
-   contrastive objective under the same stable layout and folds: 0.722 against 0.626
-   (linear, unseen), and the good/bad direction learned on known endpoints keeps its
-   sign on unseen ones for 0.94 ± 0.11 of its weight against 0.46 ± 0.26.
-4. **(d) Why it does not carry over, measured.** The attack is in the vector (an
-   attack moves it further than a benign change of one value: ROC AUC 0.95 over
-   2,204 CSIC pairs), but the vector is dominated by the endpoint (three principal
-   components for 95 % of the variance; the endpoint is recovered from the vector at
-   99.6 % accuracy), and the good/bad difference turns between endpoints (cosine 0.74
-   between seen and unseen). The contrastive control spreads over 38 components but
-   keeps no stable good/bad direction. Neither gives what the gate asks.
+2. **(b) Stability passes, by a definition and one measurement.** The cut is now the
+   8-bit byte graph's, for every precision, so float and 8 bits cut alike by
+   definition; the evidence is 8 bits on the CPU against the NPU: 25,680 of 25,680
+   lines cut identically, median cosine 1.000000, lowest 0.99992 over the non-empty
+   lines, 97.6 % of the vectors bit-identical. Float to 8 bits: median cosine 0.9999
+   over all 15 encoders. The float model's own cut agrees with the 8-bit cut on only
+   29 % of the lines on average, so it cannot be the cut; what this choice hides is in
+   section (b). 2.16 had 0.24 and 0.97.
+3. **(c) The new objective is better than the contrastive one with a linear head, not
+   by much otherwise, and it does not keep the detail of the line.** Predicting the
+   bytes of blanked and visible patches from the line vector (no label) beats 2.16's
+   contrastive objective under the same layout and folds by about 0.10 with the
+   linear head (0.722 against 0.626) but by 0.024 with boosted trees (0.688 against
+   0.664), and the contrastive control wins fold 3 with the linear head. The vectors
+   fall back to **3 to 4 principal components for 95 % of the variance** (mean 3.47;
+   2.16's label-free variants: 12 to 32; the contrastive control: 38.6; the published
+   encoder: 2.6), which 2.16 treated as a failure and which is against the owner's
+   "n dimensions". A benign change of one value leaves the vector where it was
+   (median cosine 1.000 over 5,000 pairs; a one-character probe 1.0000), two random
+   CSIC texts sit at 0.40 (2.16: 0.02 to 0.31), and the byte-prediction loss is the
+   same for blanked and visible patches (2.095 and 2.098). The vector holds the
+   endpoint's template more than the line's content.
+4. **(d) What the figures say about the cause.** Compared head by head, the linear
+   head loses only 0.06 from seen to unseen endpoints, and the good/bad direction
+   learned on known endpoints mostly carries over (it keeps its sign for 0.94 of its
+   weight; cosine 0.74 between the seen and the unseen difference). The linear head
+   falls short of the baseline (0.92 unseen, 0.96 seen) mainly because **the vectors
+   hold little label signal that a linear head can use, on seen endpoints already
+   (0.786)**. The large drop, 0.26, belongs to the boosted trees alone, and their
+   seen figure comes from random stratified splits inside endpoints, which flatters
+   it. The endpoint dominates the vector (q5: the endpoint is read back at 99.6 %
+   accuracy). An attack does move a vector further than a benign one-value change,
+   but on held-out endpoints only at ROC AUC 0.865 ± 0.079 (9 runs), less than the
+   contrastive control's 0.915.
 5. **NPU.** Both graphs compile and run on the NPU only; every row is right (1,118
    comparisons, 0 differ); 2,037 to 2,166 logs per second over three processes with
    nothing else running (requirement 1,000), 2,091 to 2,143 in the owner's low-power
@@ -60,13 +84,14 @@ measurements to the owner; this document does.
 6. **Requirement 15.** Every step ran alone, under a 6 GiB process memory limit, with
    its peak recorded: at most 2.55 GiB committed for the training and evaluation
    steps, 3.94 GiB for one qualification script; no run was stopped by the host and no
-   figure comes from a resumed run.
+   figure comes from a resumed run. Whole-corpus structures that remain are small and
+   named (section "Resources").
 
-**Recommendation** (section "Recommendation"): keep the stable layout and the
-baseline scorer as the first scorer; before any further training, test on the
-existing vectors whether removing the endpoint (centring each vector on its
-endpoint's unlabelled mean) closes the gap; if not, stop using these vectors for
-classification on new endpoints.
+**Recommendation** (section "Recommendation"): keep the stable layout and keep the
+baseline scorer as the first scorer; stop using these vectors for classification on
+new endpoints (option 1). The reviewer's quick test of centring each vector on its
+endpoint's unlabelled mean (option 2(a)) did not close the gap: unseen linear 0.693 ±
+0.095.
 
 ## What changed against 2.16, and why
 
@@ -75,7 +100,7 @@ classification on new endpoints.
 | Each precision cut a line with its own entropy model: float with the float model, 8 bits with the 8-bit graph | One cut for all: the 8-bit byte graph's, computed in the Rust side's arithmetic (steps of the 8-bit logit, a table of 256 exponentials written into the NPU fixture, sums in class order). The float path pools its float byte features at those cuts | The jump rule reads differences of entropies; the 8-bit graph moves them by 0.033 nats on average (99th percentile 0.18), and the float model cuts only 9,786 of 25,608 CSIC lines exactly as the 8-bit graph does (fold 0, seed 0). Putting only the float model's output on the 8-bit grid (a quantization-aware cut that reads the output) gives 9,931: the cut moves because of the 8-bit arithmetic inside the graph, not at its output. A float cut that matches the 8-bit cut for 99 % of lines is out of reach this way, so the 8-bit graph's cut is the cut |
 | Line graph: convolutions of stride 1, 2, 2, 1 and an average over all 128 positions, padding included, inside the graph | Four convolutions `[1, 5]` of stride 1 and a 1 x 1 convolution; the graph gives one output per patch position `[1, 128, rows, 128]`; the mean over the line's real patches is plain arithmetic after the graph, as the pooling of bytes into patches is before it | 2.16's line graph on the NPU was not ONNX Runtime's arithmetic (median cosine 0.96 to the reference on the same patch image, 6 % of values equal). The byte graph, of stride 1, was bit-identical. The mean over real patches also keeps the padding of a short line out of its vector |
 | Objective: NT-Xent between two views of a line with 30 % of the patches blanked (it trains the vector to ignore a blanked patch, where an attack may sit) | Patch-level byte prediction: 30 % of the patches blanked; from the line vector, the patch position and the byte position, a small decoder (training only) predicts every byte of each blanked patch (part `masked`) and of as many visible ones (part `visible`). No label | Requirement (c): the vector must hold what is in a patch. 2.16's contrastive objective stays as the control, under the new cut and line graph |
-| Whole-dataset arrays of byte features (1.9 GB) and pooled patches (1.3 GB); checkpoint and resume, numpy's random state saved but not torch's | The texts are one memory-mapped byte file; byte features are never stored; the pooled patch features are appended to a file as they are made and read back memory-mapped by the batch maker; no checkpoint, no resume | Requirement 15 and the brief: no whole-dataset array, no figure from a resumed run |
+| Whole-dataset arrays of byte features (1.9 GB) and pooled patches (1.3 GB); checkpoint and resume, numpy's random state saved but not torch's | The texts are one memory-mapped byte file; byte features are never stored; the pooled patch features are appended to a file as they are made and read back memory-mapped by the batch maker; no checkpoint, no resume. Still held whole, as stated and bounded needs: the vectors of the corpus while they are made and evaluated (`float_vectors`, `onnx_vectors`, `eval`; 25,608 x 128 float32, about 13 MB), the patch starts (`PatchBytes`, about 3 MB) and the baseline's sparse feature rows in `refs` | Requirement 15 and the brief: the 1.3 to 1.9 GB whole-dataset arrays of 2.16 are gone, what is left is small and named; no figure from a resumed run |
 | Encoder trained once, on split17's fitting side; the five folds scored with an encoder that had seen four of the five large endpoints | One encoder per fold and seed, trained on the fitting side of that fold only (byte model and line model); five folds by URL path x three seeds | (d): "unseen" must be unseen by the encoder too |
 | One seed for most variants | Three seeds (0, 1, 2) per fold and variant; Python, numpy and torch seeded per run, `torch.use_deterministic_algorithms(True)`, no DataLoader workers, 12 threads | (a) and (d) |
 
@@ -110,20 +135,34 @@ So nothing in the generation of a vector is random, and a training is reproduced
 for bit by its seed on this host. The vectors of different seeds differ, as they
 should: seed changes the initial weights, the batch order, the masks and the
 calibration sample. What 2.16 called "seeds differed by up to 0.27" is a property of
-the training, not noise in the encoding; it is measured below as the spread over
-seeds. The 2.16 defect that would have broken this (a resumed run restored numpy's
+the training, not noise in the encoding; it is measured in (d): inside a fold the
+standard deviation over seeds is about 0.03. The 2.16 defect that would have broken this (a resumed run restored numpy's
 random state but not torch's) is gone with the resume itself.
 
 ## (b) Stability: cuts and vectors in float, 8 bits and on the NPU
 
 **Pass.** The condition: median cosine float to 8 bits and 8 bits to NPU at least
-0.99, cuts identical for at least 99 % of lines.
+0.99, cuts identical for at least 99 % of lines. The brief allows the way it passes
+("train with the cuts the 8-bit entropy model makes"), but the pass on the cuts rests
+on one measurement, not two:
+
+- Float to 8 bits, "100 %" of cuts identical is true **by definition**: the float path
+  is given the 8-bit graph's cuts. The real evidence is 8 bits on the CPU against the
+  NPU, measured on one encoder (below).
+- The cut now depends on the 8-bit graph and so on its **quantization calibration**
+  (256 training lines, min/max): another calibration sample is another cut, and with
+  it another encoder.
+- It holds **only while the byte graph stays bit-identical on the NPU**. Float and
+  8-bit cuts agree on only 29 % of the lines, so the cut is fragile: one 8-bit step at
+  one byte can move it. Every new NPU driver or Ryzen AI release must re-check the bit
+  identity of the byte graph (features and logits) before its vectors are mixed with
+  older ones.
 
 | Pair | Cuts identical | Vectors |
 |---|---|---|
-| Float to 8 bits, masked-byte variant, all 15 encoders (5 folds x 3 seeds) | 100 % by construction: one cut, the 8-bit graph's | median cosine 0.99986 to 0.99993 per encoder; 1st percentile 0.9992 to 0.9998 |
-| Float to 8 bits, contrastive control, all 15 encoders | 100 % by construction | median 0.99903 to 0.99936; 1st percentile 0.988 to 0.997 |
-| 8 bits (ONNX Runtime, CPU) to NPU, fold 0 seed 0, masked-byte variant, 25,680 texts | 25,680 of 25,680 lines, every patch start | 25,054 bit-identical; median 1.000000, 1st percentile 0.999999 |
+| Float to 8 bits, masked-byte variant, all 15 encoders (5 folds x 3 seeds) | 100 % by definition: one cut, the 8-bit graph's | median cosine 0.99986 to 0.99993 per encoder; 1st percentile 0.9992 to 0.9998 |
+| Float to 8 bits, contrastive control, all 15 encoders | 100 % by definition | median 0.99903 to 0.99936; 1st percentile 0.988 to 0.997 |
+| 8 bits (ONNX Runtime, CPU) to NPU, fold 0 seed 0, masked-byte variant, 25,680 texts | 25,680 of 25,680 lines, every patch start (measured) | 25,054 bit-identical; the other 626 differ by at most 0.00292 in a component; median 1.000000, 1st percentile 0.999999, lowest 0.99992 over the non-empty lines (the `cosine_min` of 0.0 in `compare.json` is the one empty probe, whose vector is zero on both sides) |
 | 2.16 for comparison: entropy variant, float to 8 bits; 8 bits to NPU | 180 of 25,608 lines (0.7 %) | median 0.24; 0.97 |
 
 **Why the float model's own cut cannot pass, measured.** Over the 15 byte models the
@@ -139,10 +178,14 @@ cut is the definition of the cut, and the float path is a model of the 8-bit pat
 the reverse. Boundary drop (2.16) is not needed for stability any more and was not
 used.
 
-The float and 8-bit vectors of one encoder give the same figures in (d) to the
-second or third decimal (the tables there show both for the means).
+The float and 8-bit vectors give the same figures in (d) **as means** over the 15
+runs, to the second or third decimal. Single runs differ more: by up to 0.013 with the
+linear head and up to 0.091 with boosted trees on unseen endpoints (fold 4, seed 0:
+0.775 float, 0.684 in 8 bits), and the NPU's vectors, nearly bit-identical to the
+8-bit ones, moved the boosted figure of fold 0, seed 0 from 0.794 to 0.770. The
+boosted unseen figure of one run is noisy; read it as a mean.
 
-## (c) An objective that keeps local detail
+## (c) An objective meant to keep local detail
 
 **The objective.** A line is seen with 30 % of its patches blanked (set to zero
 before the line graph). The unit line vector, a learned embedding (64 values) of a
@@ -165,10 +208,18 @@ CSIC texts had a median cosine of 0.92 (smoke run with a byte model of one epoch
 
 **What the training shows**, fold 0, seed 0 (`enc\f0-s0\mask\line.json`): the loss
 falls from 4.43 to 2.10 nats per byte over 12 epochs; a decoder that reads only the
-positions reaches about 2.6 in the smoke run, so the vector carries content. On the
+positions reached about 2.6 in a smoke run (with a byte model of one epoch, so not
+a clean comparison), so the vector tells the decoder something beyond the positions.
+On the
 held-out fold (texts the encoder never saw; no label read) it is 2.77. The two parts
-stay level (masked 2.095, visible 2.098 in the last epoch): the vector says about as
-much about a blanked patch as about a visible one. Over the 15 encoders the last
+stay level (masked 2.095, visible 2.098 in the last epoch): the vector says no more
+about a visible patch, whose bytes went into it, than about a blanked one, whose bytes
+did not. A vector that held the line's own content would make the visible part
+easier. Together with what (d) measures (3 to 4 components for 95 % of the variance,
+a benign one-value change at cosine 1.000, random pairs at 0.40), this says the
+decoder is fed mostly the endpoint's template, the typical bytes at each position of
+that endpoint, and not the detail of the line. The objective was meant to keep local
+detail; these figures do not show that it does. Over the 15 encoders the last
 epoch ends at 1.79 to 2.12 nats per byte, and the held-out fold at 2.28 to 3.02, the
 two parts level in every run. The contrastive control ends at 0.79 to 1.14 on its
 own scale (NT-Xent) and at 1.65 to 4.92 on the held-out fold.
@@ -212,11 +263,31 @@ too. The baseline scorer and the encoders of this task are fitted per fold.
 | Masked-byte variant, float | 0.723 ± 0.067 | 0.698 ± 0.062 | 0.597 ± 0.096 | 0.787 ± 0.032 | 0.961 ± 0.016 |
 | Contrastive control, 8 bits | 0.626 ± 0.080 (0.503 to 0.804) | 0.664 ± 0.070 (0.490 to 0.773) | 0.596 ± 0.081 | 0.791 ± 0.026 | 0.948 ± 0.017 |
 | Contrastive control, float | 0.629 ± 0.078 | 0.661 ± 0.071 | 0.598 ± 0.080 | 0.791 ± 0.026 | 0.950 ± 0.017 |
-| Published encoder (NPU), see above | 0.969 ± 0.025 (0.933 to 0.996) | 0.966 ± 0.026 | 0.941 ± 0.058 | 0.973 ± 0.009 | 0.991 ± 0.001 |
-| Baseline scorer | 0.923 ± 0.089 (0.817 to 0.998) | | | 0.961 ± 0.011 | |
+| Published encoder (NPU), see above | 0.969 ± 0.027 (0.933 to 0.996; n = 5) | 0.966 ± 0.026 | 0.941 (n = 5) | 0.973 (n = 5) | 0.991 ± 0.001 |
+| Baseline scorer | 0.923 ± 0.097 (0.817 to 0.998; n = 5) | | | 0.961 ± 0.011 | |
 
-The spread of the baseline is between folds only (it has no seed); the encoders'
-spread is over folds and seeds. Per fold, mean of three seeds (8 bits):
+**Spreads.** The encoders' "±" is the standard deviation over all 15 runs, folds and
+seeds together; over seeds alone, the standard deviation inside a fold is about 0.03
+on average (masked-byte, 8 bits: 0.029 linear, 0.029 boosted; contrastive: 0.069
+linear, 0.043 boosted), and the folds' means differ by 0.067 (linear). The baseline
+and the published encoder's linear head and neighbours do not depend on the seed: one
+value per fold, so their spread is over the 5 folds (n = 5). Their boosted and seen
+boosted figures take the seed and keep n = 15. (`summary\summary.json`, corrected in
+`hg17_run.py summary` after the review; the first version counted the seed-free
+figures 15 times, 0.089 and 0.025.)
+
+**Head by head.** The linear head loses 0.06 from seen to unseen endpoints (0.786 to
+0.722); boosted trees lose 0.26 (0.948 to 0.688). The boosted trees' seen figure comes
+from random stratified splits inside endpoints, where near-copies of a request sit on
+both sides, which flatters it. The baseline loses 0.04 (0.961 to 0.923).
+
+**Against the contrastive control** the masked-byte objective wins by about 0.10 with
+the linear head (0.722 against 0.626) but by 0.024 with boosted trees (0.688 against
+0.664); the contrastive control wins fold 3 with the linear head (0.637 against
+0.613).
+
+Per fold, mean of three seeds (8 bits); the baseline is ahead of the masked-byte
+linear head on every fold, by +0.19, +0.08, +0.09, +0.39 and +0.26:
 
 | Fold (held-out endpoints with both labels) | Masked-byte, linear | Masked-byte, boosted | Contrastive, linear | Contrastive, boosted | Published, linear | Baseline |
 |---|---|---|---|---|---|---|
@@ -240,15 +311,22 @@ same difference on the held-out fold)
 
 | | Masked-byte | Contrastive | Published |
 |---|---|---|---|
-| Principal components for 95 % of the variance | 3.5 (3 to 4) | 38.6 (32 to 44) | 2.6 |
+| Principal components for 95 % of the variance (2.16's label-free variants: 12 to 32) | **3.47 (3 to 4)**: a fall back to few dimensions | 38.6 (32 to 44) | 2.6 |
 | Spectrum entropy (bits of 7.00) | 1.56 ± 0.28 | 5.26 ± 0.12 | 0.81 |
 | Share of the good/bad difference whose sign holds on the unseen endpoints | **0.94 ± 0.11** (0.56 to 1.00) | 0.46 ± 0.26 | 1.00 |
 | Cosine between the good/bad difference seen and unseen | 0.74 ± 0.12 | 0.10 ± 0.13 | 0.97 |
 | Attack and its benign request (2,204 pairs that differ in one parameter value): median cosine | 0.906 ± 0.029 | 0.306 ± 0.184 | 0.745 |
 | Two benign requests that differ in one value (5,000 pairs): median cosine | 1.000 | 0.899 ± 0.065 | 1.000 |
-| An attack moves the vector further than a benign change of one value (ROC AUC over the pairs) | 0.954 ± 0.029 | 0.888 ± 0.067 | 0.980 |
-| The same, pairs of the held-out fold only (9 of 15 runs have both kinds) | 0.865 ± 0.079 | 0.915 ± 0.036 | 0.980 |
+| An attack moves the vector further than a benign change of one value (ROC AUC over all pairs, mostly on endpoints the encoder trained on) | 0.954 ± 0.029 | 0.888 ± 0.067 | 0.980 |
+| **The same, pairs of the held-out fold only** (9 of 15 runs have both kinds) | **0.865 ± 0.079** | **0.915 ± 0.036** | 0.980 |
 | Distinct vectors of 25,608 distinct texts (8 bits) | 25,608 | 25,608 | 11,052 |
+
+Two cautions on this table. With about three effective directions, the share of the
+good/bad difference that keeps its sign is close to all or nothing per run (0.56 to
+1.00 over the 15) and does not compare fairly with the contrastive control's 38
+directions, where many small directions each carry a little of the difference. And
+the pair figure on all pairs mostly uses endpoints the encoder trained on; on the
+held-out fold the masked-byte encoder is at 0.865, below the contrastive control.
 
 **The qualification scripts of task 2.15** (q1 to q5, unchanged, `--input whole
 --input-bytes 1024`), on fold 0, seed 0: the masked-byte variant in 8 bits and from
@@ -280,32 +358,35 @@ vector).
 1. Randomness is not the cause ((a)): nothing in the encoding is random and a
    training is reproduced bit for bit by its seed. Instability is not the cause any
    more ((b)): cuts and vectors agree across float, 8 bits and the NPU, and the 8-bit
-   figures equal the float ones. 2.16's float-to-8-bit cosine of 0.24 was a real
-   fault and is gone; with it went the drop from about 0.70 (float) to 0.57 to 0.59
-   (8 bits) that the diagnostic after 2.16 saw.
-2. The objective matters ((c)): under the same cuts, the same line graph and the same
-   folds, the masked-byte objective beats the contrastive control by about 0.10 with
-   the linear head on unseen endpoints (0.722 against 0.626) and turns the good/bad
-   direction from a coin toss (0.46 of it keeps its sign) into a stable one (0.94).
-   Against 2.16's contrastive entropy variant scored the same way after 2.16 (0.57 to
-   0.70 on three endpoints, one seed), it is a step.
-3. **But the vectors still do not classify on unseen endpoints.** Seen endpoints:
-   0.95 with boosted trees; unseen: 0.69 to 0.72, with 0.54 to 0.81 over the 15 runs.
-   The baseline scorer on the same folds: 0.92 (0.82 to 1.00); the published encoder
-   0.97, partly from labels of those endpoints. On the clean case, `anadir.jsp`:
-   0.74 against 0.93 and 1.00. The gap seen to unseen (0.95 to 0.69 boosted) is
-   larger than any spread over seeds (0.06).
-4. Where the information goes: the attack is in the vector (an attack moves it far
-   more than a benign change of one value, ROC AUC 0.95; the direction from good to
-   bad keeps its sign, 0.94), but the masked-byte vectors use about three
-   directions for 95 % of their variance, the vectors hold the endpoint above all
-   (q5: endpoint accuracy 0.996 from them, from every group of components), and the
-   attack sits in directions whose
-   orientation turns from one endpoint to the next (cosine 0.74 between the
-   good/bad difference on seen and on unseen endpoints, 0.97 for the published
-   encoder). A classifier fitted on four endpoints draws its boundary at the wrong
-   place for the fifth. The contrastive control has the dimensions (38 components)
-   but no stable direction. Neither objective gives both.
+   means equal the float ones. 2.16's float-to-8-bit cosine of 0.24 was a real fault
+   and is gone; with it went the drop from about 0.70 (float) to 0.57 to 0.59 (8 bits)
+   that the diagnostic after 2.16 saw.
+2. **The vectors do not classify on unseen endpoints well enough.** Unseen: 0.722 ±
+   0.070 linear, 0.688 ± 0.061 boosted, 0.54 to 0.81 over the 15 runs. The baseline
+   scorer on the same folds: 0.923 ± 0.097 (n = 5), ahead on every fold; the
+   published encoder 0.969, partly from labels of those endpoints. On the clean case,
+   `anadir.jsp`: 0.74 against 0.93 and 1.00.
+3. **The main shortfall is little linearly usable label signal, not a failure to
+   carry over.** With the linear head the vectors reach only 0.786 on seen endpoints,
+   and lose 0.06 from there to unseen ones; the good/bad direction learned on known
+   endpoints mostly carries over (sign kept 0.94, cosine 0.74 between seen and
+   unseen). Against the baseline (0.96 seen, 0.92 unseen) the gap is there before any
+   endpoint is new. The large seen-to-unseen drop (0.26) belongs to the boosted trees
+   alone, measured against a seen figure that random stratified splits inside
+   endpoints flatter. That the attack direction turns between endpoints is a minor
+   part of what these figures show.
+4. **Why the signal is small: the vectors fall back to the endpoint's template.**
+   3 to 4 principal components hold 95 % of the variance (mean 3.47; 2.16's label-free
+   variants 12 to 32, which 2.16 counted as its success; a fall back to few
+   dimensions is what 2.16 treated as a failure and is against the owner's "n
+   dimensions"). The endpoint is read back from the vector at 99.6 % accuracy (q5); a
+   benign one-value change leaves the vector at cosine 1.000; the byte-prediction
+   loss is the same for blanked and visible patches. On held-out endpoints an attack
+   moves the vector further than a benign one-value change only at ROC AUC 0.865 ±
+   0.079, below the contrastive control's 0.915.
+5. The contrastive control has the dimensions (38.6 components) but less label signal
+   for a linear head (0.626) and no stable good/bad direction (sign kept 0.46). Neither
+   objective gives what the gate asks.
 
 ## On the NPU
 
@@ -381,7 +462,17 @@ host's load at the end of a step was 53 to 64 %.
 The committed peak includes about 0.75 GiB that a Python process with numpy and
 OpenBLAS reserves before it does anything (`prepare`, which reads the CSV in a second,
 peaks at 0.76 GiB). No run came near the limit, none was stopped by the host, and no
-figure comes from a resumed run: there is no resume. What failed and was fixed:
+figure comes from a resumed run: there is no resume.
+
+Not every structure is streamed. Held whole, as stated and bounded needs: the vectors
+of the corpus while they are made and evaluated (`hg17.float_vectors`,
+`hg17.onnx_vectors`, the `eval` step; 25,608 x 128 float32, about 13 MB per set), the
+patch starts (`PatchBytes`, about 3 MB), the labels and groups, and the baseline's
+sparse feature rows in `refs` and `per-endpoint`. They are small and fixed by the
+corpus size; the 1.3 to 1.9 GB whole-dataset arrays of byte features and pooled
+patches that 2.16 built are gone.
+
+What failed and was fixed:
 
 - The first version of the masked objective trained but collapsed (section (c)); it
   was replaced before any figure was taken.
@@ -428,39 +519,49 @@ amended, and tasks 2.8, 2.10 and 2.11 should keep waiting.
 
 Keep in any case, whatever is decided next: the stable layout of this task (the
 8-bit graph's cut as the one cut, a line graph of stride 1 with the mean over real
-patches after it, the Rust side's arithmetic between the graphs, tested bit for bit);
-it removes the instability and the randomness from the question for good, runs at
-about 2,100 logs per second on the NPU, and its vectors fold nothing. Also keep the
-baseline scorer as the first scorer: on the same folds it is at 0.92, the encoders at
-0.69 to 0.72.
+patches after it, the Rust side's arithmetic between the graphs, tested bit for bit),
+with the re-check it needs (section (b): the byte graph's bit identity on every new
+driver or Ryzen AI release); it removes randomness and instability from the question,
+runs at about 2,100 logs per second on the NPU, and its vectors fold nothing. Also
+keep the baseline scorer as the first scorer: on the same folds it is at 0.92, ahead
+of the encoders (0.69 to 0.72) on every fold.
 
 Options for the owner:
 
-1. **Stop the encoder line for classification; the baseline scorer triages.** Use
-   the encoder (this layout, masked-byte objective) only where its measured strengths
-   are wanted: endpoint structure (k-means NMI 0.66, endpoint accuracy 0.996) and
-   "this request moved further than a benign change" (pair ROC AUC 0.95), for
-   grouping and near-duplicate views, not as the input of a classifier on new
-   endpoints. Tasks 2.8 and 2.10 (scorers on vectors) are then re-scoped or dropped.
-2. **One more spike on the cause measured here: the endpoint dominates the vector.**
-   Both are cheap to test on the vectors that exist before any training: (a) centre
-   each vector on its endpoint's mean (unlabelled logs of the same path, available in
-   the store at scoring time) and fit the classifiers again on the same folds; (b) if
-   that helps, train the line model with the endpoint removed from the target (the
-   decoder told the endpoint, or predicting the parameter values only), so that the
-   vector spends its few strong directions on what varies inside an endpoint. Pass
-   condition as here: unseen ROC AUC with spread, against the baseline's 0.92.
+1. **Stop using these vectors to classify new endpoints; the baseline scorer
+   triages.** Use the encoder (this layout, masked-byte objective) at most where its
+   measured strengths are wanted: grouping by endpoint (k-means NMI 0.66, endpoint
+   accuracy 0.996) and, with care, "this request moved further than a benign change"
+   (ROC AUC 0.865 ± 0.079 on held-out endpoints, 0.95 only on endpoints it trained
+   on; the contrastive control is better on held-out pairs, 0.915). Tasks 2.8 and 2.10
+   (scorers on vectors) are then re-scoped or dropped. **This is the option the
+   figures support best, and the reviewer's judgement.**
+2. **Take the endpoint out of the vector.** (a) Centre each vector on the mean of its
+   endpoint's logs and fit the classifiers again. Using a new endpoint's own
+   unlabelled logs is transductive, test-time adaptation; no label is read, so it is
+   acceptable for batch triage, with three caveats: it needs a warm-up batch of logs
+   per endpoint before that endpoint can be scored; the mean includes the attacks
+   (CSIC's large mixed endpoints are 58 to 62 % attacks, and an endpoint hit mostly by
+   a scanner would be centred on the attack); and it does not compare like for like
+   with the baseline, which scores each log alone. **The reviewer ran it** on the 15
+   masked-byte encoders (centring on each endpoint's mean and renormalising, the
+   held-out endpoints with their own logs; `review\option2a-mask.json`): unseen linear
+   0.693 ± 0.095, boosted 0.707 ± 0.054, seen linear 0.799, `anadir.jsp` linear 0.70
+   to 0.79. Done this way it does not close the gap to 0.92. What is left of this
+   option is (b), a training with the endpoint removed from the target (the decoder
+   told the endpoint, or predicting the parameter values only), a full sweep with no
+   evidence yet that it would help.
 3. **Combine the two objectives.** The contrastive control spreads over 38
-   components but keeps no stable good/bad direction; the masked-byte objective keeps
-   the direction in three components. A weighted sum (or masked bytes plus a
-   variance/covariance term that spreads the vector over its dimensions) would test
-   whether "n dimensions" and a stable direction can be had together. This keeps the
-   owner's "n dimensions" in view; it does not address the endpoint dominance
-   directly, so it is the weaker of the two spikes.
+   components but has less linear label signal and no stable good/bad direction; the
+   masked-byte objective falls back to about three components. A weighted sum (or
+   masked bytes plus a variance/covariance term that spreads the vector over its
+   dimensions) would test whether "n dimensions" and usable label signal can be had
+   together. It keeps the owner's "n dimensions" in view but addresses neither
+   measured shortfall directly.
 
-My recommendation: option 2 (a) first, as it costs minutes on existing files and
-decides whether option 2 (b) is worth a training sweep; if it does not close most of
-the gap to 0.92, option 1.
+My recommendation: option 1. If the owner wants one more try at the encoder for
+classification, option 2 (b) or 3 as one sweep, judged as here (unseen ROC AUC with
+its spread over folds and seeds, against the baseline's 0.92 on the same folds).
 
 ## Where the figures are
 
@@ -481,4 +582,5 @@ graph, byte table; per variant the line model and its graphs).
 | NPU | `npu\f0-s0-mask\` (fixture, `compare.json`), `logs\npu-f0-s0-mask-1.log` to `-4-low-power.log`, `logs\npu-f0-s0-mask-stages.log` |
 | Qualification (q0 to q5, pictures) | `qualification\f0-s0-mask-int8\`, `-mask-npu\`, `-contrastive-int8\`; vectors in `vectors\` |
 | The collapsed first objective | `logs\smoke-line.log` |
+| The review's own figures, option 2(a) | `review\option2a-mask.json`, `review\review-figures.json` |
 | Runs in order | `chain.ps1`, `chain2.ps1`, `qual.ps1`, `logs\chain.log`, `logs\chain2.log`, `logs\qual.log` |

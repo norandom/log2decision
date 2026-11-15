@@ -722,15 +722,30 @@ def step_summary(args) -> dict:
                                                       for f in sorted({f for f, _, _ in picked})}
             block["per_fold_unseen_linear_mean"] = {f"f{f}": float(np.mean([p["unseen_linear"] for ff, _, p in picked if ff == f]))
                                                      for f in sorted({f for f, _, _ in picked})}
+            # The spread over seeds alone: the standard deviation inside each fold, averaged.
+            folds_seen = sorted({f for f, _, _ in picked})
+            for name in ("unseen_linear", "unseen_boosted"):
+                block[f"{name}_mean_within_fold_sd"] = float(np.mean(
+                    [np.std([p[name] for ff, _, p in picked if ff == f], ddof=1) for f in folds_seen]))
+            block["spread_note"] = "std is over folds x seeds; *_mean_within_fold_sd is the spread over seeds alone"
             summary[f"{variant}/{precision}"] = block
     if refs:
+        # The published encoder's linear head and the baseline do not depend on the seed:
+        # one value per fold, so their spread is over the 5 folds (n = 5), not over 15
+        # copies. The boosted trees and the seen folds do take the seed; they keep n = 15.
         picked = [pick(v) for v in refs["published"].values()]
-        summary["published (NPU vectors of task 2.15)"] = {k: stats([p[k] for p in picked if p[k] is not None]) for k in picked[0]}
-        summary["published (NPU vectors of task 2.15)"]["per_fold_unseen_linear_mean"] = {
+        block = {k: stats([p[k] for p in picked if p[k] is not None]) for k in picked[0]}
+        for name in ("unseen_linear", "seen_linear", "unseen_knn11", "components_95", "spectrum_entropy_bits",
+                     "sign_kept_weighted", "cosine_of_differences", "distinct_vectors"):
+            block[name] = stats([pick(refs["published"][f"f{f}-s0"])[name] for f in range(5)])
+        block["per_fold_unseen_linear_mean"] = {
             f"f{f}": float(np.mean([refs["published"][f"f{f}-s{s}"]["classify"]["unseen"]["linear"] for s in range(3)])) for f in range(5)}
-        summary["baseline scorer"] = {"unseen": stats([v["unseen"] for v in refs["baseline"].values()]),
+        block["spread_note"] = "linear, neighbours and geometry: n = 5 folds (seed-free); boosted and seen boosted: n = 15"
+        summary["published (NPU vectors of task 2.15)"] = block
+        summary["baseline scorer"] = {"unseen": stats([refs["baseline"][f"f{f}-s0"]["unseen"] for f in range(5)]),
                                       "seen": stats([v["seen"] for v in refs["baseline"].values()]),
-                                      "per_fold_unseen": {f"f{f}": refs["baseline"][f"f{f}-s0"]["unseen"] for f in range(5)}}
+                                      "per_fold_unseen": {f"f{f}": refs["baseline"][f"f{f}-s0"]["unseen"] for f in range(5)},
+                                      "spread_note": "unseen: n = 5 folds (the baseline has no seed); seen: n = 15 (the seed draws the stratified folds)"}
     hg17.write_json(hg17.path("summary", "summary.json"), summary)
     for key, block in summary.items():
         if "unseen_linear" in block:
