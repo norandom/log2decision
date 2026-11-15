@@ -185,6 +185,34 @@
   - _Depends: 1.17_
   - _Requirements: 13.8, 13.10, 12.6, 12.9_
 
+- [ ] 1.21 Mark sets: the analyst's marked logs (runs after 1.19)
+  - `MarkSet` in `l2d-core` (`marks.rs`): mark by phrase (the store's text index), by regular expression (over an input in batches, or over the store) or by a list of positions; label bad or good; saved as `<project>/marks/<name>.json` with the query, the label, the input's content hash, the marked positions and their count; listed and loaded
+  - De-selection of single logs is recorded in the mark set (groups follow with 2.8)
+  - Tests first: phrase, regex and positions give the expected logs on the fixture; a mark set survives save and load; an input whose hash differs is refused; marking an archive stays within the memory limit (Requirements 12, 15)
+  - Done when a mark set made on the fixture lists the expected logs and is refused against a changed input
+  - _Boundary: MarkSet_
+  - _Depends: 1.9, 1.17_
+  - _Requirements: 16.1, 16.3, 16.12_
+
+- [ ] 1.22 Redaction: proposed fragments, confirmed rules (runs after 1.21)
+  - `propose_redactions` in `l2d-baseline` (`redact.rs`): fragments frequent among the marked logs and also among the unmarked logs of the same input, each with its counts; bounded counters in batches under the memory budget, refused when they do not fit
+  - `RedactionRules`: confirmed, edited or added fragments as ordered replacements by a placeholder token, applied before feature hashing; the rules are saved with the mark set and become part of a score's revision
+  - Tests first: on the fixture and on CSIC the URL path and host are proposed and a payload token is not; rules apply the same at fitting and scoring; the routing option of 2.6 gives the same features as its rule
+  - Done when the proposals for a CSIC mark set name the endpoint fragments with their counts and confirmed rules change the features as stated
+  - _Boundary: Redaction_
+  - _Depends: 1.5, 1.21_
+  - _Requirements: 16.4, 16.5, 16.12_
+
+- [ ] 1.23 A score fitted from a mark set, and the held-out-group report (runs after 1.22)
+  - `fit_from_marks`: the baseline scorer on the redacted texts of the mark set after de-selection, against the other label's mark set where given, otherwise against the unmarked logs of the same input, stated in the output; refused below the counts of 2.3; saved with the mark set, de-selections, rules and fitting-text hashes
+  - Scoring applies the score's rules first
+  - Held-out-group report (16.9): quality on groups held out of fitting beside quality on fitted groups, group key per kind of log (CSIC URL path, AIT host, settable), warning when held-out is lower by more than the margin (default 0.05 ROC AUC); folds by a hash of the group key
+  - Tests first: refusal counts; rules applied at scoring; determinism; the warning fires on a planted endpoint-specific score and not on an agnostic one
+  - Done when a score fitted from a CSIC mark set gives ratios, survives save and load, and reports held-out against fitted groups
+  - _Boundary: BaselineScorer, Evaluator_
+  - _Depends: 1.7, 1.12, 1.22_
+  - _Requirements: 16.6, 16.7, 16.8, 16.9, 6.1, 6.6_
+
 ---
 
 ## Milestone 2: Model Architecture Validation & NPU Inference
@@ -285,26 +313,25 @@
   - _Depends: 1.8, 2.6_
   - _Requirements: 4.1, 5.1_
 
-- [ ] 2.8 Nearest-neighbor decision scorer with evidence diversity
-  - _Re-scope (owner decision of 2026-11-15, gate 2.17): the baseline scorer stays the classifier of logs; the vectors serve search, grouping and near-duplicate views. This task's wording, and requirements 6 and 14 where they rest on the vectors classifying, are redrafted for the owner before it starts._
-  - Implement `NeighbourScorer` in `l2d-decide`: query $k$ nearest labelled logs within reach distance
-  - Calculate ratio as bad share among valid neighbors; abstain if valid neighbors < `min_support`
-  - Track evidence diversity: record `same_group_count` vs `cross_group_count` in `Evidence`
-  - Agnostic threat scoring barrier: if nearest neighbors match only on static benign endpoint without payload match, avoid false threat suppression
-  - Done when test store with known neighbors yields expected ratio and evidence, and isolated log triggers abstention
-  - _Boundary: Scorer, NeighbourScorer_
-  - _Depends: 1.9, 2.7_
-  - _Requirements: 6.1, 6.2, 6.3_
-
+- [ ] 2.8 Grouping of a mark set and the "close enough" decision (re-scoped on 2026-11-15; runs after 2.18)
+  - Re-scoped by the owner's approval of `amendment-2026-11-15-analyst-flow.md`: the neighbour search no longer classifies; the mark-set score (1.23) gives the ratio
+  - Grouping in `l2d-decide`: a mark set's logs grouped by the encoder's vectors on the NPU, or by character n-gram similarity where no NPU is available (method named); each group with its size, a representative and the spread of distances; de-selection of groups recorded in the mark set
+  - Close enough: the nearest marked and unmarked logs within reach, minimum support (6.3); not close enough is stated and gives no ratio; close enough gives the mark-set score's ratio with the evidence (6.2, 6.7, 14.13: same-group against cross-group counts, per-label counts and mean distances) and the label set of Requirement 11 where calibrated
+  - Agnostic barrier kept: neighbours that match only on a benign endpoint's template, without payload match, do not suppress the ratio (6.8)
+  - Done when, on a test store, a mark set groups as expected, a planted near log is close enough with the expected evidence, and an isolated log is stated as not close enough
+  - _Boundary: Grouping, CloseEnough, Scorer_
+  - _Depends: 1.9, 1.23, 2.7, 2.18_
+  - _Requirements: 16.2, 16.3, 16.10, 16.11, 6.2, 6.3, 6.7, 6.8, 14.13_
 - [ ] 2.9 Wire NPU & Encoder CLI commands
   - Wire CLI commands in `l2d-cli`: `l2d runtime check`, `l2d encoder info`, `l2d encoder encode`, `l2d store add`
   - Display truncation flags and placement evidence; no `--allow-cpu` flag (the encoder is NPU only, owner 2026-11-13)
-  - After 2.10 and 2.11 (requirement 14): also `l2d head fit`, `l2d head score` and `l2d outliers`; the outlier output calls its figure a distance
+  - After 2.11 (requirement 14): also `l2d outliers`; the outlier output calls its figure a distance. `l2d head fit` and `l2d head score` wait with the deferred 2.10
+  - After 1.21 to 1.23 and 2.8 (requirement 16): `l2d mark`, `l2d group`, `l2d redact`, `l2d score fit`, and triage against a mark set with the "close enough" decision
   - Done when CLI commands execute against fixture and print run records in human and JSON format
-  - _Requirements: 1.5, 3.2, 4.3, 4.4, 4.5, 10.5, 10.7, 14.7, 14.11_
+  - _Requirements: 1.5, 3.2, 4.3, 4.4, 4.5, 10.5, 10.7, 14.11, 16.1 to 16.11_
 
-- [ ] 2.10 Fitted linear head on vectors (runs after 2.8, before 2.9)
-  - _Re-scope (owner decision of 2026-11-15, gate 2.17): the baseline scorer stays the classifier of logs; the vectors serve search, grouping and near-duplicate views. This task's wording, and requirements 6 and 14 where they rest on the vectors classifying, are redrafted for the owner before it starts._
+- [ ] 2.10 Fitted linear head on vectors (deferred on 2026-11-15)
+  - _Deferred by the owner's approval of `amendment-2026-11-15-analyst-flow.md`: gate 2.17 found that the vectors do not classify on endpoints they have not seen. Requirements 14.1 to 14.9 are deferred with it. The text below is kept as it was._
   - `LinearHead` in `l2d-decide` (`head.rs`): logistic regression on the stored vectors through the dense path of the baseline crate's regression; penalty from 0.01, 0.1, 1, 10, 100 by 5-fold grouped cross-validation on log loss, folds from a hash of the group key; score, save and load under `models/heads/<name>-<rev12>/`; encoder identity check; hashes of the fitting texts
   - `ScorerKind::Linear`; triage and calibration accept it
   - Tests first: refusal counts; determinism; identity mismatch naming both; grouped folds keep a group on one side; calibration of the head on the fixture; memory refusal before loading
@@ -358,6 +385,14 @@
   - Done when (a) is shown, (b) passes or the reason it does not is measured, and (d) states with its spread whether the vectors classify on unseen endpoints. If they still do not, stop and bring the measurements to the owner
   - _Depends: 2.16_
   - _Requirements: none of its own; it guards requirements 4, 14 and 15_
+
+- [ ] 2.18 Gate: does redaction make scores agnostic? (runs after 1.23, before 2.8)
+  - A measurement, run alone under Requirement 15. On the folds of 2.17 (five by endpoint), with CSIC attacks found by regular expressions standing in for an analyst's marks: the mark-set score with and without the proposed redactions, and the encoder's vectors of the stable layout with and without redaction before encoding; ROC AUC on held-out against fitted endpoints, means with their spread
+  - Check the margin of 16.9 (0.05) against the measured gaps
+  - A dated document in `docs/`, indexed in the README: conclusion first, a recommendation for the owner
+  - Done when the figures state with their spread whether redaction closes the gap between fitted and held-out endpoints
+  - _Depends: 1.23, 2.17_
+  - _Requirements: none of its own; it guards requirement 16_
 
 ---
 
@@ -872,3 +907,4 @@
 - 1.20, review round 2, FYI recorded: a partition over its room is refused at the next doubling of its rows or by the deduplication after the read, never later and never wrongly; the mid-batch freeze for lack of memory has no test; the comment at `crates/l2d-cli/tests/archive.rs` about a refusal at 40 MiB was not confirmed on the implementer's fixture (refused only near 38.6 MiB).
 - 2.17, review round 2 (independent): APPROVED as the gate's record. `hg17_run.py summary` re-run at d0a9452 gives a byte-identical `summary.json`; no old wording or value left. Remaining, not blocking: `hg17_run.py:741` lists the published encoder's `seen_linear` as seed-free, so the doc shows 0.973 (n = 5); it does take the seed (stratified folds), 0.9726 ± 0.0089 over 15 runs, conclusions unchanged. The option 2(a) script lives outside the repo; its output `task-2.17\review\option2a-mask.json` is cited. The checkbox waits for the owner's decision.
 - 2.17: Owner decision of 2026-11-15: option 1. The baseline scorer stays the classifier of logs; the encoder, in the stable layout of 2.17 (cut from the 8-bit byte graph, line graph of stride-1 convolutions), serves search, grouping and near-duplicate views. Tasks 2.8 and 2.10 are re-scoped to that; the redrafted wording goes to the owner before 2.8 starts. Ticked on this decision.
+- Amendment of 2026-11-15 (the analyst flow, `amendment-2026-11-15-analyst-flow.md`): approved by the owner and merged. Requirement 16 added; 6.1 and 6.6 changed; 14.1 to 14.9 deferred; tasks 1.21 to 1.23 and gate 2.18 added; 2.8 re-scoped to grouping and "close enough"; 2.10 deferred; 2.9 extended. Owner decisions in it: unmarked logs as the other class by default; group key per kind of log, settable; margin 0.05 ROC AUC; grouping by n-gram similarity without an NPU.

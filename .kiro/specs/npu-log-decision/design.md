@@ -304,7 +304,7 @@ flowchart TD
 | 5.5 | Restrict by label or source | Store | `Filter` | |
 | 5.6 | Refuse identity mismatch | Store | `StoreError::IdentityMismatch`, `ReleaseMismatch` (task 2.7) | |
 | 5.7 | Persistent | Store | on-disk store | |
-| 6.1 | Ratio from labelled logs | NeighbourScorer | `Scorer::score` | Triage |
+| 6.1 | Ratio from mark sets or labelled logs | BaselineScorer (mark-set score), NeighbourScorer | `Scorer::score` | Triage |
 | 6.2 | Evidence | NeighbourScorer | `Evidence` | Triage |
 | 6.3 | Abstain below support | NeighbourScorer | `Decision::Abstain` | Triage |
 | 6.4 | Ranking, abstained separate | Triage | Triage frame: `list`, `rank` | Triage |
@@ -345,11 +345,18 @@ flowchart TD
 | 13.8, 13.9, 13.10 | Batches under the memory limit; record length limit; same results as unpacked | ZipInput, MemoryBudget | `Batcher`, `ZipInputSettings.max_record_bytes` | |
 | 13.11 | Results written in parts | PartWriter | Parquet parts and manifest under the work directory | |
 | 13.12 | Deduplication state within the limit | ZipInput, PartWriter | refusal (task 1.16), on-disk deduplication (task 1.17) | |
-| 14.1 to 14.6 | Fitted linear head on vectors | LinearHead | `LinearHead::fit`, `score`, `save`, `load` | |
+| 14.1 to 14.6 | Fitted linear head on vectors (deferred, 2026-11-15) | LinearHead | `LinearHead::fit`, `score`, `save`, `load` | |
 | 14.7, 14.8, 14.9 | Head named as scorer, calibrated, evaluated side by side | Triage, ConformalCalibrator, Evaluator | `ScorerKind::Linear` | Triage |
 | 14.10, 14.11, 14.12 | Outlier ranking by distance to the k-th nearest stored log | OutlierRanking, Store | `rank_outliers` on `Store::nearest` | |
 | 14.13 | Per-label neighbour counts and mean distances | NeighbourScorer | `Evidence` | Triage |
 | 14.14 | Head fitting and outlier ranking within the memory limit | MemoryBudget | `require_whole`, batches | |
+| 16.1 | Mark sets by phrase, regex, positions | MarkSet | `MarkSet::mark`, `save`, `load` | Analyst flow |
+| 16.2, 16.3 | Grouping, de-selection | Grouping (l2d-decide), MarkSet | `group_marks`; `MarkSet::deselect` | Analyst flow |
+| 16.4, 16.5 | Redaction proposals and confirmed rules | Redaction | `propose_redactions`; `RedactionRules` | Analyst flow |
+| 16.6, 16.7, 16.8 | Score fitted on redacted marks, rules applied at scoring | BaselineScorer | `fit_from_marks`; rules in the saved scorer | Analyst flow |
+| 16.9 | Held-out-group report and margin | BaselineScorer, Evaluator | `HeldOutGroupReport` | |
+| 16.10, 16.11 | Close enough, else no ratio | Grouping and close enough (l2d-decide), Triage | `close_enough` on `Store::nearest` | Triage |
+| 16.12 | Within the memory limit, Requirement 15 | MemoryBudget | batches, bounded counters | |
 | 9.8 | Single-label groups reported separately | Evaluator, Metrics | `EvaluationReport.single_label_groups` | |
 | 10.1 | No Python | whole workspace | native DLLs only | |
 | 10.2 | No network | whole workspace | dependency rule | |
@@ -1026,6 +1033,31 @@ pub enum ScoredDownBy { Calibration, BudgetOnly }
 - With a calibrated primary scorer, triage places a log by its label set: bad alone goes to the review ranking, good alone to `scored_down` (by calibration), both and neither to `abstained`. The review budget then applies to the review ranking; logs beyond it are `scored_down` by budget only.
 - Evaluation reports, per label and per stratum, the share of test logs whose true label is missing from the set (achieved error rate) next to the chosen rate, and the share of each set kind (`ScorerResult.coverage`).
 
+#### MarkSet, Redaction and the mark-set score
+
+| Field | Detail |
+|-------|--------|
+| Intent | The analyst's flow from a few marked logs to an agnostic score and a "close enough" decision |
+| Requirements | 16.1 to 16.12; 6.1, 6.6 |
+
+Added on 2026-11-15 (owner approval of `amendment-2026-11-15-analyst-flow.md`, after gate 2.17). The flow: mark, group and de-select, redact, fit, decide whether a new log is close enough. The baseline scorer classifies; the encoder serves grouping and the "close enough" search. Labelled datasets (CSIC, AIT) stand in for an analyst's marks when a score's agnosticism is measured; they are not the source of a product score.
+
+**MarkSet (`l2d-core`, `marks.rs`; task 1.21)**
+- Marks by phrase (the store's text index), regular expression (over an input in batches, or over the store) or a list of positions. Saved as `<project>/marks/<name>.json`: the query, the label (bad or good), the input's content hash, the marked positions and their count, the de-selections (task 1.22 or 2.8).
+- A mark set of the other label is optional. Without one, fitting uses the unmarked logs of the same input as the other class and the output says so.
+
+**Redaction (`l2d-baseline`, `redact.rs`; task 1.22)**
+- Proposal: candidate fragments are tokens and token runs that are frequent among the marked logs and also frequent among the unmarked logs of the same input. Examples are host names, addresses, URL paths, and fixed parameter names and values. Each proposal is shown with its count in marked and in unmarked logs. Counting runs in batches under the memory budget; the counters are bounded and refused when they do not fit.
+- Rules: the confirmed fragments become ordered literal or pattern replacements by a placeholder token. They are applied to the text before feature hashing, the same at fitting and at scoring. The rules are part of the saved score and of its revision.
+- The routing option of requirement 2.6 stays. Redaction generalises it from the URL path to any fragment the analyst confirms.
+
+**Mark-set score (`l2d-baseline`; task 1.23)**
+- The baseline scorer of Requirement 2, fitted on the redacted texts of the mark set (after de-selection) against the other class, saved under `models/baselines/<name>-<rev12>/` with the mark set, de-selections, rules and fitting-text hashes. Refused below the counts of 2.3.
+- Held-out-group report (16.9): the ratio quality on groups held out of fitting beside that on the fitted groups. Groups are by the group key of the kind of log (CSIC: URL path; AIT: host; settable). It warns when the held-out figure is lower by more than the margin (default 0.05 ROC AUC). Folds are by a hash of the group key, as in the baseline gate.
+
+**Grouping and "close enough" (`l2d-decide`; task 2.8)**
+- Grouping of a mark set: by the encoder's vectors on the NPU, or by character n-gram similarity when no NPU is available (method named). Each group has its size, a representative and the spread of distances.
+- Close enough (16.10, 16.11): the nearest marked and unmarked logs within reach, minimum support of 6.3. Not close enough: stated, no ratio. Close enough: the mark-set score's ratio, with the evidence of 6.2, 6.7 and 14.13 and the label set of Requirement 11 when calibrated.
 #### LinearHead and outlier ranking
 
 | Field | Detail |
@@ -1033,7 +1065,7 @@ pub enum ScoredDownBy { Calibration, BudgetOnly }
 | Intent | A fitted decision model on the vectors next to the neighbour scorer, and a signal for logs unlike anything stored |
 | Requirements | 14.1 to 14.14 |
 
-Added on 2026-11-12, from the comparison with Venn's operations (`docs/2026-11-12-venn-vdm-gap-list.md`). Built after the NPU encoder (tasks 2.10 and 2.11). The baseline scorer, the neighbour scorer and the linear head stay separate scorers; the decision to investigate, which brings their results together, is later work.
+Added on 2026-11-12, from the comparison with Venn's operations (`docs/2026-11-12-venn-vdm-gap-list.md`). Built after the NPU encoder (tasks 2.10 and 2.11). The linear head (14.1 to 14.9, task 2.10) is deferred since 2026-11-15: gate 2.17 found that the encoder's vectors do not classify on endpoints they have not seen. The outlier ranking and the evidence (14.10 to 14.14, task 2.11) stay. The baseline scorer, the neighbour scorer and the linear head stay separate scorers; the decision to investigate, which brings their results together, is later work.
 
 **LinearHead (`l2d-decide`, `head.rs`)**
 - Model: logistic regression on the stored, L2-normalised vectors, fitted with the deterministic regression of the baseline crate through its dense path. No new crate.
@@ -1326,3 +1358,4 @@ What follows for the design. The criteria are Requirement 15 since 2026-11-14 (r
 1. Runtime spike: load AMD's DLL from Rust, register the Vitis AI provider, run the spike's 8-bit model, read placement. Fix the `ort` feature level and the DLL list. If this fails, stop and return to design.
 2. `rusqlite` with bundled SQLite builds on Windows (done in task 1.8).
 3. `l2d-core` and `l2d-baseline` (no hardware dependency) can proceed in parallel with 1 and 2.
+4. The analyst flow (Requirement 16): mark sets (1.21), redaction (1.22) and the mark-set score (1.23) need neither the NPU nor the encoder and come first; gate 2.18 measures whether redaction makes scores agnostic; then grouping and "close enough" (2.8) and the commands (2.9).

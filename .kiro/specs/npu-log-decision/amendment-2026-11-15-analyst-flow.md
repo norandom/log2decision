@@ -1,8 +1,11 @@
 # Amendment draft: from the analyst's marks to an agnostic score
 
-Status: **draft for the owner's review, 2026-11-15.** Nothing in
-`requirements.md`, `design.md` or `tasks.md` is changed until the owner
-approves. Where this file and those documents differ, those documents win.
+Status: **approved by the owner on 2026-11-15 and merged** into
+`requirements.md` (Requirement 16; 6.1, 6.6; 14.1 to 14.9 deferred; boundary
+context), `design.md` ("MarkSet, Redaction and the mark-set score",
+traceability, implementation order) and `tasks.md` (1.21 to 1.23, 2.18; 2.8
+re-scoped; 2.10 deferred; 2.9 extended). Where this file and those documents
+differ, those documents win. This file is kept as the record of the proposal.
 
 ## 1. Why
 
@@ -125,5 +128,4 @@ whether redaction holds up. Then 2.8 (steps b and e) and 2.9.
 4. **Grouping without an NPU:** step b groups by character n-gram similarity
    (the baseline's features), with the method named in the output.
 
-The draft as a whole still awaits the owner's approval before it is merged
-into `requirements.md`, `design.md` and `tasks.md`.
+The owner approved the draft as a whole on 2026-11-15.

@@ -29,6 +29,7 @@ features on HTTP CSIC 2010.
   - Reading log records from zip archives in batches, without extracting them.
   - A fitted linear head on the encoder's vectors as a further scorer, and a ranking of logs unlike anything stored.
   - A baseline bad/good ratio from character-level features, fitted deterministically.
+  - A score built from the analyst's marks, with redaction of host- and endpoint-specific fragments (Requirement 16).
   - Agnostic threat scoring barrier: isolating routing context (URLs, endpoints, hosts) from payload anomaly signals so threat scores derive from general syntactic anomalies and attack patterns rather than hardcoded training-set site topography.
   - Pre-validating neural encoder architecture quality offline via `uv` on held-out grouped splits before NPU deployment.
   - Packaging the encoder as an identified artifact (`model.int8.onnx`, `table.bin`, `encoder.json`) and running it on the NPU via ONNX Runtime.
@@ -120,12 +121,12 @@ features on HTTP CSIC 2010.
 **Objective:** As a log analyst, I want each log to carry a bad/good ratio with the evidence behind it, so that I can score down logs that look good and spend my time on the rest.
 
 #### Acceptance Criteria
-1. When a log is triaged, the Log Triage Tool shall return a bad/good ratio between 0 and 1 derived from stored logs with known labels.
+1. When a log is triaged, the Log Triage Tool shall return a bad/good ratio between 0 and 1 derived from the analyst's mark sets (Requirement 16) or from a labelled dataset. (Changed on 2026-11-15 by the owner: "derived from stored logs with known labels" before.)
 2. When a log is triaged, the Log Triage Tool shall return the evidence for the ratio: the nearest labelled logs, their labels, their distances, and how many were used.
 3. If fewer labelled logs than the configured minimum support are within reach of a log, then the Log Triage Tool shall abstain for that log and say so in place of a ratio.
 4. When a set of logs is triaged, the Log Triage Tool shall return them ranked from highest to lowest ratio, with abstained logs listed separately.
 5. When the analyst sets a review budget as a number of logs, the Log Triage Tool shall return that many highest-ranked logs and mark the remaining logs as scored down.
-6. When a log is triaged, the Log Triage Tool shall state which scorer produced the ratio: the baseline scorer, the encoder-based neighbour scorer, the linear head (Requirement 14), or several of them.
+6. When a log is triaged, the Log Triage Tool shall state which scorer produced the ratio: the baseline scorer, a score fitted from a mark set (Requirement 16), the encoder-based neighbour scorer, the linear head (Requirement 14), or several of them.
 7. When evidence is reported for a triage decision, the Log Triage Tool shall report the count of nearest neighbors sharing the same endpoint/group key versus distinct endpoints.
 8. If nearest neighbors are solely composed of benign logs from the identical endpoint while payload anomaly indicators are absent, the decision logic shall avoid falsely suppressing the bad/good ratio.
 9. The Log Triage Tool shall not delete, block or alter logs as a result of triage.
@@ -229,7 +230,7 @@ Added on 2026-11-12 (owner approval of `amendment-2026-11-12-zip-batch.md`). Rea
 ### Requirement 14: Fitted linear head and outlier ranking on vectors
 **Objective:** As a log analyst, I want a second decision model on the encoder's vectors that is fitted to my labelled logs, and a signal for logs unlike anything stored, so that I can compare it with the nearest-neighbour ratio and the baseline, and see what is new.
 
-Added on 2026-11-12 (owner approval of `amendment-2026-11-12-vector-decision-heads.md`, after comparing Venn's operations with this spec in `docs/2026-11-12-venn-vdm-gap-list.md`). The scorers stay separate; the decision to investigate, which brings their results together, is not part of this requirement.
+Added on 2026-11-12 (owner approval of `amendment-2026-11-12-vector-decision-heads.md`, after comparing Venn's operations with this spec in `docs/2026-11-12-venn-vdm-gap-list.md`). The scorers stay separate; the decision to investigate, which brings their results together, is not part of this requirement. Criteria 1 to 9 (the linear head) are deferred since 2026-11-15 (owner, after gate 2.17: the encoder's vectors do not classify on endpoints they have not seen); their numbers are kept so that later numbers do not move. Criteria 10 to 14 stay.
 
 #### Acceptance Criteria
 1. When labelled stored logs are supplied for fitting, the Log Triage Tool shall fit a linear head on their vectors that returns a bad/good ratio between 0 and 1 for a vector, where higher means more likely bad.
@@ -265,3 +266,22 @@ Added on 2026-11-14 on the owner's direction: the target audience has a busy mac
 10. When a resource-hungry operation ends, the Log Triage Tool shall record the memory limit applied, the peak memory it counted, whether it waited for the host, and whether any structure was moved to disk.
 11. If a pipeline of the project ends because the host stopped it for memory, then that shall be treated as a fault of the pipeline to be corrected by batching and a memory limit, and its results shall not be reported as those of an uninterrupted run.
 12. The development pipelines that train or qualify an encoder shall meet criteria 1, 2, 5, 7 and 10 in the same way as the tool's own operations.
+
+### Requirement 16: From the analyst's marks to an agnostic score
+**Objective:** As a log analyst, I want to mark a few logs I care about, have the tool group them, strip what is specific to my hosts and endpoints, and build a score from them, so that the score finds the same kind of log elsewhere and not only on the hosts I marked.
+
+Added on 2026-11-15 (owner approval of `amendment-2026-11-15-analyst-flow.md`, after gate 2.17). The score must be derived in an agnostic sense: a score that works because it has learned certain hosts or endpoints is a dataset-specific model. The baseline scorer classifies; the encoder serves search, grouping and near-duplicate views. Labelled datasets measure whether a score is agnostic; they are not the source a product score is trained on.
+
+#### Acceptance Criteria
+1. When the analyst marks logs by a phrase, a regular expression or a list of log positions, against an input or a store, the Log Triage Tool shall save the marked logs as a named mark set that records the query, the label the analyst gives it (bad or good), the input's content hash and the number of logs marked.
+2. When a mark set is grouped, the Log Triage Tool shall group its logs by string similarity and show each group with its size, a representative log, and the spread of distances within it. Where no NPU is available, the Log Triage Tool shall group by character n-gram similarity and name the method in its output.
+3. When the analyst de-selects groups or single logs from a mark set, the Log Triage Tool shall keep them out of fitting and record what was de-selected.
+4. When a mark set is prepared for fitting, the Log Triage Tool shall propose as redactions the fragments that recur across the marked logs and are also frequent in unmarked logs of the same input (host names, addresses, URL paths, fixed parameter names and values), each with the number of marked and unmarked logs it occurs in.
+5. When the analyst confirms, edits or rejects a proposed redaction, or adds one, the Log Triage Tool shall apply only the confirmed redactions and record them as rules.
+6. When a score is fitted from a mark set, the Log Triage Tool shall fit the baseline scorer (Requirement 2) on the redacted texts, against the analyst's marks of the other label where given and otherwise against the unmarked logs of the same input, stating which; it shall save with the score the mark set, the de-selections, the redaction rules and the hashes of the fitting texts.
+7. When a log is scored with a score fitted from a mark set, the Log Triage Tool shall apply the score's redaction rules to the log first, the same rules as at fitting.
+8. If a mark set holds fewer logs after de-selection than Requirement 2.3 needs, then the Log Triage Tool shall refuse to fit and state the counts.
+9. When a score is fitted and group keys exist, the Log Triage Tool shall report its ratio quality on groups held out of fitting next to its quality on the groups it was fitted on, and shall state when the held-out figure is lower by more than the configured margin (default 0.05 ROC AUC) that the score depends on the groups it has seen. The group key is one default per kind of log (HTTP CSIC 2010: the URL path; AIT: the host), named in the output and settable by the analyst.
+10. When a new log is triaged against a mark set, the Log Triage Tool shall decide whether it is close enough to the marked logs, from the nearest marked and unmarked logs within reach with the minimum support of Requirement 6.3; for a log that is not close enough, it shall state that and not give the mark set's ratio.
+11. When a log is close enough, the Log Triage Tool shall give the score's ratio with the evidence of Requirements 6.2, 6.7 and 14.13, and the label set of Requirement 11 where the score is calibrated.
+12. The Log Triage Tool shall keep marking, grouping, redaction and fitting within the memory limit of Requirement 12, and under Requirement 15.
