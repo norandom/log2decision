@@ -108,7 +108,7 @@ The qualification of the vectors and the comparison table are in
 
 `hg17.py` and `hg17_run.py`, on `hg.py`'s byte model. What changed against 2.16 and
 why is in the header of `hg17.py` and in
-[`docs/2026-11-14-entropy-encoder-stability-gate.md`](../../docs/2026-11-14-entropy-encoder-stability-gate.md).
+[`docs/2026-11-15-entropy-encoder-stability-gate.md`](../../docs/2026-11-15-entropy-encoder-stability-gate.md).
 Everything is written below `D:\BuildArtifacts\log2decision\task-2.17` (`L2D_HG17_DIR`),
 model weights below `D:\Source\log2decision\models\task-2.17` (`L2D_HG17_MODELS`).
 

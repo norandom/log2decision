@@ -656,7 +656,23 @@ def step_export(args) -> dict:
                 handle.write(json.dumps(dict(row, empty=bool(probes.lens[i] == 0), part_bytes=int(probes.full_bytes[i]),
                                              read_bytes=int(probes.lens[i]), truncated=long, text_longer_than_input=long,
                                              patches=int(counts["probes"][i])), ensure_ascii=False) + "\n")
-        hg17.write_json(os.path.join(out, "record.json"), {"models": [dict(line_record, precision=precision)]})
+        # The qualification scripts read the held-out endpoints and the validation paths
+        # from the record: here the fold's endpoints with both labels; 2.17 has no
+        # validation part (the scripts still mark every fifth single-label path so).
+        # The counts are the scripts' own partition (q3 checks them): held-out = the
+        # fold's mixed endpoints, "validation" = every fifth single-label path in byte
+        # order, the rest "training"; labels only, the encoder trained on the whole
+        # fitting side of the fold.
+        held_mixed = sorted(set(labels.group_array[labels.held(args.fold) & labels.mixed]))
+        single = sorted({g for g in labels.groups if g not in set(labels.mixed_groups)}, key=lambda g: g.encode())
+        in_held = np.isin(labels.group_array, held_mixed)
+        in_val = np.isin(labels.group_array, single[0::5])
+        record = dict(line_record, precision=precision,
+                      split={"name": "cv5", "fold": args.fold, "held_out_mixed_paths": held_mixed, "held_out_logs": int(in_held.sum())},
+                      training={"chosen_epoch": line_record["settings"]["epochs"]})
+        record["settings"] = dict(line_record["settings"], validation_mixed_paths=[], validation_logs=int(in_val.sum()),
+                                  training_logs=int((~in_held & ~in_val).sum()), routing="keep (the whole line)")
+        hg17.write_json(os.path.join(out, "record.json"), {"models": [record]})
         written.append(out)
     return {"written": written}
 
@@ -726,7 +742,54 @@ def step_summary(args) -> dict:
     return {"written": hg17.path("summary", "summary.json")}
 
 
-STEPS = {"prepare": step_prepare, "bytes": step_bytes, "line": step_line, "eval": step_eval, "refs": step_refs,
+def step_per_endpoint(args) -> dict:
+    """ROC AUC per held-out endpoint (paths with both labels), for the scorers fitted on
+    the fitting side of each fold: the encoders' 8-bit vectors (linear and boosted, each
+    seed), the published encoder's vectors and the baseline scorer. The published
+    encoder was trained with the labels of split17's fitting side, so only split17's
+    three held-out endpoints (anadir, entrar, vaciar) are unseen by it as well."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.metrics import roc_auc_score
+
+    labels = hg17.Labels()
+    published_dir = r"D:\BuildArtifacts\log2decision\task-2.15\vectors"
+    published = l2dsci.l2n(np.fromfile(os.path.join(published_dir, "csic.f32"), dtype="<f4").reshape(len(labels.bad), -1)).astype(np.float64)
+    corpus = hg17.Corpus("csic")
+    features = l2dsci.hashed_rows([bytes(corpus.raw(i)).decode("utf-8") for i in range(len(corpus))], "keep")
+    out = {}
+
+    def per_group(score, held):
+        result = {}
+        for g in sorted(set(labels.group_array[held & labels.mixed])):
+            use = held & (labels.group_array == g)
+            result[g] = float(roc_auc_score(labels.bad[use], score[use]))
+        return result
+
+    for fold in range(5):
+        fit, held = labels.fit(fold), labels.held(fold)
+        groups_fit = [labels.groups[i] for i in np.flatnonzero(fit)]
+        block = {}
+        score = np.zeros(len(labels.bad))
+        score[held] = l2dsci.fit_logreg(features[fit], labels.bad[fit], l2=1.0).predict_proba(features[held])[:, 1]
+        block["baseline"] = per_group(score, held)
+        sources = [("published", 0, published)]
+        for variant in ("mask", "contrastive"):
+            for seed in (0, 1, 2):
+                raw = np.fromfile(os.path.join(enc_dir(fold, seed), variant, "csic-int8.f32"), dtype="<f4").reshape(-1, hg17.OUTPUT_DIM)
+                sources.append((f"{variant}-s{seed}", seed, l2dsci.l2n(raw).astype(np.float64)))
+        for name, seed, x in sources:
+            probability, _ = l2dsci.linear_head(x[fit], labels.bad[fit], groups_fit, x[held])
+            score[held] = probability
+            block[f"{name}/linear"] = per_group(score, held)
+            score[held] = HistGradientBoostingClassifier(max_iter=200, random_state=seed).fit(x[fit], labels.bad[fit]).predict_proba(x[held])[:, 1]
+            block[f"{name}/boosted"] = per_group(score, held)
+        out[f"f{fold}"] = block
+        print(f"per-endpoint f{fold}: " + json.dumps({k: {g.rsplit('/', 1)[1]: round(v, 3) for g, v in b.items()} for k, b in block.items()}))
+    hg17.write_json(hg17.path("refs", "per-endpoint.json"), out)
+    return {"written": hg17.path("refs", "per-endpoint.json")}
+
+
+STEPS = {"per-endpoint": step_per_endpoint, "prepare": step_prepare, "bytes": step_bytes, "line": step_line, "eval": step_eval, "refs": step_refs,
          "determinism": step_determinism, "npu-fixture": step_npu_fixture, "npu-compare": step_npu_compare,
          "export": step_export, "summary": step_summary}
 
