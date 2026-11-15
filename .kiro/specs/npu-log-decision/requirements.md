@@ -251,7 +251,7 @@ Added on 2026-11-12 (owner approval of `amendment-2026-11-12-vector-decision-hea
 ### Requirement 15: Resource management on a busy machine
 **Objective:** As a log analyst whose laptop is busy with other work, I want every pipeline of the tool to manage memory, disk and the NPU as shared resources, so that it finishes its work or refuses with a reason, and never brings the machine or its own run down.
 
-Added on 2026-11-14 on the owner's direction: the target audience has a busy machine, and resource management is a key design objective. The reference host ends processes when the use of physical memory reaches 92 %. Requirements 12 and 13 state the rules for batches and for archives; this requirement states the four criteria that hold for every pipeline, including training and the development pipelines that train and qualify encoders (design.md, "Operating Criteria: Field Machines, Not Labs").
+Added on 2026-11-14 on the owner's direction: the target audience has a busy machine, and resource management is a key design objective. The reference host ends processes when the use of physical memory reaches 92 %. Requirements 12 and 13 state the rules for batches and for archives; this requirement states the four criteria that hold for every pipeline, including training and the development pipelines that train and qualify encoders (design.md, "Operating Criteria: Field Machines, Not Labs"). Wording approved by the owner on 2026-11-15.
 
 #### Acceptance Criteria
 1. The Log Triage Tool shall process every dataset in batches and shall not hold a whole dataset in memory as one object, except in an operation that states this need and is refused under criterion 4 when it does not fit.
