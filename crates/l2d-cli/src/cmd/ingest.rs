@@ -170,12 +170,13 @@ fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(
         }),
         _ => None,
     };
+    let at_once = input.entries_at_once();
     // Nothing is kept: the files and what the run made of its directory go now.
     let summary = input.finish();
     let report = ArchiveReport::of(&summary);
     let memory = context.memory_report(
         &budget,
-        vec![Operation::batches("read", summary.input.records, plan)],
+        vec![Operation::batches("read", summary.input.records, plan).with_entries_at_once(at_once)],
     );
 
     let out = io::stdout().lock();

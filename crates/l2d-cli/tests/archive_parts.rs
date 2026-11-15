@@ -473,6 +473,172 @@ fn the_rows_do_not_depend_on_the_batch_size_and_a_repeated_run_gives_the_same_by
     }
 }
 
+/// Six entries, one of them gzip and one a directory, whose texts repeat within and
+/// across them; two are longer than a piece of a reader (256 KiB).
+fn several() -> Vec<u8> {
+    let entry = |name: &str, lines: u32, step: u32| {
+        (0..lines)
+            .map(|line| {
+                format!(
+                    "{name} GET /page/{}?step={} 200\n",
+                    (line * step) % 997,
+                    line % 3
+                )
+            })
+            .collect::<String>()
+    };
+    let (first, second, third) = (
+        entry("a", 9_000, 1),
+        entry("b", 300, 5),
+        entry("c", 8_000, 7),
+    );
+    archive(&[
+        ("logs/", b""),
+        ("logs/first.log", first.as_bytes()),
+        ("logs/second.log", second.as_bytes()),
+        ("logs/third.log.gz", &gzip(third.as_bytes())),
+        ("logs/empty.log", b""),
+        ("more/fourth.log", b"GET /page/3?step=0 200\n\nlast\n"),
+        ("more/fifth.log", first[..2_000].as_bytes()),
+    ])
+}
+
+#[test]
+fn entries_read_at_once_give_the_parts_and_manifest_of_one_at_a_time() {
+    let scratch = Scratch::new("at-once");
+    let path = scratch.write("several.zip", &several());
+    let score = |run: &str, at_once: &str, before: &[&str]| {
+        let work = scratch.arg(run);
+        let mut args = before.to_vec();
+        args.extend_from_slice(&[
+            "baseline",
+            "score",
+            "--input",
+            &path,
+            "--baseline",
+            "web",
+            "--work-dir",
+            &work,
+            "--entries-at-once",
+            at_once,
+        ]);
+        scratch.json(&args)
+    };
+    let read_at_once =
+        |document: &Value| document["memory"]["operations"][0]["entries_at_once"].clone();
+    for before in [&[][..], &["--batch-rows", "7"][..]] {
+        let one = score("one", "1", before);
+        assert_eq!(read_at_once(&one), 1);
+        for at_once in ["2", "4", "8"] {
+            let run = format!("at-once-{at_once}");
+            let got = score(&run, at_once, before);
+            // Never more than the six entries that are opened.
+            let expected = at_once.parse::<u64>().unwrap().min(6);
+            assert_eq!(read_at_once(&got), expected, "{before:?}");
+            assert_eq!(got["input"], one["input"], "{at_once} {before:?}");
+            assert_eq!(rows_hashes(&got), rows_hashes(&one), "{at_once} {before:?}");
+            assert_eq!(
+                got["parts"]["deduplication"], one["parts"]["deduplication"],
+                "{at_once} {before:?}"
+            );
+            // The same manifest and the same part files, byte for byte.
+            let (first, second) = (scratch.path("one"), scratch.path(&run));
+            assert_eq!(names(&first), names(&second));
+            for name in names(&first) {
+                assert_eq!(
+                    std::fs::read(first.join(&name)).unwrap(),
+                    std::fs::read(second.join(&name)).unwrap(),
+                    "{name}, {at_once} at once, {before:?}"
+                );
+            }
+            std::fs::remove_dir_all(&second).unwrap();
+        }
+        std::fs::remove_dir_all(scratch.path("one")).unwrap();
+    }
+
+    // `ingest` reports the same input whatever the number, and states the number.
+    let ingested = |more: &[&str]| {
+        let mut args = vec!["ingest", "--input", &path];
+        args.extend_from_slice(more);
+        scratch.json(&args)
+    };
+    let one = ingested(&["--entries-at-once", "1"]);
+    let default = ingested(&[]);
+    assert_eq!(read_at_once(&default), 2);
+    assert_eq!(default["input"], one["input"]);
+    let all = ingested(&["--entries-at-once", "8"]);
+    assert_eq!(read_at_once(&all), 6);
+    assert_eq!(all["input"], one["input"]);
+    let text = scratch.text(&["ingest", "--input", &path, "--entries-at-once", "3"]);
+    assert!(text.contains("; 3 entries read at once"), "{text}");
+    let text = scratch.text(&["ingest", "--input", &path, "--entries-at-once", "1"]);
+    assert!(text.contains("; one entry read at a time"), "{text}");
+
+    // Out of bounds, and on an input that is not an archive: analyst errors.
+    for wrong in ["0", "9", "two"] {
+        let output = scratch.run(&["ingest", "--input", &path, "--entries-at-once", wrong]);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("1 to 8"), "{}", stderr(&output));
+    }
+    let plain = scratch.write("plain.log", b"GET /a 200\n");
+    for command in [
+        &["ingest"][..],
+        &["baseline", "score", "--baseline", "web"][..],
+    ] {
+        let mut args = command.to_vec();
+        args.extend_from_slice(&["--input", &plain, "--entries-at-once", "2"]);
+        let line = scratch.fails(&args, 2);
+        assert!(line.contains("--entries-at-once"), "{line}");
+        assert!(line.contains("zip archives"), "{line}");
+    }
+}
+
+#[test]
+fn deduplication_on_disk_gives_the_counts_of_one_at_a_time() {
+    let scratch = Scratch::new("at-once-disk");
+    // 300,000 distinct lines, each twice, over four entries.
+    let lines = 300_000u32;
+    let mut parts = [String::new(), String::new(), String::new(), String::new()];
+    for line in 0..lines {
+        let half = (line >= lines / 2) as usize;
+        parts[half].push_str(&format!("line {line}\n"));
+        parts[2 + half].push_str(&format!("line {}\n", lines - 1 - line));
+    }
+    let path = scratch.write(
+        "many.zip",
+        &archive(&[
+            ("a.log", parts[0].as_bytes()),
+            ("b.log", parts[1].as_bytes()),
+            ("c.log", parts[2].as_bytes()),
+            ("d.log", parts[3].as_bytes()),
+        ]),
+    );
+    let ingest = |at_once: &str| {
+        scratch.json(&[
+            "--memory-limit",
+            "88MB",
+            "ingest",
+            "--input",
+            &path,
+            "--entries-at-once",
+            at_once,
+        ])
+    };
+    // Under this limit the set fits in memory beside the readers of one entry, and goes
+    // to disk beside those of two (some 40 MiB of the 56 MiB the limit leaves).
+    let one = ingest("1");
+    assert!(one.get("work").is_none(), "{one}");
+    assert_eq!(one["input"]["distinct_texts"], lines);
+    let several = ingest("2");
+    assert_eq!(
+        several["work"]["deduplication"]["on_disk"], true,
+        "{several}"
+    );
+    assert_eq!(several["memory"]["operations"][0]["entries_at_once"], 2);
+    assert_eq!(several["input"], one["input"]);
+    assert!(!scratch.path("project").join("work").exists());
+}
+
 #[test]
 fn an_archive_whose_texts_outgrow_the_memory_limit_is_scored_with_deduplication_on_disk() {
     let scratch = Scratch::new("outgrown");
