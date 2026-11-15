@@ -27,11 +27,10 @@ $scripts = @('q0_inputs', 'q1_collapse', 'q2_similarity', 'q3_structure', 'q4_di
 if ($Information) { $scripts += 'q5_information' }
 foreach ($script in $scripts) {
     $log = Join-Path $Logs "$($script.Substring(0, 2)).log"
-    # A script that ends without a traceback was stopped by the host; it is run again.
-    foreach ($attempt in 1..3) {
-        uv run python "$script.py" --vectors $Vectors --record $Record --out $Out --input $InputMode --input-bytes $InputBytes --source $Source 2>&1 | Out-File $log -Encoding utf8
-        if ($LASTEXITCODE -eq 0 -or (Select-String -Path $log -Pattern 'Traceback' -Quiet)) { break }
-    }
-    if ($LASTEXITCODE -ne 0) { Get-Content $log -Tail 20; throw "$script failed, see $log" }
+    # Task 2.17 (requirement 15.11): one attempt; a script stopped by the host is a fault
+    # to fix, not a run to repeat. With $env:L2D_MEMORY_GIB set, each script runs under
+    # that memory limit and records its peak (eq.py).
+    uv run python "$script.py" --vectors $Vectors --record $Record --out $Out --input $InputMode --input-bytes $InputBytes --source $Source 2>&1 | Out-File $log -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { Get-Content $log -Tail 20; throw "$script failed (exit code $LASTEXITCODE), see $log" }
     Write-Output "$script done, output in $log"
 }

@@ -104,12 +104,55 @@ uv run python hg_run.py npu-compare --variant entropy-s0
 The qualification of the vectors and the comparison table are in
 `tools/embedding-qualification` (`run_all.ps1 -InputMode whole`, `hg_report.py`).
 
+## Stability gate of the entropy-patch encoder (task 2.17)
+
+`hg17.py` and `hg17_run.py`, on `hg.py`'s byte model. What changed against 2.16 and
+why is in the header of `hg17.py` and in
+[`docs/2026-11-15-entropy-encoder-stability-gate.md`](../../docs/2026-11-15-entropy-encoder-stability-gate.md).
+Everything is written below `D:\BuildArtifacts\log2decision\task-2.17` (`L2D_HG17_DIR`),
+model weights below `D:\Source\log2decision\models\task-2.17` (`L2D_HG17_MODELS`).
+
+Requirement 15 for these scripts: every step is one process under a memory limit
+(`--memory-gib`, default 6; a Windows job object, `memguard.py`), takes the project's
+lock for hungry processes (`D:\BuildArtifacts\log2decision\hungry.lock`; a second one
+refuses and names the holder), streams its data (memory-mapped text bytes; pooled patch
+features appended to a file as produced and read back memory-mapped; no byte features
+are stored) and appends its peak memory to `runs.jsonl`. No checkpoint and no resume: a
+step that fails is run again from the start after the fault is fixed.
+
+```powershell
+# Once: the corpora as memory-mapped bytes, labels, the five folds by URL path, the
+# attack/benign pairs
+uv run python hg17_run.py prepare
+# Per fold and seed (about 11 min): the byte model on the fitting side, its 8-bit graph,
+# the cuts of that graph for every line, the pooled patch features (float and 8-bit)
+# Per variant (mask, contrastive, mask-label; 6 to 8 min): the line model, its 8-bit
+# graph, the raw vectors in float and 8 bits. Then what the vectors say (eval).
+pwsh -NoProfile -File hg17_sweep.ps1 -Folds 0,1,2,3,4 -Seeds 0,1,2 -Variants mask -Steps bytes,line,eval
+# (a) the same training again in new processes, and the comparison
+pwsh -NoProfile -File hg17_sweep.ps1 -Folds 0 -Seeds 0 -Variants mask -Steps bytes,line -Tag repeat
+uv run python hg17_run.py determinism --fold 0 --seed 0 --variant mask
+# The published encoder and the baseline scorer on the same folds; the summary
+uv run python hg17_run.py refs
+uv run python hg17_run.py summary
+# NPU: the fixture of crates\l2d-encoder\tests\npu_hierarchical_gate.rs (layout
+# "positions"), then, after that test ran, the comparison; eval again to add the NPU rows
+uv run python hg17_run.py npu-fixture --fold 0 --seed 0 --variant mask
+uv run python hg17_run.py npu-compare --fold 0 --seed 0 --variant mask
+# The layout of the qualification scripts (tools\embedding-qualification\run_all.ps1)
+uv run python hg17_run.py export --fold 0 --seed 0 --variant mask
+```
+
 ## Files
 
 | File | Content |
 | --- | --- |
 | `hg.py` | Task 2.16: the byte model, the three patchers, the pooling, the line model and the flat control, the objectives, export and 8-bit quantization in the image layout, the scoring with the science gate's functions |
 | `hg_run.py` | Task 2.16: the steps above; one training record (JSON) per byte model and per variant |
+| `hg17.py` | Task 2.17: the corpus as memory-mapped bytes, the 8-bit graph's entropies and cuts in the Rust side's arithmetic, pooled patch features on disk, the line model of stride 1 with the mean after the graph, the objectives (patch-level byte prediction, the contrastive control) |
+| `hg17_run.py` | Task 2.17: the steps above; one record (JSON) per step, peaks in `runs.jsonl` |
+| `hg17_sweep.ps1` | Task 2.17: steps over folds, seeds and variants, one at a time; stops at the first failure |
+| `memguard.py` | Task 2.17: process memory limit (job object), peak memory, the lock for hungry processes |
 | `l2dsci.py` | Data reading (the text layout and group key of the Rust CSIC adapter), splits, the baseline re-implementation, the encoder, training, ONNX export and quantization, the two scorers on vectors, metrics |
 | `run_gate.py` | One run: one split, fold, seed, routing mode and objective; writes one JSON record |
 | `run_all.ps1` | The batches of runs |

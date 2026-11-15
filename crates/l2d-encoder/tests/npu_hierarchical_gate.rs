@@ -19,6 +19,15 @@
 //! graph counts as running on the NPU only when the provider's placement report and
 //! ONNX Runtime's profile of a first run both say so; there is no CPU provider.
 //!
+//! Task 2.17 adds a second layout, chosen by `"line_output": "positions"` in
+//! `layout.json` (`tools/science/hg17_run.py npu-fixture`): the line graph gives one
+//! output per patch position, `[1, 128, rows, 128]`, and the vector is the mean over the
+//! line's real patches, taken here in float64 in position order; the raw vectors are
+//! compared with `reference-raw.f32`, the patch starts of every line are written to
+//! `npu-starts.u32`, and the exponentials of the entropy come from `exp-table.f64` when
+//! the fixture has it. The placement and profile rules below are those of 2.16,
+//! unchanged.
+//!
 //! Run on request, in release, one test at a time:
 //!
 //! ```text
@@ -67,6 +76,14 @@ struct Layout {
     csic_texts: usize,
     /// Step of the 8-bit logits, when the byte graph gives them.
     logit_scale: Option<f32>,
+    /// Task 2.17: the line graph gives one output per patch position (`[1, D, rows,
+    /// patch_limit]`) and the vector is the mean over the line's real patches, taken
+    /// here; the vectors are compared raw (not normalised) with the reference.
+    line_positions: bool,
+    /// Task 2.17: exp(q s) and q exp(q s) for the 256 steps of an 8-bit logit, as the
+    /// Python reference computed them (`exp-table.f64`), so both sides use the same
+    /// numbers; without the file they are computed here.
+    exp_table: Option<Vec<[f64; 2]>>,
 }
 
 struct Fixture {
@@ -129,7 +146,25 @@ fn fixture() -> Option<Fixture> {
         patch_rows: number("patch_rows"),
         csic_texts: number("csic_texts"),
         logit_scale: json["logit_scale"].as_f64().map(|scale| scale as f32),
+        line_positions: json["line_output"].as_str() == Some("positions"),
+        exp_table: dir.join("exp-table.f64").is_file().then(|| {
+            read(&dir.join("exp-table.f64"))
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|pair| {
+                    let (a, b) = pair.split_at(8);
+                    [
+                        f64::from_le_bytes(a.try_into().unwrap()),
+                        f64::from_le_bytes(b.try_into().unwrap()),
+                    ]
+                })
+                .collect()
+        }),
     };
+    if let Some(table) = &layout.exp_table {
+        assert_eq!(table.len(), 256, "exp-table.f64 holds 256 pairs");
+    }
     let table = floats(&read(&dir.join("table.bin")));
     assert_eq!(table.len(), 256 * layout.table_width);
     let texts: Vec<Vec<u8>> = String::from_utf8(read(&dir.join("texts.jsonl")))
@@ -451,6 +486,9 @@ struct Hierarchy {
     line: Graph,
     byte_image: ByteImage,
     between: Between,
+    /// When set, `encode` appends the patch starts of every line here (task 2.17).
+    record_starts: bool,
+    recorded_starts: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -595,7 +633,17 @@ impl Hierarchy {
         let with_entropy = layout.patcher.starts_with("entropy");
         assert_eq!(byte.outputs.len(), if with_entropy { 2 } else { 1 });
         let scale = f64::from(layout.logit_scale.unwrap_or(1.0));
+        let exp_table = layout.exp_table.clone().unwrap_or_else(|| {
+            (0..256)
+                .map(|q| {
+                    let exp = (f64::from(q) * scale).exp();
+                    [exp, f64::from(q) * exp]
+                })
+                .collect()
+        });
         Self {
+            record_starts: false,
+            recorded_starts: Vec::new(),
             table: fixture.table.clone(),
             byte,
             line,
@@ -606,12 +654,7 @@ impl Hierarchy {
             between: Between {
                 patch_image: vec![0.0; layout.features * layout.patch_rows * layout.patch_limit],
                 patch_written: vec![0; layout.patch_rows],
-                exp_table: (0..256)
-                    .map(|q| {
-                        let exp = (f64::from(q) * scale).exp();
-                        [exp, f64::from(q) * exp]
-                    })
-                    .collect(),
+                exp_table,
                 total: vec![0.0; layout.input_bytes],
                 weighted: vec![0.0; layout.input_bytes],
                 entropy: vec![0.0; layout.input_bytes],
@@ -636,6 +679,8 @@ impl Hierarchy {
             line,
             byte_image,
             between,
+            record_starts,
+            recorded_starts,
         } = self;
         let layout = between.layout.clone();
         let (byte_rows, patch_rows, dimension) =
@@ -663,6 +708,9 @@ impl Hierarchy {
                         between.entropies(logits, row, text.len());
                     }
                     between.cut(text);
+                    if *record_starts {
+                        recorded_starts.extend(between.starts.iter().map(|s| *s as u32));
+                    }
                     let count =
                         between.pool(features, row, part_index * byte_rows + row, text.len());
                     patches.push(count as u32);
@@ -689,11 +737,29 @@ impl Hierarchy {
                 .unwrap_or_else(|error| panic!("the line graph failed: {error}"));
             let ran = Instant::now();
             let (_, out) = outputs[0].try_extract_tensor::<f32>().unwrap();
-            for (n, vector) in vectors[at..].chunks_exact_mut(dimension).enumerate() {
-                for (d, value) in vector.iter_mut().enumerate() {
-                    *value = out[d * patch_rows + n];
+            if layout.line_positions {
+                // Task 2.17: `[1, D, rows, P]`; the mean over the line's real patches,
+                // float64 sums in position order, the raw vector kept.
+                let limit = layout.patch_limit;
+                let counts = &patches[patches.len() - image.len()..];
+                for (n, vector) in vectors[at..].chunks_exact_mut(dimension).enumerate() {
+                    let count = counts[n] as usize;
+                    for (d, value) in vector.iter_mut().enumerate() {
+                        let from = d * patch_rows * limit + n * limit;
+                        let mut sum = 0f64;
+                        for position in &out[from..from + count] {
+                            sum += f64::from(*position);
+                        }
+                        *value = (sum / count.max(1) as f64) as f32;
+                    }
                 }
-                l2_normalize(vector);
+            } else {
+                for (n, vector) in vectors[at..].chunks_exact_mut(dimension).enumerate() {
+                    for (d, value) in vector.iter_mut().enumerate() {
+                        *value = out[d * patch_rows + n];
+                    }
+                    l2_normalize(vector);
+                }
             }
             seconds.between += (cleared - begun).as_secs_f64();
             seconds.line_run += (ran - cleared).as_secs_f64();
@@ -839,7 +905,9 @@ fn vectors_against_the_reference_and_throughput() {
 
     let (mut vectors, mut patches) = (Vec::new(), Vec::new());
     let mut seconds = Seconds::default();
+    hierarchy.record_starts = true;
     hierarchy.encode(&texts, &mut vectors, &mut patches, &mut seconds);
+    hierarchy.record_starts = false;
     println!(
         "{TAG}: first pass (untimed for the range): {:.0} logs/s",
         texts.len() as f64 / seconds.total()
@@ -848,8 +916,17 @@ fn vectors_against_the_reference_and_throughput() {
         let path = fixture.dir.join(name);
         std::fs::write(&path, bytes).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     };
+    let raw = fixture.layout.line_positions;
     write(
-        "npu.f32",
+        "npu-starts.u32",
+        hierarchy
+            .recorded_starts
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
+    );
+    write(
+        if raw { "npu-raw.f32" } else { "npu.f32" },
         vectors
             .iter()
             .flat_map(|value| value.to_le_bytes())
@@ -863,7 +940,11 @@ fn vectors_against_the_reference_and_throughput() {
             .collect(),
     );
 
-    let reference = floats(&read(&fixture.dir.join("reference.f32")));
+    let reference = floats(&read(&fixture.dir.join(if raw {
+        "reference-raw.f32"
+    } else {
+        "reference.f32"
+    })));
     assert_eq!(reference.len(), vectors.len());
     let mut cosines: Vec<f64> = vectors
         .chunks_exact(dimension)
@@ -946,7 +1027,12 @@ fn stage_outputs_for_the_comparison() {
     let Some(fixture) = fixture() else { return };
     let mut hierarchy = Hierarchy::open(&fixture, false);
     let layout = fixture.layout.clone();
-    let texts = refs(&fixture.texts);
+    // Task 2.17: `L2D_HG_STAGE_START` moves the window to the texts from that index on.
+    let start: usize = std::env::var("L2D_HG_STAGE_START")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let texts = &refs(&fixture.texts)[start..];
     let write = |name: &str, values: &[f32]| {
         let path = fixture.dir.join(name);
         let bytes: Vec<u8> = values
