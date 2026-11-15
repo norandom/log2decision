@@ -286,6 +286,7 @@
   - _Requirements: 4.1, 5.1_
 
 - [ ] 2.8 Nearest-neighbor decision scorer with evidence diversity
+  - _Re-scope (owner decision of 2026-11-15, gate 2.17): the baseline scorer stays the classifier of logs; the vectors serve search, grouping and near-duplicate views. This task's wording, and requirements 6 and 14 where they rest on the vectors classifying, are redrafted for the owner before it starts._
   - Implement `NeighbourScorer` in `l2d-decide`: query $k$ nearest labelled logs within reach distance
   - Calculate ratio as bad share among valid neighbors; abstain if valid neighbors < `min_support`
   - Track evidence diversity: record `same_group_count` vs `cross_group_count` in `Evidence`
@@ -303,6 +304,7 @@
   - _Requirements: 1.5, 3.2, 4.3, 4.4, 4.5, 10.5, 10.7, 14.7, 14.11_
 
 - [ ] 2.10 Fitted linear head on vectors (runs after 2.8, before 2.9)
+  - _Re-scope (owner decision of 2026-11-15, gate 2.17): the baseline scorer stays the classifier of logs; the vectors serve search, grouping and near-duplicate views. This task's wording, and requirements 6 and 14 where they rest on the vectors classifying, are redrafted for the owner before it starts._
   - `LinearHead` in `l2d-decide` (`head.rs`): logistic regression on the stored vectors through the dense path of the baseline crate's regression; penalty from 0.01, 0.1, 1, 10, 100 by 5-fold grouped cross-validation on log loss, folds from a hash of the group key; score, save and load under `models/heads/<name>-<rev12>/`; encoder identity check; hashes of the fitting texts
   - `ScorerKind::Linear`; triage and calibration accept it
   - Tests first: refusal counts; determinism; identity mismatch naming both; grouped folds keep a group on one side; calibration of the head on the fixture; memory refusal before loading
@@ -344,7 +346,7 @@
   - _Depends: 2.6, 2.15_
   - _Requirements: none of its own; it guards requirements 4 and 14_
 
-- [ ] 2.17 Gate: a stable entropy-patch encoder whose vectors classify on unseen endpoints (runs after 2.16, before 2.8)
+- [x] 2.17 Gate: a stable entropy-patch encoder whose vectors classify on unseen endpoints (runs after 2.16, before 2.8)
   - A development spike as 2.16, on its code (`tools/science/hg.py`, `hg_run.py`, `tools/embedding-qualification/`). Owner decisions of 2026-11-14: entropy patches and byte latent encoding, n dimensions; the convolutional architecture, the hierarchy (bytes, patches, one vector per line) and no cutting stay. The question is no longer which patcher, but why a classifier fitted on these vectors does not carry over to unseen endpoints: an unstable embedding, a flaw in training, or randomness in the vector generation, which must be ruled out first
   - Run under Requirement 15 and the design's operating criteria, as the first spike to do so: alone on the machine (no other agent, build or measurement beside it), every dataset streamed from disk in batches (memory-mapped files or a batch iterator; no whole-dataset array of features, patches or vectors), a stated memory limit with a peak below it and well clear of the host's guard at 92 % of physical memory, the peak recorded per run. A run stopped by the host is a fault to fix, not to resume around; no figure comes from a resumed run
   - (a) Randomness ruled out: the same model encodes the same texts twice in one process and in two processes, in float, in 8 bits and on the NPU, bit for bit; the training of one variant repeated with the same seed gives the same weights (or the difference is explained, e.g. by nondeterministic CPU kernels, and removed)
@@ -869,3 +871,4 @@
 - 1.20, owner decisions of 2026-11-14 after review round 2: bound `keys.bin` now, then merge; the design changes to match (B). Done in d149727: the check before the read adds `most_key_file_bytes(limit)` = 16 bytes per 21-byte slot the memory limit holds (a bound: the set holds at most one text per slot and writes no key after the freeze). Checks after it: fmt clean; 674 passed, 0 failed, 41 ignored in 65 binaries; clippy clean; `Cargo.lock` unchanged. Under the default limit the bound is large (about three quarters of the limit), which can refuse a `baseline score` on a nearly full disk; the measured disk check (follow-up) can tighten it.
 - 1.20, review round 2, FYI recorded: a partition over its room is refused at the next doubling of its rows or by the deduplication after the read, never later and never wrongly; the mid-batch freeze for lack of memory has no test; the comment at `crates/l2d-cli/tests/archive.rs` about a refusal at 40 MiB was not confirmed on the implementer's fixture (refused only near 38.6 MiB).
 - 2.17, review round 2 (independent): APPROVED as the gate's record. `hg17_run.py summary` re-run at d0a9452 gives a byte-identical `summary.json`; no old wording or value left. Remaining, not blocking: `hg17_run.py:741` lists the published encoder's `seen_linear` as seed-free, so the doc shows 0.973 (n = 5); it does take the seed (stratified folds), 0.9726 ± 0.0089 over 15 runs, conclusions unchanged. The option 2(a) script lives outside the repo; its output `task-2.17\review\option2a-mask.json` is cited. The checkbox waits for the owner's decision.
+- 2.17: Owner decision of 2026-11-15: option 1. The baseline scorer stays the classifier of logs; the encoder, in the stable layout of 2.17 (cut from the 8-bit byte graph, line graph of stride-1 convolutions), serves search, grouping and near-duplicate views. Tasks 2.8 and 2.10 are re-scoped to that; the redrafted wording goes to the owner before 2.8 starts. Ticked on this decision.
