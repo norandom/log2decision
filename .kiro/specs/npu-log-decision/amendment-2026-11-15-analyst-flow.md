@@ -114,17 +114,16 @@ Order: 1.21, 1.22, 1.23 first. They need neither the NPU nor the encoder and
 make steps a, c and d usable with the baseline. Then 2.18, which measures
 whether redaction holds up. Then 2.8 (steps b and e) and 2.9.
 
-## 4. Open points for the owner
+## 4. Points decided by the owner (2026-11-15)
 
-1. **The other class.** An analyst usually marks what is bad. Should the
-   unmarked logs of the same input stand in as the other class, with the output
-   saying so? Or must the analyst also mark good logs? Recommendation: unmarked
-   logs as the background by default, stated in the output; good marks allowed.
-2. **The group key per kind of log.** This is the key that defines "agnostic".
-   CSIC: the URL path. AIT: the host, or host and service? Recommendation: one
-   key per dataset adapter, named in the output, and settable.
-3. **The margin of 16.9.** It fixes how much lower the held-out quality may be
-   before the tool warns. Recommendation: 0.05 ROC AUC, to be checked by 2.18.
-4. **Grouping without an NPU.** On a host without an NPU, should step b group by
-   character n-gram similarity? Recommendation: yes, with the method named in
-   the output.
+1. **The other class:** by default the unmarked logs of the same input stand in
+   as the other class, and the output says so. The analyst may also mark good
+   logs. (16.6 fits against the background unless good marks are given.)
+2. **The group key:** one default key per kind of log (CSIC: the URL path;
+   AIT: the host), named in the output and settable by the analyst.
+3. **The margin of 16.9:** 0.05 ROC AUC, to be checked by gate 2.18.
+4. **Grouping without an NPU:** step b groups by character n-gram similarity
+   (the baseline's features), with the method named in the output.
+
+The draft as a whole still awaits the owner's approval before it is merged
+into `requirements.md`, `design.md` and `tasks.md`.
