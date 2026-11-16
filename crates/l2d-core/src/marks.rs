@@ -67,7 +67,13 @@
 //! entry patterns of an archive), the count, the marked positions or ids and the
 //! de-selected ones. It is written to a temporary file beside it and renamed, so a file
 //! is whole or absent. Saving over a file of the same name is allowed only for the same
-//! marks (to record a de-selection); other marks under that name are refused.
+//! marks (to record a de-selection or redaction rules); other marks under that name are
+//! refused.
+//!
+//! The confirmed redaction rules ([`RedactionRule`], task 1.22) are kept in the same
+//! file, in order. A file with rules has format [`FORMAT_WITH_REDACTIONS`]; one without
+//! is format [`FORMAT`] and unchanged from task 1.21. What the rules do is
+//! `l2d_baseline::redact`'s; this module keeps them and checks their shape.
 //!
 //! # Memory (requirements 12 and 15)
 //!
@@ -112,8 +118,20 @@ use crate::paths::ProjectPaths;
 use crate::types::{InputSummary, Label, LogsFrame};
 use crate::zip_input::{ArchiveSummary, ZipBatches, ZipInput, ZipInputSettings};
 
-/// The format number of a mark-set file.
+/// The format number of a mark-set file without redaction rules.
 pub const FORMAT: u32 = 1;
+
+/// The format number of a mark-set file that holds redaction rules (task 1.22). A
+/// reader that knows only [`FORMAT`] refuses such a file instead of passing over its
+/// rules; a mark set without rules is still written as format 1, byte for byte as
+/// before.
+pub const FORMAT_WITH_REDACTIONS: u32 = 2;
+
+/// The most redaction rules a mark set keeps.
+pub const MAX_REDACTIONS: usize = 1024;
+
+/// The longest placeholder of a redaction rule, in bytes.
+pub const MAX_PLACEHOLDER_BYTES: usize = 64;
 
 /// The kind a mark-set file names.
 pub const KIND: &str = "mark-set";
@@ -214,6 +232,30 @@ pub enum MarkedSource {
     Store(MarkedStore),
 }
 
+/// How a redaction rule finds what it replaces (task 1.22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionKind {
+    /// The fragment as text, where it does not continue a token on either side
+    /// (`l2d_baseline::redact` states the rule).
+    Literal,
+    /// The fragment is a regular expression (the syntax of the `regex` crate).
+    Pattern,
+}
+
+/// One confirmed, edited or added redaction (requirement 16.5): what is replaced, and
+/// by what. The rules of a mark set are kept in order; `l2d_baseline::redact` applies
+/// them and states what they do. This crate keeps them with the mark set and checks
+/// only their shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactionRule {
+    pub kind: RedactionKind,
+    /// The text or the pattern: 1 to [`MAX_PATTERN_BYTES`] bytes.
+    pub fragment: String,
+    /// What replaces it: at most [`MAX_PLACEHOLDER_BYTES`] bytes (empty deletes it).
+    pub placeholder: String,
+}
+
 /// What marking needs of a store. `l2d-store` implements it for its `Store`; this
 /// crate defines it because it cannot depend on that one (owner decision of
 /// 2026-11-16).
@@ -268,6 +310,9 @@ pub struct MarkSet {
     /// The marked ids of a store, ascending; empty for an input.
     ids: Vec<String>,
     deselected_ids: Vec<String>,
+    /// The confirmed redaction rules, in order (task 1.22); empty until the analyst
+    /// confirms some.
+    redactions: Vec<RedactionRule>,
 }
 
 /// The file as it is written.
@@ -284,6 +329,8 @@ struct FileOut<'a> {
     deselected: &'a [u64],
     ids: &'a [String],
     deselected_ids: &'a [String],
+    #[serde(skip_serializing_if = "<[RedactionRule]>::is_empty")]
+    redactions: &'a [RedactionRule],
 }
 
 /// The file as it is read.
@@ -300,6 +347,8 @@ struct FileIn {
     deselected: Vec<u64>,
     ids: Vec<String>,
     deselected_ids: Vec<String>,
+    #[serde(default)]
+    redactions: Vec<RedactionRule>,
 }
 
 impl MarkSet {
@@ -525,6 +574,7 @@ impl MarkSet {
             deselected: Vec::new(),
             ids,
             deselected_ids: Vec::new(),
+            redactions: Vec::new(),
         })
     }
 
@@ -591,6 +641,7 @@ impl MarkSet {
             deselected: Vec::new(),
             ids: Vec::new(),
             deselected_ids: Vec::new(),
+            redactions: Vec::new(),
         }
     }
 
@@ -676,6 +727,42 @@ impl MarkSet {
     /// How many marked logs are not de-selected.
     pub fn selected_count(&self) -> u64 {
         self.count() - (self.deselected.len() + self.deselected_ids.len()) as u64
+    }
+
+    /// Whether the log at `position` of the input is marked and not de-selected.
+    pub fn is_selected(&self, position: u64) -> bool {
+        self.positions.binary_search(&position).is_ok()
+            && self.deselected.binary_search(&position).is_err()
+    }
+
+    /// Whether the stored log `id` is marked and not de-selected.
+    pub fn is_selected_id(&self, id: &str) -> bool {
+        let found = |ids: &[String]| {
+            ids.binary_search_by(|marked| marked.as_str().cmp(id))
+                .is_ok()
+        };
+        found(&self.ids) && !found(&self.deselected_ids)
+    }
+
+    /// The redaction rules kept with the mark set, in order (task 1.22); empty when none
+    /// were confirmed.
+    pub fn redactions(&self) -> &[RedactionRule] {
+        &self.redactions
+    }
+
+    /// Keeps `rules` with the mark set in place of those it had, in their order
+    /// (requirement 16.5); [`MarkSet::save`] then writes them with it. A mark set saved
+    /// with rules is written as format [`FORMAT_WITH_REDACTIONS`]. Saving over the file
+    /// of the same marks with other rules is allowed, as for de-selections.
+    ///
+    /// [`L2dError::InvalidInput`] for more than [`MAX_REDACTIONS`] rules, an empty or
+    /// too long fragment, or a too long placeholder; nothing changes then. That a
+    /// pattern compiles is checked where the rules are applied
+    /// (`l2d_baseline::redact::RedactionRules`).
+    pub fn set_redactions(&mut self, rules: Vec<RedactionRule>) -> Result<(), L2dError> {
+        check_redactions(&rules)?;
+        self.redactions = rules;
+        Ok(())
     }
 
     /// De-selects single marked logs of an input by their positions (requirement
@@ -870,7 +957,8 @@ impl MarkSet {
     ///
     /// The file is whole or absent. When a file of that name holds the same marks
     /// (name, label, query, source and the marked positions or ids), it is replaced,
-    /// with the de-selections of this one; when it holds anything else, the save is
+    /// with the de-selections and redaction rules of this one; when it holds anything
+    /// else, the save is
     /// [`L2dError::Refused`] and the file is left as it is.
     ///
     /// Memory: the file is written as a stream through a buffer of
@@ -912,7 +1000,11 @@ impl MarkSet {
             serde_json::to_writer_pretty(
                 &mut out,
                 &FileOut {
-                    format: FORMAT,
+                    format: if self.redactions.is_empty() {
+                        FORMAT
+                    } else {
+                        FORMAT_WITH_REDACTIONS
+                    },
                     kind: KIND,
                     name: &self.name,
                     label: self.label,
@@ -923,6 +1015,7 @@ impl MarkSet {
                     deselected: &self.deselected,
                     ids: &self.ids,
                     deselected_ids: &self.deselected_ids,
+                    redactions: &self.redactions,
                 },
             )
             .map_err(|error| L2dError::Runtime {
@@ -1002,7 +1095,8 @@ impl MarkSet {
         Ok(names)
     }
 
-    /// Whether `other` holds the same marks: everything but the de-selections.
+    /// Whether `other` holds the same marks: everything but the de-selections and the
+    /// redaction rules.
     fn same_marks(&self, other: &Self) -> bool {
         self.name == other.name
             && self.label == other.label
@@ -1382,15 +1476,31 @@ fn read_file(path: &Path, name: &str) -> Result<MarkSet, L2dError> {
     let file: FileIn = serde_json::from_slice(&bytes)
         .map_err(|error| not_a_mark_set(path, format!("it is not readable: {error}")))?;
     drop(bytes);
-    if file.format != FORMAT || file.kind != KIND {
+    if (file.format != FORMAT && file.format != FORMAT_WITH_REDACTIONS) || file.kind != KIND {
         return Err(not_a_mark_set(
             path,
             format!(
-                "it has format {} and kind '{}', expected {FORMAT} and '{KIND}'",
+                "it has format {} and kind '{}', expected {FORMAT} or \
+                 {FORMAT_WITH_REDACTIONS} and '{KIND}'",
                 file.format, file.kind
             ),
         ));
     }
+    if (file.format == FORMAT_WITH_REDACTIONS) == file.redactions.is_empty() {
+        return Err(not_a_mark_set(
+            path,
+            format!(
+                "it has format {} with {} redaction rules; format {FORMAT} holds none and \
+                 format {FORMAT_WITH_REDACTIONS} holds at least one",
+                file.format,
+                file.redactions.len()
+            ),
+        ));
+    }
+    check_redactions(&file.redactions).map_err(|error| match error {
+        L2dError::InvalidInput { detail } => not_a_mark_set(path, detail),
+        other => other,
+    })?;
     if file.name != name {
         return Err(not_a_mark_set(
             path,
@@ -1447,5 +1557,44 @@ fn read_file(path: &Path, name: &str) -> Result<MarkSet, L2dError> {
         deselected: file.deselected,
         ids: file.ids,
         deselected_ids: file.deselected_ids,
+        redactions: file.redactions,
     })
+}
+
+/// Checks the shape of redaction rules: at most [`MAX_REDACTIONS`], each with a
+/// fragment of 1 to [`MAX_PATTERN_BYTES`] bytes and a placeholder of at most
+/// [`MAX_PLACEHOLDER_BYTES`]. Whether a pattern compiles is checked where the rules are
+/// applied (`l2d_baseline::redact`). [`L2dError::InvalidInput`] naming the first rule
+/// that does not fit.
+pub fn check_redactions(rules: &[RedactionRule]) -> Result<(), L2dError> {
+    if rules.len() > MAX_REDACTIONS {
+        return Err(L2dError::InvalidInput {
+            detail: format!(
+                "{} redaction rules were given; a mark set keeps at most {MAX_REDACTIONS}",
+                rules.len()
+            ),
+        });
+    }
+    for (index, rule) in rules.iter().enumerate() {
+        let number = index + 1;
+        if rule.fragment.is_empty() || rule.fragment.len() > MAX_PATTERN_BYTES {
+            return Err(L2dError::InvalidInput {
+                detail: format!(
+                    "redaction rule {number} has a fragment of {} bytes; it must have 1 to \
+                     {MAX_PATTERN_BYTES}",
+                    rule.fragment.len()
+                ),
+            });
+        }
+        if rule.placeholder.len() > MAX_PLACEHOLDER_BYTES {
+            return Err(L2dError::InvalidInput {
+                detail: format!(
+                    "redaction rule {number} has a placeholder of {} bytes; it may have at \
+                     most {MAX_PLACEHOLDER_BYTES}",
+                    rule.placeholder.len()
+                ),
+            });
+        }
+    }
+    Ok(())
 }

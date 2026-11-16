@@ -29,7 +29,10 @@ pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
 pub use adapters::lines::LinesAdapter;
 pub use input::{Accepted, Dedup, InputAdapter, Source};
-pub use marks::{MarkQuery, MarkSet, MarkStore, MarkedInput, MarkedSource, MarkedStore};
+pub use marks::{
+    MarkQuery, MarkSet, MarkStore, MarkedInput, MarkedSource, MarkedStore, RedactionKind,
+    RedactionRule,
+};
 pub use memory::{BatchChange, BatchPlan, MemoryBudget, MemorySettings};
 
 pub use error::{
