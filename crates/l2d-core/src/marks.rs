@@ -953,6 +953,44 @@ impl MarkSet {
         LogsFrame::new(kept)
     }
 
+    /// The mark set as its file holds it.
+    fn file_out(&self) -> FileOut<'_> {
+        FileOut {
+            format: if self.redactions.is_empty() {
+                FORMAT
+            } else {
+                FORMAT_WITH_REDACTIONS
+            },
+            kind: KIND,
+            name: &self.name,
+            label: self.label,
+            query: &self.query,
+            source: &self.source,
+            count: self.count(),
+            positions: &self.positions,
+            deselected: &self.deselected,
+            ids: &self.ids,
+            deselected_ids: &self.deselected_ids,
+            redactions: &self.redactions,
+        }
+    }
+
+    /// The bytes [`MarkSet::save`] writes for this mark set: equal mark sets give equal
+    /// bytes. A score fitted from the mark set keeps them as its copy of the mark set
+    /// (task 1.23). They take about the size of the file in memory.
+    pub fn to_file_bytes(&self) -> Result<Vec<u8>, L2dError> {
+        serde_json::to_vec_pretty(&self.file_out()).map_err(|error| L2dError::Runtime {
+            detail: format!("describing the mark set `{}` failed: {error}", self.name),
+        })
+    }
+
+    /// The mark set `name` from the bytes of its file, checked as [`MarkSet::load`]
+    /// checks a file; `path` names where the bytes came from in a refusal. The caller
+    /// counts the memory ([`LOAD_FACTOR`] times the bytes).
+    pub fn from_file_bytes(bytes: &[u8], path: &Path, name: &str) -> Result<Self, L2dError> {
+        parse_file(bytes, path, name)
+    }
+
     /// Saves the mark set as `<project>/marks/<name>.json` and returns the path.
     ///
     /// The file is whole or absent. When a file of that name holds the same marks
@@ -997,33 +1035,14 @@ impl MarkSet {
             let file = fs::File::create(&temporary)
                 .map_err(|error| io_failure("creating", &temporary, &error))?;
             let mut out = io::BufWriter::with_capacity(SAVE_WRITE_BYTES, file);
-            serde_json::to_writer_pretty(
-                &mut out,
-                &FileOut {
-                    format: if self.redactions.is_empty() {
-                        FORMAT
-                    } else {
-                        FORMAT_WITH_REDACTIONS
-                    },
-                    kind: KIND,
-                    name: &self.name,
-                    label: self.label,
-                    query: &self.query,
-                    source: &self.source,
-                    count: self.count(),
-                    positions: &self.positions,
-                    deselected: &self.deselected,
-                    ids: &self.ids,
-                    deselected_ids: &self.deselected_ids,
-                    redactions: &self.redactions,
-                },
-            )
-            .map_err(|error| L2dError::Runtime {
-                detail: format!(
-                    "writing the mark set `{}` to {} failed: {error}",
-                    self.name,
-                    temporary.display()
-                ),
+            serde_json::to_writer_pretty(&mut out, &self.file_out()).map_err(|error| {
+                L2dError::Runtime {
+                    detail: format!(
+                        "writing the mark set `{}` to {} failed: {error}",
+                        self.name,
+                        temporary.display()
+                    ),
+                }
             })?;
             out.into_inner()
                 .map_err(|error| io_failure("writing", &temporary, error.error()))?
@@ -1473,9 +1492,14 @@ fn ascending_within<T: Ord>(items: &[T], marked: &[T]) -> bool {
 /// Reads and checks the file at `path`, expected to hold the mark set `name`.
 fn read_file(path: &Path, name: &str) -> Result<MarkSet, L2dError> {
     let bytes = fs::read(path).map_err(|error| io_failure("reading", path, &error))?;
-    let file: FileIn = serde_json::from_slice(&bytes)
+    parse_file(&bytes, path, name)
+}
+
+/// Checks the bytes of a mark-set file read from `path`, expected to hold the mark set
+/// `name`.
+fn parse_file(bytes: &[u8], path: &Path, name: &str) -> Result<MarkSet, L2dError> {
+    let file: FileIn = serde_json::from_slice(bytes)
         .map_err(|error| not_a_mark_set(path, format!("it is not readable: {error}")))?;
-    drop(bytes);
     if (file.format != FORMAT && file.format != FORMAT_WITH_REDACTIONS) || file.kind != KIND {
         return Err(not_a_mark_set(
             path,

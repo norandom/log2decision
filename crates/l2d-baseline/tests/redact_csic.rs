@@ -277,7 +277,7 @@ fn csic_proposals_name_the_host_and_the_endpoint_paths_with_their_counts() {
         ..HashingSettings::default()
     })
     .unwrap();
-    let routing = RedactionRules::routing();
+    let routing = RedactionRules::routing(&budget).unwrap();
     let started = Instant::now();
     for text in &all {
         assert_eq!(keep.row_redacted(text, &routing), strip.row(text), "{text}");

@@ -1086,38 +1086,35 @@ fn rules_apply_the_same_at_fitting_and_at_scoring() {
         ..BaselineSettings::default()
     };
     let hasher = CharHasher::new(settings.hashing()).unwrap();
-    let redacted = at_fit.apply_frame(&logs).unwrap();
-    assert_eq!(redacted.len(), logs.len());
-    let scorer = BaselineScorer::fit_with(
-        &redacted,
+    // Fitted with the rules (task 1.23): the frame keeps the texts as read, and every
+    // text is redacted before it is hashed.
+    let scorer = BaselineScorer::fit_redacted_with(
+        &logs,
         std::slice::from_ref(&summary),
         &settings,
+        &at_fit,
         &budget,
     )
     .unwrap();
-    let scores = scorer.score(&redacted).unwrap();
+    assert_eq!(scorer.rules(), &at_score);
+    let scores = scorer.score(&logs).unwrap();
     let fitted_ratios = scores.column("ratio").unwrap().f32().unwrap();
     let mut changed = 0;
-    for ((record, fitted), redacted_text) in logs
-        .records()
-        .zip(fitted_ratios.into_no_null_iter())
-        .zip(texts(&redacted))
-    {
+    for (record, fitted) in logs.records().zip(fitted_ratios.into_no_null_iter()) {
         let text = &record.text;
         let scored = at_score.apply(text);
-        assert_eq!(scored, redacted_text);
         assert_eq!(
             hasher.row_redacted(text, &at_score),
             hasher.row_redacted(text, &at_fit)
         );
-        assert_eq!(
-            hasher.row_redacted(text, &at_score),
-            hasher.row(&redacted_text)
-        );
+        assert_eq!(hasher.row_redacted(text, &at_score), hasher.row(&scored));
+        // The scorer applies its rules first: the text as read and its redacted form
+        // score alike, and as the scores frame does.
+        assert_eq!(scorer.ratio(text).to_bits(), fitted.to_bits());
         assert_eq!(scorer.ratio(&scored).to_bits(), fitted.to_bits());
-        // The fit took the labelled logs, by their redacted texts.
+        // The fit took the labelled logs, by their texts as read.
         if record.label != Label::Unknown {
-            assert_eq!(scorer.was_fitted_on_text(&scored), Some(true));
+            assert_eq!(scorer.was_fitted_on_text(text), Some(true));
         }
         if scored != *text {
             changed += 1;
@@ -1157,7 +1154,7 @@ fn confirmed_rules_change_the_features_as_stated() {
 
 #[test]
 fn the_routing_option_gives_the_same_features_as_its_rule() {
-    let routing = RedactionRules::routing();
+    let routing = RedactionRules::routing(&budget()).unwrap();
     assert_eq!(routing.rules().len(), 1);
     assert_eq!(routing.rules()[0].kind, RedactionKind::Pattern);
     assert_eq!(routing.rules()[0].placeholder, "");

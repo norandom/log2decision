@@ -88,6 +88,18 @@ pub fn units<S: AsRef<str>>(groups: &[S], together: &[Vec<String>]) -> Result<Ve
     Ok(found)
 }
 
+/// The fold of `key` among `folds`: the first 8 bytes of the SHA-256 of its bytes, read
+/// as a little-endian number, modulo `folds` (0 for fewer than 2 folds).
+pub fn hash_fold(key: &str, folds: usize) -> usize {
+    if folds < 2 {
+        return 0;
+    }
+    let digest = Sha256::digest(key.as_bytes());
+    let mut first = [0_u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    (u64::from_le_bytes(first) % folds as u64) as usize
+}
+
 /// Folds: for each fold the group keys it holds out. Everything else is its fitting
 /// side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +187,25 @@ impl Folds {
             held_out[index % folds].extend(unit.groups.iter().cloned());
         }
         Self::from_parts(held_out)
+    }
+
+    /// Folds by a hash of the group key (task 1.23, the held-out-group report of
+    /// requirement 16.9): a unit goes to fold [`hash_fold`] of its key, so a group key
+    /// is held out by the same fold whatever the other keys, their sizes and the order
+    /// of the logs. This is the rule of the science gate's inner folds
+    /// (`group_hash_fold` of `tools/science/l2dsci.py`).
+    ///
+    /// A fold no key hashes to stays empty (it holds nothing out and is passed over by
+    /// its user), so the folds may be uneven.
+    ///
+    /// Fewer than 2 folds, or fewer units than folds, is [`L2dError::InvalidInput`].
+    pub fn hashed(units: &[Unit], folds: usize) -> Result<Self, L2dError> {
+        check_count(units, folds)?;
+        let mut held_out = vec![BTreeSet::new(); folds];
+        for unit in units {
+            held_out[hash_fold(&unit.key, folds)].extend(unit.groups.iter().cloned());
+        }
+        Ok(Self { held_out })
     }
 
     /// One fold per key of `keys`, in their order: the fold holds out the unit of that

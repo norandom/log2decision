@@ -30,8 +30,12 @@
 //! # Proposals
 //!
 //! A log is a distinct text of the input (or a stored log). The marked logs are those of
-//! the mark set that are not de-selected; the unmarked logs are the other logs of the
-//! same input or store. A candidate is proposed when it occurs in at least
+//! the mark set that are not de-selected; the unmarked logs are the logs of the same
+//! input or store that the mark set does not mark. A de-selected log is on neither side:
+//! the analyst took it out (requirement 16.3), and a score fitted from the mark set
+//! keeps it out of fitting, neither marked nor of the other class (task 1.23); the
+//! proposals count it apart ([`RedactionProposals::deselected_logs`]). A candidate is
+//! proposed when it occurs in at least
 //! `max(MIN_LOGS, ceil(min_marked_share x marked logs))` marked logs **and** in at least
 //! `max(MIN_LOGS, ceil(min_unmarked_share x unmarked logs))` unmarked logs: it recurs
 //! across the marked logs and is frequent in the others too, so it does not tell the
@@ -95,8 +99,14 @@
 //!
 //! The rules apply to the text before feature hashing ([`CharHasher::row_redacted`]),
 //! before the routing option of requirement 2.6 splits it, and the same at fitting and
-//! at scoring: fitting takes [`RedactionRules::apply_frame`], scoring
-//! [`RedactionRules::apply`] of the same rules. The routing option `strip` is itself a
+//! at scoring: a scorer fitted with rules (`BaselineScorer::fit_redacted_with`, task
+//! 1.23) keeps them and hashes every text through [`CharHasher::row_redacted`], at
+//! fitting and at scoring alike. The logs frame it is fitted on keeps the texts as they
+//! were read, one row per distinct text: texts that are equal after redaction stay rows
+//! of their own (nothing is merged, so no rule for occurrences or for opposite labels is
+//! needed), and the hashes of the fitted texts are those of the texts as read. No logs
+//! frame with redacted texts is ever built, so the uniqueness of the texts of a logs
+//! frame holds. The routing option `strip` is itself a
 //! rule ([`RedactionRules::routing`]): the plain feature rule after it gives the rows of
 //! [`RoutingMode::Strip`](crate::RoutingMode::Strip) bit for bit. `isolate` hashes the
 //! two parts into separate index ranges and has no rule of text.
@@ -122,8 +132,8 @@ use l2d_core::marks::{
 use l2d_core::memory::{PROCESS_BASELINE_BYTES, exact};
 use l2d_core::polars::prelude::{Column, DataFrame, PolarsError};
 use l2d_core::{
-    ArchiveSummary, InputSummary, L2dError, LogsFrame, MemoryBudget, ProjectPaths, RedactionKind,
-    RedactionRule, ZipInput, ZipInputSettings,
+    ArchivePosition, ArchiveSummary, InputSummary, L2dError, LogsFrame, MemoryBudget, ProjectPaths,
+    RedactionKind, RedactionRule, ZipInput, ZipInputSettings,
 };
 use regex::{NoExpand, Regex, RegexBuilder};
 use sha2::{Digest, Sha256};
@@ -301,8 +311,11 @@ pub struct RedactionProposals {
     pub proposals: Vec<RedactionProposal>,
     /// The marked logs counted (the mark set's, less the de-selected ones).
     pub marked_logs: u64,
-    /// The other logs of the input or store.
+    /// The other logs of the input or store, less the de-selected ones.
     pub unmarked_logs: u64,
+    /// The de-selected logs of the mark set: counted on neither side (16.3), as they are
+    /// kept out of fitting (task 1.23).
+    pub deselected_logs: u64,
     /// The fewest marked logs a proposal occurs in.
     pub min_marked: u64,
     /// The fewest unmarked logs a proposal occurs in.
@@ -506,7 +519,7 @@ impl Counter {
 }
 
 /// What the mark set holds of its logs, in bytes.
-fn marks_bytes(marks: &MarkSet) -> u64 {
+pub(crate) fn marks_bytes(marks: &MarkSet) -> u64 {
     8 * (marks.positions().len() + marks.deselected().len()) as u64
         + MARKED_ID_BYTES * (marks.ids().len() + marks.deselected_ids().len()) as u64
 }
@@ -517,38 +530,149 @@ fn frame_failed(doing: &str, error: &PolarsError) -> L2dError {
     }
 }
 
-/// Hands every log of `input` to `each` as its text and whether it is marked, in the
-/// input's order, with `beside` held beside the batches. For an archive the archive is
-/// opened and checked against the mark set first, and its summary returned.
-fn read_logs(
+/// One log as a reader of the input hands it out (task 1.23 reads the same way).
+pub(crate) struct LogView<'a> {
+    pub text: &'a str,
+    /// The first position in an input; `None` for a store.
+    pub position: Option<u64>,
+    /// The id of a stored log; `None` for an input.
+    pub id: Option<&'a str>,
+    /// The group key the adapter gave the log (a file's `group` column).
+    pub group: Option<&'a str>,
+    /// The path of the archive entry the log was first read from.
+    pub entry: Option<&'a str>,
+    /// How often the text occurred (1 for a stored log).
+    pub occurrences: u32,
+    /// The store's sequence number of the log; `None` for an input.
+    pub seq: Option<i64>,
+}
+
+/// What a mark set says of one log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkSide {
+    /// Marked and not de-selected.
+    Marked,
+    /// Marked and de-selected: kept out of fitting and out of the proposals (16.3).
+    Deselected,
+    /// Not marked.
+    Unmarked,
+}
+
+impl MarkSide {
+    pub(crate) fn of(marks: &MarkSet, view: &LogView<'_>) -> Self {
+        match (view.position, view.id) {
+            (Some(position), _) => {
+                if marks.is_selected(position) {
+                    MarkSide::Marked
+                } else if marks.deselected().binary_search(&position).is_ok() {
+                    MarkSide::Deselected
+                } else {
+                    MarkSide::Unmarked
+                }
+            }
+            (None, Some(id)) => {
+                if marks.is_selected_id(id) {
+                    MarkSide::Marked
+                } else if marks
+                    .deselected_ids()
+                    .binary_search_by(|marked| marked.as_str().cmp(id))
+                    .is_ok()
+                {
+                    MarkSide::Deselected
+                } else {
+                    MarkSide::Unmarked
+                }
+            }
+            (None, None) => MarkSide::Unmarked,
+        }
+    }
+}
+
+/// Takes the logs a reader hands out.
+pub(crate) trait LogSink {
+    /// One log, in the input's order.
+    fn log(&mut self, view: &LogView<'_>) -> Result<(), L2dError>;
+
+    /// What the sink holds beside the batches now. Asked before the first batch and after
+    /// every batch: an archive sizes its next batch with it, a store cuts it.
+    fn beside(&mut self) -> u64;
+
+    /// What a store is asked to charge for each row of a batch beside its own share,
+    /// for what the sink keeps of the row (`MarkStore::text_batches`); 0 by default.
+    fn per_row(&self) -> u64 {
+        0
+    }
+
+    /// Told once an archive is open and checked, before the sink is asked what it holds
+    /// beside the batches: the longest entry path of its directory and the most bytes a
+    /// record may have. Nothing by default.
+    fn archive_opened(&mut self, _longest_entry_path: u64, _max_record_bytes: u64) {}
+}
+
+/// Hands the logs of one logs frame (a file's, or a batch of an archive) to `sink`.
+/// `entry_of` names the archive entry of a position.
+fn frame_logs<'e>(
+    frame: &DataFrame,
+    sink: &mut dyn LogSink,
+    entry_of: &dyn Fn(u64) -> Option<&'e str>,
+) -> Result<(), L2dError> {
+    let doing = "reading the logs of a batch";
+    let column = |name: &str| {
+        frame
+            .column(name)
+            .map_err(|error| frame_failed(doing, &error))
+    };
+    let texts = column(LogsFrame::TEXT)?
+        .str()
+        .map_err(|error| frame_failed(doing, &error))?;
+    let positions = column(LogsFrame::FIRST_POSITION)?
+        .u64()
+        .map_err(|error| frame_failed(doing, &error))?;
+    let groups = column(LogsFrame::GROUP)?
+        .str()
+        .map_err(|error| frame_failed(doing, &error))?;
+    let occurrences = column(LogsFrame::OCCURRENCES)?
+        .u32()
+        .map_err(|error| frame_failed(doing, &error))?;
+    for (((text, position), group), occurrences) in texts
+        .into_no_null_iter()
+        .zip(positions.into_no_null_iter())
+        .zip(groups.iter())
+        .zip(occurrences.into_no_null_iter())
+    {
+        sink.log(&LogView {
+            text,
+            position: Some(position),
+            id: None,
+            group,
+            entry: entry_of(position),
+            occurrences,
+            seq: None,
+        })?;
+    }
+    Ok(())
+}
+
+/// Hands every log of `input` to `sink`, in the input's order. `operation` names what
+/// reads in a refusal; `held` is what the caller held before (an archive's reader sets
+/// what is held itself, so it goes beside it). For an archive the archive is opened and
+/// checked against the mark set first, and its summary returned.
+pub(crate) fn read_logs(
+    operation: &str,
     marks: &MarkSet,
     input: &RedactionInput<'_>,
-    beside: u64,
+    held: u64,
     budget: &mut MemoryBudget,
-    each: &mut dyn FnMut(&str, bool),
+    sink: &mut dyn LogSink,
 ) -> Result<Option<ArchiveSummary>, L2dError> {
-    let name = marks.name();
-    let doing = "reading the logs of a batch for the redaction proposals";
-    let positioned = |frame: &DataFrame, each: &mut dyn FnMut(&str, bool)| {
-        let texts = frame
-            .column(LogsFrame::TEXT)
-            .and_then(Column::str)
-            .map_err(|error| frame_failed(doing, &error))?;
-        let positions = frame
-            .column(LogsFrame::FIRST_POSITION)
-            .and_then(Column::u64)
-            .map_err(|error| frame_failed(doing, &error))?;
-        for (text, position) in texts.into_no_null_iter().zip(positions.into_no_null_iter()) {
-            each(text, marks.is_selected(position));
-        }
-        Ok::<(), L2dError>(())
-    };
+    let doing = "reading the logs of a batch";
     match input {
         RedactionInput::File { logs, .. } => {
-            positioned(logs.frame(), each)?;
+            frame_logs(logs.frame(), sink, &|_| None)?;
             Ok(None)
         }
         RedactionInput::Archive { path, settings } => {
+            let name = marks.name();
             let mut archive = ZipInput::open(path, settings, budget)?;
             let summary = InputSummary {
                 source_path: path.to_path_buf(),
@@ -559,17 +683,20 @@ fn read_logs(
                 label_conflicts: 0,
             };
             marks.require_input(&summary, Some(&settings.entries))?;
+            sink.archive_opened(archive.longest_entry_path(), settings.max_record_bytes);
+            let beside = held + sink.beside();
             archive.hold_beside(beside);
             let needed = archive.held_bytes() + PARSE_BATCH_BYTES;
             if needed > budget.usable_bytes() {
                 return Err(L2dError::Refused {
                     reason: format!(
-                        "proposing redactions for the mark set `{name}` needs {} before the \
-                         first batch: {} beside the archive (its counters, the marked logs \
-                         and what was held before), {} that the archive holds once its \
+                        "{operation} for the mark set `{name}` needs {} before the first \
+                         batch: {} beside the archive (what the operation and the mark set \
+                         hold, room it keeps for what it takes of a batch, and what was held \
+                         before), {} that the archive holds once its \
                          directory is read, and {} for the fixed memory of a batch; but the \
                          memory limit of {} leaves {} beside the {} kept for the tool itself; \
-                         nothing was counted",
+                         nothing was read",
                         exact(needed),
                         exact(beside),
                         exact(archive.held_bytes() - beside),
@@ -581,25 +708,36 @@ fn read_logs(
                 });
             }
             {
-                for batch in archive.batches(budget) {
+                let mut batches = archive.batches(budget);
+                while let Some(batch) = batches.next() {
                     let batch = batch.map_err(|error| match error {
                         L2dError::Refused { reason } => L2dError::Refused {
                             reason: format!(
-                                "proposing redactions for the mark set `{name}` holds {} \
-                                 beside the archive (its counters, the marked logs and what \
-                                 was held before): {reason}",
-                                exact(beside)
+                                "{operation} for the mark set `{name}` holds {} beside the \
+                                 archive (what the operation and the mark set hold, room it keeps \
+                                 for what it takes of a batch, and what was held before): \
+                                 {reason}",
+                                exact(held + sink.beside())
                             ),
                         },
                         other => other,
                     })?;
-                    positioned(batch.frame(), each)?;
+                    let entries = &batches;
+                    frame_logs(batch.frame(), sink, &|position| {
+                        entries.entry_path(ArchivePosition::unpack(position).entry)
+                    })?;
+                    batches.hold_beside(held + sink.beside());
                 }
             }
             Ok(Some(archive.finish()))
         }
         RedactionInput::Store(store) => {
-            store.text_batches(beside, 0, budget, &mut |batch| {
+            let beside = sink.beside();
+            store.text_batches(beside, sink.per_row(), budget, &mut |batch| {
+                let seqs = batch
+                    .column("seq")
+                    .and_then(Column::i64)
+                    .map_err(|error| frame_failed(doing, &error))?;
                 let ids = batch
                     .column("id")
                     .and_then(Column::str)
@@ -608,16 +746,45 @@ fn read_logs(
                     .column(LogsFrame::TEXT)
                     .and_then(Column::str)
                     .map_err(|error| frame_failed(doing, &error))?;
-                for (id, text) in ids.into_no_null_iter().zip(texts.into_no_null_iter()) {
-                    each(text, marks.is_selected_id(id));
+                for ((seq, id), text) in seqs
+                    .into_no_null_iter()
+                    .zip(ids.into_no_null_iter())
+                    .zip(texts.into_no_null_iter())
+                {
+                    sink.log(&LogView {
+                        text,
+                        position: None,
+                        id: Some(id),
+                        group: None,
+                        entry: None,
+                        occurrences: 1,
+                        seq: Some(seq),
+                    })?;
                 }
-                Ok(beside)
+                Ok(sink.beside())
             })?;
             Ok(None)
         }
     }
 }
 
+/// A sink that hands each log's text and side to a function, holding `beside`.
+struct SideSink<'m, F: FnMut(&str, MarkSide)> {
+    marks: &'m MarkSet,
+    beside: u64,
+    each: F,
+}
+
+impl<F: FnMut(&str, MarkSide)> LogSink for SideSink<'_, F> {
+    fn log(&mut self, view: &LogView<'_>) -> Result<(), L2dError> {
+        (self.each)(view.text, MarkSide::of(self.marks, view));
+        Ok(())
+    }
+
+    fn beside(&mut self) -> u64 {
+        self.beside
+    }
+}
 /// Proposes redactions for the mark set `marks` on the input or store it was made on
 /// (requirement 16.4; module documentation).
 ///
@@ -683,27 +850,32 @@ fn propose(
             ),
         });
     }
-    // An archive's reader sets what is held itself: the caller's holding goes beside it.
-    let beside = match input {
-        RedactionInput::Archive { .. } => held + counters + of_marks,
-        RedactionInput::File { .. } | RedactionInput::Store(_) => counters + of_marks,
-    };
+    // What is held beside the batches; an archive's reader also puts the caller's
+    // holding beside them, since it sets what is held itself.
+    let beside = counters + of_marks;
+    let operation = "proposing redactions";
 
-    // First read: the marked logs' candidates in the bounded counter.
+    // First read: the marked logs' candidates in the bounded counter. A de-selected log
+    // is on neither side (16.3).
     let mut counter = Counter::new(settings.counter_slots);
     let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(settings.max_fragments_per_log);
-    let (mut marked_logs, mut unmarked_logs) = (0u64, 0u64);
-    let mut archive = read_logs(marks, input, beside, budget, &mut |text, marked| {
-        if !marked {
-            unmarked_logs += 1;
-            return;
-        }
-        marked_logs += 1;
-        cut(text, settings, &mut ranges);
-        for &(start, end) in &ranges {
-            counter.add(&text[start..end]);
-        }
-    })?;
+    let (mut marked_logs, mut unmarked_logs, mut deselected_logs) = (0u64, 0u64, 0u64);
+    let mut first = SideSink {
+        marks,
+        beside,
+        each: |text: &str, side: MarkSide| match side {
+            MarkSide::Deselected => deselected_logs += 1,
+            MarkSide::Unmarked => unmarked_logs += 1,
+            MarkSide::Marked => {
+                marked_logs += 1;
+                cut(text, settings, &mut ranges);
+                for &(start, end) in &ranges {
+                    counter.add(&text[start..end]);
+                }
+            }
+        },
+    };
+    let mut archive = read_logs(operation, marks, input, held, budget, &mut first)?;
     if marked_logs != marks.selected_count() {
         return Err(L2dError::Refused {
             reason: format!(
@@ -751,23 +923,33 @@ fn propose(
                 .map(|fragment| (fragment, Counts::default())),
         );
         let (mut marked_again, mut unmarked_again) = (0u64, 0u64);
-        archive = read_logs(marks, input, beside, budget, &mut |text, marked| {
-            if marked {
-                marked_again += 1;
-            } else {
-                unmarked_again += 1;
-            }
-            cut(text, settings, &mut ranges);
-            for &(start, end) in &ranges {
-                if let Some(count) = counts.get_mut(&text[start..end]) {
-                    if marked {
-                        count.marked += 1;
-                    } else {
-                        count.unmarked += 1;
+        let mut second = SideSink {
+            marks,
+            beside,
+            each: |text: &str, side: MarkSide| {
+                let marked = match side {
+                    MarkSide::Deselected => return,
+                    MarkSide::Marked => true,
+                    MarkSide::Unmarked => false,
+                };
+                if marked {
+                    marked_again += 1;
+                } else {
+                    unmarked_again += 1;
+                }
+                cut(text, settings, &mut ranges);
+                for &(start, end) in &ranges {
+                    if let Some(count) = counts.get_mut(&text[start..end]) {
+                        if marked {
+                            count.marked += 1;
+                        } else {
+                            count.unmarked += 1;
+                        }
                     }
                 }
-            }
-        })?;
+            },
+        };
+        archive = read_logs(operation, marks, input, held, budget, &mut second)?;
         if (marked_again, unmarked_again) != (marked_logs, unmarked_logs) {
             return Err(L2dError::Refused {
                 reason: format!(
@@ -802,6 +984,7 @@ fn propose(
         proposals,
         marked_logs,
         unmarked_logs,
+        deselected_logs,
         min_marked,
         min_unmarked,
         settings: *settings,
@@ -837,6 +1020,14 @@ fn rule_bytes(rule: &RedactionRule) -> u64 {
     }
 }
 
+/// Rules are equal when they are the same rules in the same order; the compiled form
+/// follows from them.
+impl PartialEq for RedactionRules {
+    fn eq(&self, other: &Self) -> bool {
+        self.rules == other.rules
+    }
+}
+
 fn compile(pattern: &str) -> Result<Regex, regex::Error> {
     RegexBuilder::new(pattern)
         .size_limit(REGEX_SIZE_LIMIT)
@@ -861,6 +1052,11 @@ impl RedactionRules {
     ///   within the size limits; the rule is named by its number.
     /// - [`L2dError::Refused`]: what the rules take ([`RedactionRules::held_bytes`])
     ///   does not fit what `budget` leaves; checked before a pattern is compiled.
+    ///
+    /// The budget is asked, not changed: the rules are held by whoever keeps them, and
+    /// that owner counts [`RedactionRules::held_bytes`] in the budget for as long as it
+    /// keeps them (a fit from a mark set holds them for the fit; a scorer counts them in
+    /// its own [`held_bytes`](crate::BaselineScorer::held_bytes)).
     pub fn new(rules: Vec<RedactionRule>, budget: &MemoryBudget) -> Result<Self, L2dError> {
         check_redactions(&rules)?;
         let held: u64 = rules.iter().map(rule_bytes).sum();
@@ -877,6 +1073,14 @@ impl RedactionRules {
                 ),
             });
         }
+        Self::loaded(rules)
+    }
+
+    /// The rules of a saved scorer, compiled without asking a budget: the load counts
+    /// them beforehand (`BaselineScorer::load_bytes`, which counts every pattern as
+    /// `REGEX_HELD_BYTES`). Errors as [`RedactionRules::new`] for their shape.
+    pub(crate) fn loaded(rules: Vec<RedactionRule>) -> Result<Self, L2dError> {
+        check_redactions(&rules)?;
         let compiled = rules
             .iter()
             .enumerate()
@@ -933,13 +1137,10 @@ impl RedactionRules {
     }
 
     /// The rules of [`RedactionRules::routing_rule`] alone. It holds one compiled
-    /// pattern ([`RedactionRules::held_bytes`]).
-    pub fn routing() -> Self {
-        let regex = compile(ROUTING_PATTERN).expect("the routing pattern compiles");
-        Self {
-            rules: vec![Self::routing_rule()],
-            compiled: vec![Compiled::Pattern(Box::new(regex))],
-        }
+    /// pattern ([`RedactionRules::held_bytes`]), checked against `budget` before it is
+    /// compiled, as [`RedactionRules::new`] checks.
+    pub fn routing(budget: &MemoryBudget) -> Result<Self, L2dError> {
+        Self::new(vec![Self::routing_rule()], budget)
     }
 
     /// The rules kept with the mark set `marks`. Errors as [`RedactionRules::new`].
@@ -974,6 +1175,35 @@ impl RedactionRules {
         self.rules.is_empty()
     }
 
+    /// The most bytes a text of `bytes` bytes can have after the rules, rule by rule: a
+    /// literal rule whose placeholder is longer than its fragment replaces at most
+    /// `bytes / fragment` occurrences; a pattern rule with a placeholder may match the
+    /// empty text at every position, so it adds at most `(bytes + 1) x placeholder`; a
+    /// rule whose placeholder is not longer than what it replaces adds nothing. Equal to
+    /// `bytes` for no rules and for the rules of confirmed proposals (one-byte
+    /// placeholders). Saturates.
+    pub fn redacted_bound(&self, bytes: u64) -> u64 {
+        self.rules.iter().fold(bytes, |bytes, rule| {
+            let placeholder = rule.placeholder.len() as u64;
+            match rule.kind {
+                RedactionKind::Literal => {
+                    let fragment = rule.fragment.len() as u64;
+                    if placeholder <= fragment {
+                        bytes
+                    } else {
+                        bytes.saturating_add(
+                            (bytes / fragment).saturating_mul(placeholder - fragment),
+                        )
+                    }
+                }
+                RedactionKind::Pattern if placeholder == 0 => bytes,
+                RedactionKind::Pattern => {
+                    bytes.saturating_add(bytes.saturating_add(1).saturating_mul(placeholder))
+                }
+            }
+        })
+    }
+
     /// What the rules are counted as in the memory budget: their text, and
     /// `REGEX_HELD_BYTES` for every compiled pattern.
     pub fn held_bytes(&self) -> u64 {
@@ -998,26 +1228,6 @@ impl RedactionRules {
             }
         }
         current
-    }
-
-    /// `logs` with every text after the rules, the other columns as they were: the
-    /// texts a fit takes. Texts that differed only in redacted fragments are equal
-    /// afterwards, each still in its own row.
-    pub fn apply_frame(&self, logs: &LogsFrame) -> Result<LogsFrame, L2dError> {
-        let doing = "redacting the texts of a logs frame";
-        let frame = logs.frame();
-        let texts = frame
-            .column(LogsFrame::TEXT)
-            .and_then(Column::str)
-            .map_err(|error| frame_failed(doing, &error))?;
-        let redacted: Vec<String> = texts
-            .into_no_null_iter()
-            .map(|text| self.apply(text).into_owned())
-            .collect();
-        let mut out = frame.clone();
-        out.with_column(Column::new(LogsFrame::TEXT.into(), redacted))
-            .map_err(|error| frame_failed(doing, &error))?;
-        LogsFrame::new(out)
     }
 
     /// The SHA-256, in lower-case hexadecimal, of the rules: a tag, the number of

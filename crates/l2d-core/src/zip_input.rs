@@ -935,6 +935,18 @@ impl ZipInput {
         &self.path
     }
 
+    /// The length in bytes of the longest entry path of the directory, as the entry
+    /// reports name it (0 for an empty archive): a bound on what a caller keeps per log
+    /// when it keeps a part of the path of the log's entry (task 1.23, the host of an
+    /// AIT entry as a group key).
+    pub fn longest_entry_path(&self) -> u64 {
+        self.reports
+            .iter()
+            .map(|report| report.path.len() as u64)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// How many entries are read at once (task 1.19): decided when
     /// [`ZipInput::batches`] is called, from the settings, the memory limit and the
     /// entries that will be opened; 1 before.
