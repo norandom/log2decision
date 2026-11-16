@@ -106,7 +106,7 @@ pub(crate) fn unreadable(path: &Path, error: &std::io::Error) -> L2dError {
 }
 
 /// Reads exactly `out.len()` bytes at offset `at`.
-fn read_at(file: &mut File, at: u64, out: &mut [u8]) -> std::io::Result<()> {
+fn read_at(file: &mut (impl Read + Seek), at: u64, out: &mut [u8]) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(at))?;
     file.read_exact(out)
 }
@@ -415,7 +415,7 @@ pub(crate) enum DataFault {
 /// extra fields. Method, flags, sizes and checksum are those of the directory; what the
 /// entry's own header says about them is not read.
 pub(crate) fn locate_data(
-    file: &mut File,
+    file: &mut (impl Read + Seek),
     entry: &DirectoryEntry,
     file_bytes: u64,
 ) -> Result<u64, DataFault> {

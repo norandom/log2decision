@@ -78,8 +78,8 @@ use serde::Serialize;
 use super::archive_run::{ArchiveRun, DedupReport};
 use super::baseline::ScoreArgs;
 use super::common::{
-    Context, DEFAULT_TEXT_LIMIT, MemoryReport, Operation, ScorerReport, TEXT_CHARS, find_model,
-    load_scorer, output_bytes, required,
+    AtOnceDefault, Context, DEFAULT_TEXT_LIMIT, MemoryReport, Operation, ScorerReport, TEXT_CHARS,
+    find_model, load_scorer, output_bytes, required,
 };
 use super::ingest::{ArchiveReport, archive_report_text, fail_when_damaged};
 use crate::output::{JsonOut, human_bytes, output_failed, shown_text};
@@ -204,7 +204,8 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
     let scorer = load_scorer(&paths, &directory, &mut budget)?;
     let report = ScorerReport::of(&scorer, &directory);
 
-    let settings = args.archive.settings();
+    // One entry at a time unless asked: more were measured no faster here (task 1.19).
+    let settings = args.archive.settings(AtOnceDefault::One);
     let mut input = ZipInput::open(archive, &settings, &budget)?;
 
     // What the run holds beside the archive: the scorer, hashing the longest text an
@@ -405,6 +406,7 @@ fn write_scores<W: Write>(
             detail: "the archive was read without a batch plan".into(),
         })?;
     let dedup = run.input.disk_dedup();
+    let at_once = run.input.entries_at_once();
     let (disk_free, disk_estimated) = run.disk_check();
     // The directory holds the parts from here on, so it stays when `dir` is let go.
     let (summary, dir) = run.finish();
@@ -458,7 +460,7 @@ fn write_scores<W: Write>(
     };
     let memory = context.memory_report(
         budget,
-        vec![Operation::batches("read", summary.input.records, plan)],
+        vec![Operation::batches("read", summary.input.records, plan).with_entries_at_once(at_once)],
     );
 
     let omitted = rows.saturating_sub(limit);

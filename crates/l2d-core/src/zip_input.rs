@@ -5,9 +5,14 @@
 //!
 //! [`ZipInput::open`] hashes the archive file (SHA-256, one pass) and reads its
 //! directory. [`ZipInput::batches`] then walks the entries in directory order, which
-//! is the record order, so the result does not depend on timing. One entry is open at
-//! a time and is read as a stream: the file, the inflater, for a gzip entry a second
-//! inflater, then lines. Nothing is written anywhere unless a directory for
+//! is the record order, so the result does not depend on timing. An entry is read as a
+//! stream: the file, the inflater, for a gzip entry a second inflater, then lines.
+//! One entry is open at a time, or several are read at once by reader threads
+//! ([`ZipInputSettings::entries_at_once`], task 1.19): they inflate, split and judge
+//! the lines, and the calling thread takes those lines entry by entry in directory
+//! order and does everything else as with one entry at a time, so the batches, rows,
+//! counts and summary are the same (`zip_input/parallel.rs` has how and what the
+//! readers hold). Nothing is written anywhere unless a directory for
 //! deduplication on disk is named, and then only there, under names the tool makes up;
 //! an entry name is only ever a name in a report: it is never used as a path.
 //!
@@ -68,8 +73,9 @@
 //! # Memory
 //!
 //! Held for the whole read and counted against the [`MemoryBudget`]: the directory
-//! (one small record and the name per entry), the readers of one entry, the
-//! deduplication set, and the skipped records. The deduplication set holds, per
+//! (one small record and the name per entry), the readers of one entry (or of each
+//! entry read at once, with the pieces of lines they hand on), the deduplication set,
+//! and the skipped records. The deduplication set holds, per
 //! distinct text, 128 bits of the text's SHA-256 and the occurrence count: 21 bytes per
 //! slot, 24 to 48 bytes per distinct text, and while it grows the old and the new
 //! table. The room for the next growth is taken off what a batch may use before the
@@ -129,6 +135,7 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use polars::prelude::{BooleanChunked, Column, DataFrame, DataType, NewChunkedArray};
 use serde::{Deserialize, Serialize};
@@ -153,6 +160,9 @@ use crate::zip_spill::{
 
 pub use crate::zip_spill::DiskDedup;
 
+mod parallel;
+use parallel::{Ending, Piece, Readers, reader_bytes};
+
 pub use crate::zip_directory::MAX_ENTRIES;
 
 /// The maximum record length when the analyst sets none (owner decision of 2026-11-12).
@@ -161,6 +171,11 @@ pub const DEFAULT_MAX_RECORD_BYTES: u64 = 64 * 1024;
 pub const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 /// The most lines of one entry: a position names the line in 40 bits.
 pub const MAX_ENTRY_LINES: u64 = (1 << 40) - 1;
+/// How many entries are read at once when the analyst sets nothing and the memory
+/// limit has room for their readers (task 1.19).
+pub const DEFAULT_ENTRIES_AT_ONCE: usize = 2;
+/// The most entries that can be read at once: a bound for a busy machine (task 1.19).
+pub const MAX_ENTRIES_AT_ONCE: usize = 8;
 
 /// How many of the first bytes of an entry decide whether it is text.
 const TEXT_CHECK_BYTES: usize = 8 * 1024;
@@ -199,6 +214,13 @@ pub struct ZipInputSettings {
     /// `--max-record-bytes`: a line longer than this is skipped and reported. 1 to
     /// [`MAX_RECORD_BYTES`].
     pub max_record_bytes: u64,
+    /// `--entries-at-once`: how many entries are read at the same time, 1 to
+    /// [`MAX_ENTRIES_AT_ONCE`]; 1 reads one entry after the other on the calling
+    /// thread. `None` takes [`DEFAULT_ENTRIES_AT_ONCE`] when their readers take at most
+    /// an eighth of what the memory limit leaves, and 1 otherwise. Never more than
+    /// the entries that will be opened. The rows, counts and summary do not depend on
+    /// it ([`ZipInput::entries_at_once`]).
+    pub entries_at_once: Option<usize>,
 }
 
 impl Default for ZipInputSettings {
@@ -206,6 +228,7 @@ impl Default for ZipInputSettings {
         Self {
             entries: Vec::new(),
             max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            entries_at_once: None,
         }
     }
 }
@@ -537,6 +560,31 @@ impl EntryLines {
     }
 }
 
+/// What the validation pass of the lines adapter makes of one line of an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    /// Longer than the maximum record length: its length in bytes.
+    TooLong(u64),
+    /// Blank: nothing but white space.
+    Blank,
+    NotUtf8,
+    /// A text, with the [`row_digest`] of it as an unlabelled record.
+    Text(u64),
+}
+
+/// Judges the line `line` that `read` describes (the reader of an entry and a reader
+/// thread both judge with this).
+fn judge(line: &[u8], read: &LineRead) -> Judged {
+    if !read.kept {
+        return Judged::TooLong(read.bytes);
+    }
+    match std::str::from_utf8(line) {
+        Ok(text) if text.trim().is_empty() => Judged::Blank,
+        Ok(text) => Judged::Text(row_digest(text, Label::Unknown, None)),
+        Err(_) => Judged::NotUtf8,
+    }
+}
+
 /// The entry being read.
 struct OpenEntry {
     index: usize,
@@ -701,7 +749,8 @@ pub struct ZipInput {
     content_sha256: String,
     patterns: Vec<glob::Pattern>,
     max_record_bytes: u64,
-    directory: Vec<DirectoryEntry>,
+    /// Shared with the reader threads when entries are read at once.
+    directory: Arc<Vec<DirectoryEntry>>,
     reports: Vec<EntryReport>,
     /// What directory and reports are counted as.
     directory_held: u64,
@@ -731,6 +780,12 @@ pub struct ZipInput {
     reserved_held: u64,
     /// What the caller holds beside the archive for the whole read.
     beside: u64,
+    /// How many entries the analyst asked to be read at once; `None` for the default.
+    wanted_at_once: Option<usize>,
+    /// How many entries are read at once: decided when the batches begin, 1 before.
+    at_once: usize,
+    /// How many entries the batches will open, from where they begin.
+    opened_entries: u64,
 }
 
 /// The free-disk check taken when the set of distinct texts is frozen and the read
@@ -801,6 +856,15 @@ impl ZipInput {
                 ),
             });
         }
+        if let Some(at_once) = settings.entries_at_once
+            && !(1..=MAX_ENTRIES_AT_ONCE).contains(&at_once)
+        {
+            return Err(L2dError::InvalidInput {
+                detail: format!(
+                    "the entries read at once must be 1 to {MAX_ENTRIES_AT_ONCE}, not {at_once}"
+                ),
+            });
+        }
         let patterns = settings
             .entries
             .iter()
@@ -836,7 +900,8 @@ impl ZipInput {
             content_sha256,
             patterns,
             max_record_bytes: settings.max_record_bytes,
-            directory,
+            // The vector moves into the shared value; its entries are not copied.
+            directory: Arc::new(directory),
             reports,
             directory_held,
             next_entry: 0,
@@ -852,7 +917,17 @@ impl ZipInput {
             freeze_disk: None,
             reserved_held: 0,
             beside: 0,
+            wanted_at_once: settings.entries_at_once,
+            at_once: 1,
+            opened_entries: 0,
         })
+    }
+
+    /// How many entries are read at once (task 1.19): decided when
+    /// [`ZipInput::batches`] is called, from the settings, the memory limit and the
+    /// entries that will be opened; 1 before.
+    pub fn entries_at_once(&self) -> usize {
+        self.at_once
     }
 
     /// The batches of the archive, within `budget`: every item is the logs frame of the
@@ -865,11 +940,14 @@ impl ZipInput {
     /// reports.
     pub fn batches<'a>(&'a mut self, budget: &'a mut MemoryBudget) -> ZipBatches<'a> {
         // What the entries still to be read declare: only an estimate of the rows.
-        let declared = self.directory[self.next_entry..]
+        let (opened, declared) = self.directory[self.next_entry..]
             .iter()
             .zip(&self.reports[self.next_entry..])
             .filter(|(entry, report)| self.selected(entry, &report.path).is_ok())
-            .fold(0u64, |sum, (entry, _)| sum.saturating_add(entry.size));
+            .fold((0u64, 0u64), |(opened, sum), (entry, _)| {
+                (opened + 1, sum.saturating_add(entry.size))
+            });
+        self.choose_at_once(opened, budget);
         ZipBatches {
             batcher: Some(Batcher::new(budget, declared, PARSE_COST)),
             input: self,
@@ -880,6 +958,8 @@ impl ZipInput {
             ended: false,
             budget: None,
             merge: None,
+            readers: None,
+            reading: None,
         }
     }
 
@@ -1132,8 +1212,73 @@ impl ZipInput {
         }
     }
 
+    /// What the readers of the entries take: of one entry read here, or of
+    /// [`ZipInput::entries_at_once`] entries read by reader threads.
     fn readers_held(&self) -> u64 {
-        STREAM_BYTES + RECORD_FACTOR * self.max_record_bytes + PARSE_ROW_BYTES
+        self.readers_held_at(self.at_once)
+    }
+
+    /// What the readers of `count` entries read at once take. One entry is read on the
+    /// calling thread: the readers of the entry, the line buffer and one record in the
+    /// batch beyond what the batch was sized for, and the fixed cost of a row. More are
+    /// read by as many threads, each of which holds [`reader_bytes`]; the calling
+    /// thread then holds no line buffer, and the list of the entries to be opened (4
+    /// bytes each) is shared.
+    fn readers_held_at(&self, count: usize) -> u64 {
+        let record = self.max_record_bytes;
+        if count <= 1 {
+            return STREAM_BYTES + RECORD_FACTOR * record + PARSE_ROW_BYTES;
+        }
+        count as u64 * reader_bytes(record)
+            + (RECORD_FACTOR - 2) * record
+            + PARSE_ROW_BYTES
+            + 4 * self.opened_entries
+    }
+
+    /// Decides how many entries are read at once, for `opened` entries to be opened
+    /// under `budget`: the analyst's number, or [`DEFAULT_ENTRIES_AT_ONCE`] when their
+    /// readers take at most an eighth of what the limit leaves and 1 otherwise; never
+    /// more than `opened`, and at least 1.
+    fn choose_at_once(&mut self, opened: u64, budget: &MemoryBudget) {
+        self.opened_entries = opened;
+        let wanted = match self.wanted_at_once {
+            Some(count) => count,
+            None if self.readers_held_at(DEFAULT_ENTRIES_AT_ONCE) <= budget.usable_bytes() / 8 => {
+                DEFAULT_ENTRIES_AT_ONCE
+            }
+            None => 1,
+        };
+        self.at_once = wanted
+            .min(usize::try_from(opened).unwrap_or(usize::MAX))
+            .max(1);
+    }
+
+    /// Starts the reader threads over the entries still to be opened.
+    fn start_readers(&self) -> Result<Readers, L2dError> {
+        let mut opened = Vec::with_capacity(self.opened_entries as usize);
+        for index in self.next_entry..self.directory.len() {
+            if self
+                .selected(&self.directory[index], &self.reports[index].path)
+                .is_ok()
+            {
+                opened.push(index as u32);
+            }
+        }
+        Readers::start(
+            &self.file,
+            self.file_bytes,
+            &self.directory,
+            opened,
+            self.max_record_bytes,
+            self.at_once,
+        )
+        .map_err(|error| L2dError::Runtime {
+            detail: format!(
+                "the readers of {} entries of {} could not be started: {error}",
+                self.at_once,
+                self.path.display()
+            ),
+        })
     }
 
     /// The table the set must grow to before it can take `rows` more texts, in bytes;
@@ -1211,8 +1356,7 @@ impl ZipInput {
     fn held_parts(&self, rows: u64) -> String {
         format!(
             "the deduplication set of {} distinct texts {} (and {} for its next growth), {} \
-             skipped records and damaged entries {}, the directory of {} entries {}, the \
-             readers of one entry with a record of the maximum record length of {} bytes {}",
+             skipped records and damaged entries {}, the directory of {} entries {}, {}",
             self.counts.len(),
             exact(table_bytes(self.counts.capacity())),
             exact(self.growth_bytes(rows)),
@@ -1220,8 +1364,20 @@ impl ZipInput {
             exact(self.skipped_held),
             self.directory.len(),
             exact(self.directory_held),
-            self.max_record_bytes,
-            exact(self.readers_held()),
+            match self.at_once {
+                1 => format!(
+                    "the readers of one entry with a record of the maximum record length of {} \
+                     bytes {}",
+                    self.max_record_bytes,
+                    exact(self.readers_held()),
+                ),
+                count => format!(
+                    "the readers of {count} entries read at once, each with a record of the \
+                     maximum record length of {} bytes, {} (fewer entries at once take less)",
+                    self.max_record_bytes,
+                    exact(self.readers_held()),
+                ),
+            },
         ) + &match &self.spill {
             Some(spill) if spill.held() == SPILL_HELD => format!(
                 ", the buffers of deduplication on disk and of its occurrence counts {}",
@@ -1719,6 +1875,29 @@ pub struct ZipBatches<'a> {
     budget: Option<&'a mut MemoryBudget>,
     /// The rows on disk, merged by position, once the last entry was read.
     merge: Option<Merge>,
+    /// The reader threads, while entries are read at once (task 1.19).
+    readers: Option<Readers>,
+    /// The entry whose lines are being taken from a reader thread.
+    reading: Option<Reading>,
+}
+
+/// The entry whose lines are being taken from a reader thread, and how far.
+struct Reading {
+    index: usize,
+    /// The reader thread that reads it.
+    reader: usize,
+    piece: Piece,
+    /// The next line of the piece, and where its text starts.
+    at: usize,
+    text_at: usize,
+    /// The lines of the entry taken so far.
+    line: u64,
+}
+
+fn not_running() -> L2dError {
+    L2dError::Runtime {
+        detail: "the readers of the archive's entries are not running".into(),
+    }
 }
 
 impl Iterator for ZipBatches<'_> {
@@ -1737,6 +1916,9 @@ impl Iterator for ZipBatches<'_> {
             Err(error) => {
                 self.ended = true;
                 self.current = None;
+                // The reader threads stop and are joined now.
+                self.reading = None;
+                self.readers = None;
                 Some(Err(error))
             }
         }
@@ -1766,6 +1948,14 @@ impl ZipBatches<'_> {
             batcher
                 .processed(held)
                 .map_err(|error| self.input.explained(error, batcher.budget()))?;
+            // The readers of several entries were held from here on and fit: they
+            // start now.
+            if self.input.at_once > 1 {
+                self.readers = Some(self.input.start_readers()?);
+            }
+        }
+        if self.input.at_once > 1 {
+            return self.advance_at_once();
         }
         loop {
             let Some(entry) = &mut self.current else {
@@ -1809,57 +1999,159 @@ impl ZipBatches<'_> {
                 }
             };
             entry.line += 1;
-            let position = ArchivePosition {
-                entry: index as u32,
-                line: entry.line,
-            }
-            .pack();
-            self.input.records += 1;
-            self.input.reports[index].records += 1;
-            // What follows is the validation pass of the lines adapter.
-            let source_bytes = if !read.kept {
-                self.input.skip_record(
-                    position,
-                    format!(
-                        "record of {} bytes is longer than the maximum record length of {} bytes",
-                        read.bytes, self.input.max_record_bytes
-                    ),
-                );
-                0
-            } else {
-                match std::str::from_utf8(&self.line) {
-                    Ok(text) if text.trim().is_empty() => {
-                        self.input.skip_record(position, "empty line");
-                    }
-                    Ok(text) => {
-                        self.accepted.record(
-                            position,
-                            row_digest(text, Label::Unknown, None),
-                            Label::Unknown,
-                        );
-                        self.accepted.push_raw(&self.line);
-                        // Polars removes one carriage return before the line feed. A
-                        // text that itself ends in one gets a second one to lose.
-                        self.accepted.push_raw(if self.line.ends_with(b"\r") {
-                            b"\r\n"
-                        } else {
-                            b"\n"
-                        });
-                    }
-                    Err(_) => self.input.skip_record(position, "line is not valid UTF-8"),
-                }
-                read.source_bytes
-            };
-            let Some(batcher) = &mut self.batcher else {
-                return Ok(None);
-            };
-            let complete = batcher
-                .record(source_bytes)
-                .map_err(|error| self.input.explained(error, batcher.budget()))?;
-            if complete && let Some(batch) = self.process(false)? {
+            let line = entry.line;
+            let judged = judge(&self.line, &read);
+            let text = std::mem::take(&mut self.line);
+            let taken = self.take(index, line, judged, &text, read.source_bytes);
+            self.line = text;
+            if let Some(batch) = taken? {
                 return Ok(Some(batch));
             }
         }
+    }
+
+    /// [`ZipBatches::advance`] when entries are read at once: the lines come from the
+    /// reader threads, entry by entry in directory order, and are taken one by one as
+    /// a line read here is.
+    fn advance_at_once(&mut self) -> Result<Option<LogsFrame>, L2dError> {
+        loop {
+            let Some(mut reading) = self.reading.take() else {
+                let index = self.input.next_entry;
+                if index == self.input.directory.len() {
+                    // Every entry was taken: the readers have ended.
+                    self.readers = None;
+                    return self.end();
+                }
+                self.input.next_entry += 1;
+                if let Err(skip) = self.input.selected(
+                    &self.input.directory[index],
+                    &self.input.reports[index].path,
+                ) {
+                    self.input.skip_entry(index, skip);
+                    continue;
+                }
+                let (reader, piece) = self.readers()?.first(index)?;
+                self.reading = Some(Reading {
+                    index,
+                    reader,
+                    piece,
+                    at: 0,
+                    text_at: 0,
+                    line: 0,
+                });
+                continue;
+            };
+            let index = reading.index;
+            if let Some(&line) = reading.piece.lines.get(reading.at) {
+                reading.at += 1;
+                reading.line += 1;
+                let text_end = reading.text_at + line.text_bytes as usize;
+                let taken = self.take(
+                    index,
+                    reading.line,
+                    line.judged,
+                    &reading.piece.text[reading.text_at..text_end],
+                    line.source_bytes,
+                );
+                reading.text_at = text_end;
+                self.reading = Some(reading);
+                if let Some(batch) = taken? {
+                    return Ok(Some(batch));
+                }
+                continue;
+            }
+            // Every line of the piece is taken: the next piece, or the end of the entry.
+            let ending = reading.piece.end.take();
+            let Some(readers) = self.readers.as_mut() else {
+                return Err(not_running());
+            };
+            let piece = std::mem::take(&mut reading.piece);
+            readers.give_back(reading.reader, piece);
+            match ending {
+                None => {
+                    reading.piece = readers.next(reading.reader, index)?;
+                    reading.at = 0;
+                    reading.text_at = 0;
+                    self.reading = Some(reading);
+                }
+                Some(Ending::Read) => self.input.reports[index].skipped = None,
+                Some(Ending::Skipped(skip)) => self.input.skip_entry(index, skip),
+                Some(Ending::FileFailed(error)) => {
+                    return Err(self.input.read_failed(index, &error));
+                }
+            }
+        }
+    }
+
+    fn readers(&mut self) -> Result<&mut Readers, L2dError> {
+        self.readers.as_mut().ok_or_else(not_running)
+    }
+
+    /// Takes the `line`-th line of the entry at `index` as the validation pass of the
+    /// lines adapter does: counts the record, notes it when it is skipped, and hands
+    /// its text to the batch; the frame of the batch this completes, when it has new
+    /// texts. `text` is the line when it is a text; `source_bytes` what it took in the
+    /// entry.
+    fn take(
+        &mut self,
+        index: usize,
+        line: u64,
+        judged: Judged,
+        text: &[u8],
+        source_bytes: u64,
+    ) -> Result<Option<LogsFrame>, L2dError> {
+        let position = ArchivePosition {
+            entry: index as u32,
+            line,
+        }
+        .pack();
+        self.input.records += 1;
+        self.input.reports[index].records += 1;
+        let source_bytes = match judged {
+            Judged::TooLong(bytes) => {
+                self.input.skip_record(
+                    position,
+                    format!(
+                        "record of {bytes} bytes is longer than the maximum record length of {} \
+                         bytes",
+                        self.input.max_record_bytes
+                    ),
+                );
+                0
+            }
+            Judged::Blank => {
+                self.input.skip_record(position, "empty line");
+                source_bytes
+            }
+            Judged::NotUtf8 => {
+                self.input.skip_record(position, "line is not valid UTF-8");
+                source_bytes
+            }
+            Judged::Text(digest) => {
+                self.accepted.record(position, digest, Label::Unknown);
+                self.accepted.push_raw(text);
+                // Polars removes one carriage return before the line feed. A text
+                // that itself ends in one gets a second one to lose.
+                self.accepted.push_raw(if text.ends_with(b"\r") {
+                    b"\r\n"
+                } else {
+                    b"\n"
+                });
+                source_bytes
+            }
+        };
+        let Some(batcher) = &mut self.batcher else {
+            return Err(L2dError::Runtime {
+                detail: "a line of the archive was read after the end of its batches".into(),
+            });
+        };
+        let complete = batcher
+            .record(source_bytes)
+            .map_err(|error| self.input.explained(error, batcher.budget()))?;
+        if complete {
+            return self.process(false);
+        }
+        Ok(None)
     }
 
     /// Closes the entry being read and keeps its line buffer for the next one.

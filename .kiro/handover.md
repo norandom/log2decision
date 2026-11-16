@@ -22,9 +22,8 @@ archive writes Parquet parts with a manifest. The encoder runs on the NPU as a
 tested session, and logs can be encoded into the store (2.7, library code); no
 command uses the encoder yet.
 
-**No agent is running. Task 1.19 was stopped mid-measurement by the owner's
-end of session; its work is saved on a local branch. Read "Open at the end of
-the session" first.**
+**Update 2026-11-16: task 1.19 finished, reviewed (APPROVED) and merged; no
+agent is running. Next is 1.21 (see "Then, in order").**
 
 ### Finished tasks
 
@@ -62,6 +61,7 @@ the session" first.**
 | 2.7 | Encode logs and store the vectors, one transaction, release recorded | `7e1bc77` |
 | 1.20 | `l2d ingest` deduplicates on disk only when needed; partition room by distinct keys | `15ee402` |
 | 2.17 | Gate: stable entropy-patch encoder; vectors do not classify on unseen endpoints; owner decision | `28c69b3`, `8fded88` |
+| 1.19 | Archive entries read at once: `ingest` 2 by default (faster), `baseline score` 1 (not faster) | merge of `6088015` (2026-11-16) |
 
 Spec changes on 2026-11-15:
 - **Requirement 16**, the analyst flow (amendment
@@ -75,7 +75,21 @@ Spec changes on 2026-11-15:
 
 ## Open at the end of the session
 
-### Task 1.19, parallel archive entries: stopped, saved, not reviewed
+### Task 1.19, parallel archive entries: DONE 2026-11-16 (record below kept for history)
+
+Finished from `fa48bc1`, reviewed independently (APPROVED), merged into
+`main`. The failing CLI test was a test limit, not the accounting; the
+on-disk tests now take their limit from the readers' measured need. Measured
+(512 MB, all entries, ranges): `ingest` 74–81 s at 1, 50–71 s at 2;
+`baseline score` 434–482 s at 1, 376–458 s at 2, 451–469 s at 4 (not
+consistently faster, more memory). Decision by the task's rule: `ingest`
+defaults to 2 when the readers fit, `baseline score` to 1. Details in the
+`- 1.19:` notes of tasks.md. On 2026-11-16 the left-over build folders listed
+under "Things that will bite" were removed with `cargo clean` (about 49 GiB) because
+the all-entries `ingest` was refused for disk space (88.3 GiB asked, 84.3 GiB
+free).
+
+Record as of 2026-11-15:
 
 - **State:** the implementer was stopped by the owner's end of session while
   it measured. Its work is committed as `fa48bc1` ("wip") on local branch
@@ -371,10 +385,10 @@ with a recommendation first).
   for every Rust project on this machine. Worktrees, reviewers and scratch
   copies build with their own target under `D:\BuildArtifacts\log2decision\`.
 - **Left-over build folders,** safe to remove when nothing runs:
-  `task-1.20-target`, `review-1.20-target`, `task-1.20-review2-target`,
-  `review-2.12-probe-target`, `task-2.17-target`, `review-2.17-target` under
-  `D:\BuildArtifacts\log2decision\`. Keep `task-1.19-target` until 1.19 is
-  merged, and keep the `task-*` and `review-*` log folders as evidence.
+  `task-1.19-target` and `review-1.19-target` under
+  `D:\BuildArtifacts\log2decision\` (the older ones were cleaned on
+  2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
+  The disk check of an all-entries AIT run asks about 88 to 99 GiB free on D:.
 - **Debug builds are slow where it matters.** Run evaluations and large archive
   cases in release.
 - **Timings on this host vary** (laptop power management; the owner sometimes
@@ -416,7 +430,8 @@ with a recommendation first).
 - **Encoder gates:** `D:\BuildArtifacts\log2decision\task-2.15\`, `task-2.16\`,
   `task-2.17\` (with the review's figures and the option 2(a) result in
   `task-2.17\review\`); 2.17 model weights in `models/task-2.17/`.
-- **Task 1.19 measurements:** `D:\BuildArtifacts\log2decision\task-1.19\`.
+- **Task 1.19 measurements:** `D:\BuildArtifacts\log2decision\task-1.19\`
+  (review logs in `review-1.19\`).
 - **Baseline gate reports:** `reports/2026-11-13-csic-2010-baseline.{json,md,run.json}`.
 - **Evidence of the tasks:** the `task-*` and `review-*` folders under
   `D:\BuildArtifacts\log2decision\`.

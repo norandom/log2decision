@@ -12,7 +12,7 @@ use l2d_core::input::PARSE_COST;
 use l2d_core::memory::PROCESS_BASELINE_BYTES;
 use l2d_core::polars::prelude::Column;
 use l2d_core::types::SHORT_REVISION_LEN;
-use l2d_core::zip_input::{DEFAULT_MAX_RECORD_BYTES, MAX_RECORD_BYTES};
+use l2d_core::zip_input::{DEFAULT_MAX_RECORD_BYTES, MAX_ENTRIES_AT_ONCE, MAX_RECORD_BYTES};
 use l2d_core::{
     BatchPlan, Csic2010Adapter, InputAdapter, InputSummary, L2dError, LabelledAdapter,
     LabelledFormat, LinesAdapter, LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
@@ -303,6 +303,10 @@ pub struct Operation {
     pub batches: Option<BatchPlan>,
     /// The estimate of a step that needs its whole dataset at once, in bytes.
     pub whole_dataset_bytes: Option<u64>,
+    /// For the read of a zip archive: how many entries were read at once (task 1.19).
+    /// Not in the output of other steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries_at_once: Option<usize>,
 }
 
 impl Operation {
@@ -312,6 +316,7 @@ impl Operation {
             rows,
             batches: Some(plan),
             whole_dataset_bytes: None,
+            entries_at_once: None,
         }
     }
 
@@ -321,7 +326,14 @@ impl Operation {
             rows,
             batches: None,
             whole_dataset_bytes: Some(bytes),
+            entries_at_once: None,
         }
+    }
+
+    /// The read of a zip archive whose entries were read `count` at once.
+    pub fn with_entries_at_once(mut self, count: usize) -> Self {
+        self.entries_at_once = Some(count);
+        self
     }
 
     fn label(&self) -> &'static str {
@@ -429,9 +441,14 @@ impl MemoryReport {
             match (&operation.batches, operation.whole_dataset_bytes) {
                 (Some(plan), _) => writeln!(
                     out,
-                    "  {}: {}",
+                    "  {}: {}{}",
                     operation.label(),
-                    batches_text(operation.rows, operation.unit(), plan)
+                    batches_text(operation.rows, operation.unit(), plan),
+                    match operation.entries_at_once {
+                        Some(1) => "; one entry read at a time".to_string(),
+                        Some(count) => format!("; {count} entries read at once"),
+                        None => String::new(),
+                    }
                 )?,
                 (None, Some(bytes)) => writeln!(
                     out,
@@ -508,6 +525,37 @@ pub struct ArchiveArgs {
     /// 1,024) [default: 64KB, at most 1MB]
     #[arg(long, value_name = "SIZE", value_parser = record_bytes)]
     pub max_record_bytes: Option<u64>,
+
+    /// zip: how many entries are read at the same time, 1 to 8; each takes about 19 MiB
+    /// of the memory limit (with the default maximum record length), and a number that
+    /// does not fit is refused. The results do not depend on it [default: `ingest` 2
+    /// when their readers take at most an eighth of what the memory limit leaves,
+    /// otherwise 1; `baseline score` 1, as more were measured no faster for it]
+    #[arg(long, value_name = "N", value_parser = entries_at_once)]
+    pub entries_at_once: Option<usize>,
+}
+
+/// How many entries a command reads at once when the analyst gives no number (task
+/// 1.19, measured on the AIT archive under 512 MB).
+#[derive(Debug, Clone, Copy)]
+pub enum AtOnceDefault {
+    /// The reader's own default: two entries when their readers fit an eighth of what
+    /// the memory limit leaves, otherwise one. `ingest`: reading is most of its time,
+    /// and two entries at once were faster.
+    WhenTheyFit,
+    /// One entry at a time. `baseline score`: scoring on the calling thread takes most
+    /// of its time, and more entries at once were not faster but held more memory.
+    One,
+}
+
+/// Reads the value of `--entries-at-once`.
+fn entries_at_once(text: &str) -> Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(count) if (1..=MAX_ENTRIES_AT_ONCE).contains(&count) => Ok(count),
+        _ => Err(format!(
+            "the entries read at once are a whole number from 1 to {MAX_ENTRIES_AT_ONCE}"
+        )),
+    }
 }
 
 /// Reads the value of `--max-record-bytes`.
@@ -525,11 +573,16 @@ fn record_bytes(text: &str) -> Result<u64, String> {
 }
 
 impl ArchiveArgs {
-    /// How the archive is read.
-    pub fn settings(&self) -> ZipInputSettings {
+    /// How the archive is read; `at_once` says how many entries are read at once when
+    /// `--entries-at-once` is not given.
+    pub fn settings(&self, at_once: AtOnceDefault) -> ZipInputSettings {
         ZipInputSettings {
             entries: self.entries.clone(),
             max_record_bytes: self.max_record_bytes.unwrap_or(DEFAULT_MAX_RECORD_BYTES),
+            entries_at_once: self.entries_at_once.or(match at_once {
+                AtOnceDefault::WhenTheyFit => None,
+                AtOnceDefault::One => Some(1),
+            }),
         }
     }
 
@@ -540,6 +593,7 @@ impl ArchiveArgs {
         let own = [
             ("--entry", !self.entries.is_empty()),
             ("--max-record-bytes", self.max_record_bytes.is_some()),
+            ("--entries-at-once", self.entries_at_once.is_some()),
         ];
         match own.iter().chain(further).find(|(_, given)| *given) {
             None => Ok(()),
