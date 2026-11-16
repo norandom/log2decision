@@ -213,6 +213,16 @@
   - _Depends: 1.7, 1.12, 1.22_
   - _Requirements: 16.6, 16.7, 16.8, 16.9, 6.1, 6.6_
 
+- [ ] 1.24 Hardening after the mark sets: guards for a busy machine, and what 1.19 and 1.21 left (runs after 1.23, before gate 2.18; owner decision of 2026-11-16)
+  - Guards for a busy machine (15.6 to 15.10): before a resource-hungry operation starts (training, evaluation over folds, filling the store, scoring an archive, measuring throughput), observe the host's free memory, whether the NPU is in use and whether another resource-hungry operation of the tool runs; one such operation per host and one encoder session on the NPU across processes, waiting or refusing as the analyst chooses and naming the holder; at the end record the limit, the counted peak, whether it waited and whether anything went to disk. The lock lives in `l2d-core`
+  - Reading archive entries at once (from 1.19): tests for a reader that panics, a failed file read inside a reader, and the freeze inside a batch while readers run; a reader checks the stop flag inside a long line, not only between pieces
+  - Bigger reader buffers (from 1.19): measure `ingest` with 128 pieces per reader against 64 on the AIT archive in release, alone, two rounds; keep it only if it is faster within the same memory limit
+  - Store mark sets on disk (from 1.21): the ids of a store mark set that outgrow the memory limit go to disk instead of the marking being refused, with the same result as in memory
+  - A real concurrent writer (from 1.21): a test where a second process writes to the store between the two content-hash reads of `mark_store`, and the mark set is refused
+  - Done when each item has its test or measurement, and the checks pass
+  - _Depends: 1.19, 1.21, 1.23_
+  - _Requirements: 15.6, 15.7, 15.8, 15.9, 15.10, 12.9, 13.8, 13.10, 16.1, 16.12_
+
 ---
 
 ## Milestone 2: Model Architecture Validation & NPU Inference

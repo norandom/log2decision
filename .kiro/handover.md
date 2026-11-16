@@ -138,6 +138,9 @@ Record as of 2026-11-15:
    an archive must be checked with the entry patterns it was made with
    (`require_input(summary, archive_entries)`), and a store mark set's ids are
    held in memory, refused rather than spilled.
+   Then 1.24 (added 2026-11-16 by the owner): guards for a busy machine
+   (15.6 to 15.10), reader robustness tests, 128 reader pieces measured,
+   store mark sets on disk, a real concurrent-writer test.
 2. Gate 2.18: does redaction make scores agnostic? On the 2.17 folds, run
    alone.
 3. 2.8 (re-scoped: grouping of a mark set and "close enough"), 2.11 outlier
@@ -259,9 +262,9 @@ From 2026-11-15:
   inputs.
 - `ingest` reads its frames back from disk although only their number is
   needed.
-- The mid-batch freeze for lack of memory has no test.
-- The hungry-operation gate and an NPU lock in `l2d-core` (requirement 15.6,
-  15.7, 15.8, 15.10).
+- The mid-batch freeze for lack of memory has no test (with readers: in 1.24).
+- The hungry-operation gate and an NPU lock in `l2d-core` (requirement 15.6
+  to 15.10): now task 1.24.
 - The session's placement rule against the provider's duplicated dequantize
   node: stated, not changed.
 - The 8-bit cut of 2.17 holds only while the byte graph stays bit-identical on
@@ -390,10 +393,8 @@ with a recommendation first).
   for every Rust project on this machine. Worktrees, reviewers and scratch
   copies build with their own target under `D:\BuildArtifacts\log2decision\`.
 - **Left-over build folders,** safe to remove when nothing runs:
-  `task-1.19-target`, `review-1.19-target`, `task-1.21-target` and
-  `review-1.21-target` under
-  `D:\BuildArtifacts\log2decision\` (the older ones were cleaned on
-  2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
+  `task-1.21-target` under `D:\BuildArtifacts\log2decision\` (the older ones,
+  including those of 1.19 and the 1.21 review, were cleaned on 2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
   The disk check of an all-entries AIT run asks about 88 to 99 GiB free on D:.
 - **Debug builds are slow where it matters.** Run evaluations and large archive
   cases in release.
