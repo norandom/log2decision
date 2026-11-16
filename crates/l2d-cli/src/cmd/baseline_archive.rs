@@ -78,8 +78,8 @@ use serde::Serialize;
 use super::archive_run::{ArchiveRun, DedupReport};
 use super::baseline::ScoreArgs;
 use super::common::{
-    Context, DEFAULT_TEXT_LIMIT, MemoryReport, Operation, ScorerReport, TEXT_CHARS, find_model,
-    load_scorer, output_bytes, required,
+    AtOnceDefault, Context, DEFAULT_TEXT_LIMIT, MemoryReport, Operation, ScorerReport, TEXT_CHARS,
+    find_model, load_scorer, output_bytes, required,
 };
 use super::ingest::{ArchiveReport, archive_report_text, fail_when_damaged};
 use crate::output::{JsonOut, human_bytes, output_failed, shown_text};
@@ -204,7 +204,8 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
     let scorer = load_scorer(&paths, &directory, &mut budget)?;
     let report = ScorerReport::of(&scorer, &directory);
 
-    let settings = args.archive.settings();
+    // One entry at a time unless asked: more were measured no faster here (task 1.19).
+    let settings = args.archive.settings(AtOnceDefault::One);
     let mut input = ZipInput::open(archive, &settings, &budget)?;
 
     // What the run holds beside the archive: the scorer, hashing the longest text an

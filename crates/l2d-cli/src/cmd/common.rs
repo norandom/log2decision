@@ -528,10 +528,24 @@ pub struct ArchiveArgs {
 
     /// zip: how many entries are read at the same time, 1 to 8; each takes about 19 MiB
     /// of the memory limit (with the default maximum record length), and a number that
-    /// does not fit is refused. The results do not depend on it [default: 2 when their
-    /// readers take at most an eighth of what the memory limit leaves, otherwise 1]
+    /// does not fit is refused. The results do not depend on it [default: `ingest` 2
+    /// when their readers take at most an eighth of what the memory limit leaves,
+    /// otherwise 1; `baseline score` 1, as more were measured no faster for it]
     #[arg(long, value_name = "N", value_parser = entries_at_once)]
     pub entries_at_once: Option<usize>,
+}
+
+/// How many entries a command reads at once when the analyst gives no number (task
+/// 1.19, measured on the AIT archive under 512 MB).
+#[derive(Debug, Clone, Copy)]
+pub enum AtOnceDefault {
+    /// The reader's own default: two entries when their readers fit an eighth of what
+    /// the memory limit leaves, otherwise one. `ingest`: reading is most of its time,
+    /// and two entries at once were faster.
+    WhenTheyFit,
+    /// One entry at a time. `baseline score`: scoring on the calling thread takes most
+    /// of its time, and more entries at once were not faster but held more memory.
+    One,
 }
 
 /// Reads the value of `--entries-at-once`.
@@ -559,12 +573,16 @@ fn record_bytes(text: &str) -> Result<u64, String> {
 }
 
 impl ArchiveArgs {
-    /// How the archive is read.
-    pub fn settings(&self) -> ZipInputSettings {
+    /// How the archive is read; `at_once` says how many entries are read at once when
+    /// `--entries-at-once` is not given.
+    pub fn settings(&self, at_once: AtOnceDefault) -> ZipInputSettings {
         ZipInputSettings {
             entries: self.entries.clone(),
             max_record_bytes: self.max_record_bytes.unwrap_or(DEFAULT_MAX_RECORD_BYTES),
-            entries_at_once: self.entries_at_once,
+            entries_at_once: self.entries_at_once.or(match at_once {
+                AtOnceDefault::WhenTheyFit => None,
+                AtOnceDefault::One => Some(1),
+            }),
         }
     }
 

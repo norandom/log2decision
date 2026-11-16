@@ -48,8 +48,8 @@ use serde::{Serialize, Serializer};
 
 use super::archive_run::{DedupReport, spill_when_needed};
 use super::common::{
-    ArchiveArgs, Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, LabelCounts, MemoryReport,
-    Operation, TEXT_CHARS, archive_input, read_input,
+    ArchiveArgs, AtOnceDefault, Context, DEFAULT_TEXT_LIMIT, InputArgs, InputReport, LabelCounts,
+    MemoryReport, Operation, TEXT_CHARS, archive_input, read_input,
 };
 use crate::output::{JsonOut, output_failed, shown_text};
 
@@ -146,7 +146,11 @@ struct WorkReport {
 /// Reads the archive at `archive` to its end and prints its report.
 fn run_archive(context: &Context, args: &IngestArgs, archive: &Path) -> Result<(), L2dError> {
     let mut budget = context.budget()?;
-    let mut input = ZipInput::open(archive, &args.archive.settings(), &budget)?;
+    let mut input = ZipInput::open(
+        archive,
+        &args.archive.settings(AtOnceDefault::WhenTheyFit),
+        &budget,
+    )?;
     // Nothing is kept in the directory, so its name need not be told from the time
     // alone: with the process id two runs in one second do not meet.
     let name = format!("ingest-<UTC time>-{}", std::process::id());

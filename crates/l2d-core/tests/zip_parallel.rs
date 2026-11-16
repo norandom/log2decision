@@ -108,7 +108,6 @@ fn read_with(
         batches.push(
             batch
                 .records()
-                .into_iter()
                 .map(|record| (record.text, record.first_position, record.occurrences))
                 .collect::<Vec<_>>(),
         );
@@ -403,7 +402,6 @@ fn a_read_stopped_early_leaves_the_summary_of_one_at_a_time() {
                 let batch = batches.next().unwrap().unwrap();
                 batch
                     .records()
-                    .into_iter()
                     .map(|record| (record.text, record.first_position, record.occurrences))
                     .collect()
             })
@@ -496,10 +494,30 @@ fn a_set_that_outgrows_a_tight_limit_goes_to_disk_with_entries_read_at_once() {
             ("four.log".into(), entry(lines, true), Pack::Stored),
         ]),
     );
-    // Two readers take some 38 MiB of the 48 MiB this limit leaves: the set goes to
-    // disk when entries are read at once, and has room in memory one at a time.
-    let limit = Some(PROCESS_BASELINE_BYTES + 48 * MIB);
     let spill = scratch.path("spill");
+    // What is held before the first record with two readers (some 38 MiB of readers,
+    // the buffers of deduplication on disk, the fixed memory of a batch), as the
+    // refusal under the smallest limit that reads at all states it.
+    let mut tight = budget(Some(PROCESS_BASELINE_BYTES + 4 * MIB + 256 * 1024), None);
+    let mut input = ZipInput::open(&path, &settings(Some(2)), &tight).unwrap();
+    input.spill_into(&spill, None).unwrap();
+    let message = input
+        .batches(&mut tight)
+        .next()
+        .expect("an item")
+        .expect_err("refused")
+        .to_string();
+    drop(input);
+    let needs = message
+        .split(" bytes) before its next record")
+        .next()
+        .filter(|before| before.len() < message.len())
+        .and_then(|before| before.rsplit('(').next()?.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("{message}"));
+    // 8 MiB beside that: the set goes to disk when entries are read at once (its growth
+    // to 500,000 keys takes 33 MiB), and has room in memory one at a time, where the
+    // memory of the second reader is free. The limit follows the readers' size.
+    let limit = Some(PROCESS_BASELINE_BYTES + needs + 8 * MIB);
     let read_at = |at_once: usize| {
         let (read, counted) = read_with(
             &path,
@@ -513,6 +531,7 @@ fn a_set_that_outgrows_a_tight_limit_goes_to_disk_with_entries_read_at_once() {
         read
     };
     let one = read_at(1);
+    assert!(one.dedup.is_none(), "one at a time has room in memory");
     assert_eq!(one.summary.input.records, 4 * u64::from(lines));
     assert_eq!(one.summary.input.distinct_texts, 2 * u64::from(lines));
     for (index, ((text, position, _), count)) in one.rows().into_iter().zip(&one.counts).enumerate()
