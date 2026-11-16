@@ -21,6 +21,8 @@ thiserror.workspace = true
 # patterns.
 flate2.workspace = true
 glob.workspace = true
+# Marking logs by a regular expression (`marks.rs`).
+regex.workspace = true
 
 # Writes the archives the tests read, and reads them as a second opinion. The tool
 # itself does not link it: see the entry in the workspace manifest.

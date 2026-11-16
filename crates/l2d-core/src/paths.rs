@@ -132,6 +132,17 @@ impl ProjectPaths {
         self.root.join("work")
     }
 
+    /// `marks/` — the analyst's mark sets (requirement 16.1, task 1.21).
+    pub fn marks_dir(&self) -> PathBuf {
+        self.root.join("marks")
+    }
+
+    /// `marks/<name>.json` — one mark set is one file. The name is used as given: the
+    /// mark sets check it before they build a path from it.
+    pub fn mark_set_path(&self, name: &str) -> PathBuf {
+        self.marks_dir().join(format!("{name}.json"))
+    }
+
     /// `reports/`
     pub fn reports_dir(&self) -> PathBuf {
         self.root.join("reports")

@@ -1935,6 +1935,17 @@ impl ZipBatches<'_> {
             .map(|report| report.path.as_str())
     }
 
+    /// Tells the archive, between batches, what the caller now holds beside it, as
+    /// [`ZipInput::hold_beside`] does before the read: for a caller whose holding grows
+    /// with the batches it takes (the marked positions of task 1.21). It counts from the
+    /// end of the next batch on: the batch after that is sized with it, and the read is
+    /// refused there, with it named among what is held, when it does not fit. The next
+    /// batch was sized already, so a caller keeps in `bytes` the room for what it may
+    /// take of that batch as well.
+    pub fn hold_beside(&mut self, bytes: u64) {
+        self.input.beside = bytes;
+    }
+
     /// Reads on until a batch with new texts is complete; `None` at the end of the
     /// archive.
     fn advance(&mut self) -> Result<Option<LogsFrame>, L2dError> {

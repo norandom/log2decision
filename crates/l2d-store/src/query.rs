@@ -920,7 +920,11 @@ impl Store {
 
     /// Counts the logs `compiled` names, up to `limit`, and adds up what reading them
     /// back takes.
-    fn measure(&self, compiled: &Compiled, limit: usize) -> Result<Matching, StoreError> {
+    pub(crate) fn measure(
+        &self,
+        compiled: &Compiled,
+        limit: usize,
+    ) -> Result<Matching, StoreError> {
         let mut matching = Matching {
             rows: 0,
             read_bytes: READ_FIXED_BYTES,
