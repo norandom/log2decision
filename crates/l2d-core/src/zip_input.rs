@@ -923,6 +923,18 @@ impl ZipInput {
         })
     }
 
+    /// The SHA-256 of the archive file, in lower-case hexadecimal, taken when it was
+    /// opened: the content hash its summary will carry. A caller checks it against what
+    /// it was given before it reads a batch (task 1.22: a mark set's input).
+    pub fn content_sha256(&self) -> &str {
+        &self.content_sha256
+    }
+
+    /// The path the archive was opened from.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// How many entries are read at once (task 1.19): decided when
     /// [`ZipInput::batches`] is called, from the settings, the memory limit and the
     /// entries that will be opened; 1 before.

@@ -271,7 +271,7 @@ fn human(bytes: u64) -> String {
 }
 
 /// `bytes` for a message that must state the figure: readable and exact.
-pub(crate) fn exact(bytes: u64) -> String {
+pub fn exact(bytes: u64) -> String {
     format!("{} ({bytes} bytes)", human(bytes))
 }
 

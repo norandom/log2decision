@@ -22,8 +22,9 @@ archive writes Parquet parts with a manifest. The encoder runs on the NPU as a
 tested session, and logs can be encoded into the store (2.7, library code); no
 command uses the encoder yet.
 
-**Update 2026-11-16: tasks 1.19 and 1.21 finished, reviewed (APPROVED) and
-merged; no agent is running. Next is 1.22 (see "Then, in order").**
+**Update 2026-11-16: tasks 1.19, 1.21 and 1.22 finished, reviewed (APPROVED)
+and merged. Next is 1.23 (see "Then, in order"); read the `- 1.22, review`
+note in tasks.md first, it carries two points into 1.23.**
 
 ### Finished tasks
 
@@ -63,6 +64,7 @@ merged; no agent is running. Next is 1.22 (see "Then, in order").**
 | 2.17 | Gate: stable entropy-patch encoder; vectors do not classify on unseen endpoints; owner decision | `28c69b3`, `8fded88` |
 | 1.19 | Archive entries read at once: `ingest` 2 by default (faster), `baseline score` 1 (not faster) | merge of `6088015` (2026-11-16) |
 | 1.21 | Mark sets on a file, archive or store; store logs by `log_id`, store hash over sorted ids (owner decision 2026-11-16) | merge of `a53708e` (2026-11-16) |
+| 1.22 | Redaction: proposals with counts, confirmed rules before hashing; on CSIC host and five endpoint paths proposed | merge of `cfd2ade` (2026-11-16) |
 
 Spec changes on 2026-11-15:
 - **Requirement 16**, the analyst flow (amendment
@@ -132,8 +134,8 @@ Record as of 2026-11-15:
 
 ### Then, in order (one heavy job at a time)
 
-1. 1.22 redaction, 1.23 the score fitted from a mark set with the
-   held-out-group report (1.21 mark sets done 2026-11-16). These need neither
+1. 1.23 the score fitted from a mark set with the held-out-group report
+   (1.21 mark sets and 1.22 redaction done 2026-11-16). These need neither
    the NPU nor the encoder. For 1.22 read the `- 1.21:` notes: a mark set of
    an archive must be checked with the entry patterns it was made with
    (`require_input(summary, archive_entries)`), and a store mark set's ids are
@@ -393,8 +395,8 @@ with a recommendation first).
   for every Rust project on this machine. Worktrees, reviewers and scratch
   copies build with their own target under `D:\BuildArtifacts\log2decision\`.
 - **Left-over build folders,** safe to remove when nothing runs:
-  `task-1.21-target` under `D:\BuildArtifacts\log2decision\` (the older ones,
-  including those of 1.19 and the 1.21 review, were cleaned on 2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
+  none at the moment under `D:\BuildArtifacts\log2decision\` (all finished
+  tasks' build folders, up to 1.21, were cleaned on 2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
   The disk check of an all-entries AIT run asks about 88 to 99 GiB free on D:.
 - **Debug builds are slow where it matters.** Run evaluations and large archive
   cases in release.

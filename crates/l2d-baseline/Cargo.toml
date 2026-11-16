@@ -11,6 +11,9 @@ l2d-core.workspace = true
 argmin.workspace = true
 argmin-math.workspace = true
 ndarray.workspace = true
+# Redaction rules that are patterns (`redact.rs`, task 1.22); the crate `l2d-core`
+# marks by it already (see the entry in the workspace manifest).
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -19,3 +22,5 @@ thiserror.workspace = true
 [dev-dependencies]
 linfa.workspace = true
 linfa-logistic.workspace = true
+# Writes the archives the redaction tests read, as in `l2d-core`.
+zip.workspace = true

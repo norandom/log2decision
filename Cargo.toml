@@ -109,7 +109,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", 
 # - `glob`: the entry patterns (`glob::Pattern` matching on the entry name; the crate's
 #   file-system walk is not used). It was in `Cargo.lock` already.
 #
-# `zip` is a dev-dependency only (of `l2d-core` and `l2d-cli`): it writes the archives
+# `zip` is a dev-dependency only (of `l2d-core`, `l2d-cli` and, since task 1.22,
+# `l2d-baseline`): it writes the archives
 # the tests read and reads them as a second opinion. The archive directory is read by
 # own code, not by the crate (deviation from the task text, recorded in the task notes
 # of 1.16): `zip::ZipArchive::new` reads the whole directory into memory before the
@@ -136,6 +137,8 @@ glob = "0.3"
 # (`std`, `perf`, `unicode`); this entry asks for nothing more. Checked on 2026-11-16
 # (`cargo tree -e features -i regex`): `Cargo.lock` gains no package (284 before and
 # after) and no feature; the guard test over `Cargo.lock` stays green.
+# Since task 1.22 `l2d-baseline` uses it too, for redaction rules that are patterns
+# (`redact.rs`): the same entry, no further feature, no package added.
 regex = "1.13"
 
 # Numerical solver of the baseline logistic regression (requirement 2.7). `argmin` is the
