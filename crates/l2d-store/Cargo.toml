@@ -16,3 +16,7 @@ thiserror.workspace = true
 # SIMD kernel for the distances of the vector search; see the workspace manifest for what
 # the dependency brings in.
 faer.workspace = true
+
+# Reads the mark-set files the tests save (task 1.21).
+[dev-dependencies]
+serde_json.workspace = true

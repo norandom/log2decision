@@ -108,6 +108,7 @@
 //! their own share of the caller's memory budget while they run, and leave an open
 //! store at the level [`Store::retained_bytes`] reports.
 
+pub mod marks;
 pub mod query;
 pub mod sqlite;
 pub mod vector;
@@ -127,6 +128,7 @@ use l2d_core::{
 use rusqlite::{Connection, Statement};
 use sha2::{Digest, Sha256};
 
+pub use marks::{CONTENT_HASH_SQL, SEQ, TEXT_BATCH_SQL};
 pub use query::{
     DISTANCE, Explain, Filter, ID, INDEX_PIECE_CHARS, INDEX_TEXT_FACTOR, MAX_INDEX_PIECES,
     Matching, PHRASE_BYTE_BYTES, QUERY, READ_FIXED_BYTES, READ_ROW_BYTES, SEARCH_FIXED_BYTES,

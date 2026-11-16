@@ -15,6 +15,7 @@ pub use polars;
 pub mod adapters;
 pub mod error;
 pub mod input;
+pub mod marks;
 pub mod memory;
 pub mod parts;
 pub mod paths;
@@ -28,6 +29,7 @@ pub use adapters::csic2010::{Csic2010Adapter, Csic2010Counts};
 pub use adapters::labelled::{LabelledAdapter, LabelledFormat};
 pub use adapters::lines::LinesAdapter;
 pub use input::{Accepted, Dedup, InputAdapter, Source};
+pub use marks::{MarkQuery, MarkSet, MarkStore, MarkedInput, MarkedSource, MarkedStore};
 pub use memory::{BatchChange, BatchPlan, MemoryBudget, MemorySettings};
 
 pub use error::{

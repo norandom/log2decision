@@ -131,6 +131,12 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", 
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 glob = "0.3"
+# Marking logs by a regular expression (requirement 16.1, task 1.21; `marks.rs`). The
+# crate was linked into the tool already, through `polars-io`, with its default features
+# (`std`, `perf`, `unicode`); this entry asks for nothing more. Checked on 2026-11-16
+# (`cargo tree -e features -i regex`): `Cargo.lock` gains no package (284 before and
+# after) and no feature; the guard test over `Cargo.lock` stays green.
+regex = "1.13"
 
 # Numerical solver of the baseline logistic regression (requirement 2.7). `argmin` is the
 # optimizer `linfa-logistic` itself is built on; it is used directly because

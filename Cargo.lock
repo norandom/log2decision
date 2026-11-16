@@ -1105,6 +1105,7 @@ dependencies = [
  "glob",
  "polars",
  "polars-io",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -1157,6 +1158,7 @@ dependencies = [
  "faer",
  "l2d-core",
  "rusqlite",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
 ]
