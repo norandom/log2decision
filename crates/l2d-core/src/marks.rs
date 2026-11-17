@@ -128,6 +128,8 @@ pub const FORMAT: u32 = 1;
 /// rules; a mark set without rules is still written as format 1, byte for byte as
 /// before.
 pub const FORMAT_WITH_REDACTIONS: u32 = 2;
+/// Explicit reviewed-selection exports; legacy formats remain unchanged.
+pub const FORMAT_REVIEWED_SELECTION: u32 = 3;
 
 /// The most redaction rules a mark set keeps.
 pub const MAX_REDACTIONS: usize = 1024;
@@ -197,6 +199,12 @@ static SAVES: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarkQuery {
+    /// Exact reviewed members, not a replayable search. Revision references point
+    /// to the persisted SelectionSet and its explicit review receipt.
+    ReviewedSelection {
+        selection_revision: String,
+        review_revision: String,
+    },
     /// The logs whose text contains the phrase, byte for byte.
     Phrase { phrase: String },
     /// The logs whose text the regular expression matches anywhere.
@@ -354,6 +362,29 @@ struct FileIn {
 }
 
 impl MarkSet {
+    pub(crate) fn from_reviewed_selection(
+        name: &str,
+        label: Label,
+        query: MarkQuery,
+        source: MarkedSource,
+        positions: Vec<u64>,
+        ids: Vec<String>,
+    ) -> Result<Self, L2dError> {
+        check_name(name)?;
+        check_label(label)?;
+        Ok(Self {
+            name: name.into(),
+            label,
+            query,
+            source,
+            positions,
+            ids: Ids::Memory(ids),
+            deselected: Vec::new(),
+            deselected_ids: Ids::default(),
+            redactions: Vec::new(),
+        })
+    }
+
     /// Marks the logs of a file the caller has read (`logs` and `summary` from an input
     /// adapter) by `query`, as the mark set `name` with `label`.
     ///
@@ -632,7 +663,7 @@ impl MarkSet {
                             other => other,
                         })?;
                 }
-                MarkQuery::Positions { .. } => {}
+                MarkQuery::Positions { .. } | MarkQuery::ReviewedSelection { .. } => {}
             }
             ids.finish()
         })();
@@ -1015,7 +1046,9 @@ impl MarkSet {
     /// The mark set as its file holds it.
     fn file_out(&self) -> FileOut<'_> {
         FileOut {
-            format: if self.redactions.is_empty() {
+            format: if matches!(self.query, MarkQuery::ReviewedSelection { .. }) {
+                FORMAT_REVIEWED_SELECTION
+            } else if self.redactions.is_empty() {
                 FORMAT
             } else {
                 FORMAT_WITH_REDACTIONS
@@ -1252,6 +1285,9 @@ impl Matcher {
     fn check(query: &MarkQuery) -> Result<u64, L2dError> {
         let invalid = |detail: String| Err(L2dError::InvalidInput { detail });
         match query {
+            MarkQuery::ReviewedSelection { .. } => {
+                invalid("reviewed selections are exact members, not replayable queries".into())
+            }
             MarkQuery::Phrase { phrase } if phrase.is_empty() => {
                 invalid("the phrase to mark by is empty".into())
             }
@@ -1278,6 +1314,9 @@ impl Matcher {
     fn new(query: &MarkQuery) -> Result<Self, L2dError> {
         let invalid = |detail: String| Err(L2dError::InvalidInput { detail });
         match query {
+            MarkQuery::ReviewedSelection { .. } => {
+                invalid("reviewed selections are exact members, not replayable queries".into())
+            }
             MarkQuery::Phrase { phrase } => Ok(Self::Phrase(phrase.clone())),
             MarkQuery::Regex { pattern } => RegexBuilder::new(pattern)
                 .size_limit(REGEX_SIZE_LIMIT)
@@ -1603,7 +1642,9 @@ fn parse_file(bytes: &[u8], path: &Path, name: &str) -> Result<MarkSet, L2dError
 }
 
 fn check_file(file: FileIn, path: &Path, name: &str) -> Result<MarkSet, L2dError> {
-    if (file.format != FORMAT && file.format != FORMAT_WITH_REDACTIONS) || file.kind != KIND {
+    if (![FORMAT, FORMAT_WITH_REDACTIONS, FORMAT_REVIEWED_SELECTION].contains(&file.format))
+        || file.kind != KIND
+    {
         return Err(not_a_mark_set(
             path,
             format!(
@@ -1613,7 +1654,9 @@ fn check_file(file: FileIn, path: &Path, name: &str) -> Result<MarkSet, L2dError
             ),
         ));
     }
-    if (file.format == FORMAT_WITH_REDACTIONS) == file.redactions.is_empty() {
+    if file.format != FORMAT_REVIEWED_SELECTION
+        && (file.format == FORMAT_WITH_REDACTIONS) == file.redactions.is_empty()
+    {
         return Err(not_a_mark_set(
             path,
             format!(
@@ -1623,6 +1666,26 @@ fn check_file(file: FileIn, path: &Path, name: &str) -> Result<MarkSet, L2dError
                 file.redactions.len()
             ),
         ));
+    }
+    let reviewed = matches!(file.query, MarkQuery::ReviewedSelection { .. });
+    if reviewed != (file.format == FORMAT_REVIEWED_SELECTION) {
+        return Err(not_a_mark_set(
+            path,
+            "reviewed-selection provenance requires explicit format 3",
+        ));
+    }
+    if let MarkQuery::ReviewedSelection {
+        selection_revision,
+        review_revision,
+    } = &file.query
+        && [selection_revision, review_revision].iter().any(|s| {
+            s.len() != 64
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(not_a_mark_set(path, "invalid reviewed-selection revision"));
     }
     check_redactions(&file.redactions).map_err(|error| match error {
         L2dError::InvalidInput { detail } => not_a_mark_set(path, detail),

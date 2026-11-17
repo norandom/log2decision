@@ -284,3 +284,57 @@ impl MarkStore for Store {
         Ok(())
     }
 }
+
+impl l2d_core::selections::SelectionStore for Store {
+    fn fts5_trigram_ids(
+        &self,
+        expression: &str,
+        budget: &mut MemoryBudget,
+        each: &mut dyn FnMut(&str) -> Result<(), L2dError>,
+    ) -> Result<u64, L2dError> {
+        if expression.is_empty() || expression.len() > 4096 {
+            return Err(L2dError::InvalidInput {
+                detail: "FTS5 expression requires 1 to 4096 bytes".into(),
+            });
+        }
+        {
+            // A prefix can expand to arbitrarily many vocabulary entries. Its
+            // native readers cannot be bounded by the supplied expression length.
+            // FTS5 quotes literal stars; doubled quotes leave this state unchanged.
+            let mut quoted = false;
+            for byte in expression.bytes() {
+                if byte == b'"' {
+                    quoted = !quoted;
+                }
+                if byte == b'*' && !quoted {
+                    return Err(L2dError::Refused { reason: "FTS5 prefix expansion (*) outside quoted text is not supported within the bounded native-memory contract; use complete terms or quoted literal text".into() });
+                }
+            }
+        }
+        let filter = Filter::default();
+        let compiled = Compiled::new(&filter)?;
+        Ok(self.search(&compiled, 0, "", budget, |budget, _| {
+            // self.search reserves the existing database/page-cache share and
+            // opens the read transaction first. Determine the longest text in
+            // that SAME snapshot, then reserve native MATCH readers before
+            // preparing MATCH, counting rows, or invoking any callback.
+            let longest = self.longest_text_bytes()?;
+            let bytes = expression.len() as u64;
+            let characters = expression.chars().count() as u64;
+            // Charge every expression byte/character, including syntax, rather
+            // than attempting to undercount parsed phrase/compound operands.
+            let native = crate::query::PHRASE_BYTE_BYTES.saturating_mul(bytes)
+                .saturating_add(crate::query::INDEX_TEXT_FACTOR.saturating_mul(characters).saturating_mul(longest));
+            budget.require_whole(native, "FTS5 native trigram readers and longest-text position lists before MATCH execution").map_err(StoreError::Memory)?;
+            budget.hold(budget.held_bytes().saturating_add(native));
+            let fail = |e| self.failure(e);
+            let total: u64 = self.connection.query_row("SELECT count(*) FROM logs", [], |r| r.get(0)).map_err(fail)?;
+            let mut statement = self.connection.prepare("SELECT logs.id FROM logs_fts JOIN logs ON logs.seq = logs_fts.rowid WHERE logs_fts MATCH ?1").map_err(fail)?;
+            let mut rows = statement.query([expression]).map_err(fail)?;
+            while let Some(row) = rows.next().map_err(fail)? {
+                each(row.get_ref(0).map_err(fail)?.as_str().map_err(|e| self.failure(e.into()))?).map_err(StoreError::Memory)?;
+            }
+            Ok(total)
+        })?)
+    }
+}

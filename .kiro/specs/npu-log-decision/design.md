@@ -1499,3 +1499,51 @@ by allowing room for the configured maximum expanded next record before appendin
 Post-fix smoke preserves the full input report and counts, with counted peak
 536,483,110 bytes under the 536,870,912-byte limit (measured OS peak 419,237,888).
 Evidence and raw reports: D:\BuildArtifacts\log2decision\task-1.24\.
+
+## Task 1.26 as built — 2026-11-17
+
+`SelectionSet` is a versioned, unlabelled artifact separate from `MarkSet`. It
+persists the query mode and flags, source hash and archive-entry scope, member
+cap, exact positions or store IDs, completeness and explicit review receipt.
+Literal substring, whole-record Unicode glob (`*`, `?`, escaped literals) and
+regex default to case-sensitive matching with an explicit insensitive option.
+`Fts5Trigram` exposes the existing store's intrinsically insensitive SQLite
+trigram expression semantics; it is not word-token search. File/archive FTS
+refuses. Archive-entry filters are separate from content glob matching.
+
+Membership has a fixed precharged cap; overflow refuses instead of returning a
+partial selection as complete. Archive retention uses a fixed reservation across
+batches and rechecks the archive hash after scanning. Save streams an immutable
+JSON artifact without replacing an existing destination; revision hashing also
+streams. Load reserves metadata/member parsing space before allocation. Review
+previews pin source and selection revision. Explicit review records analyst/action
+and per-member good, bad, unresolved or conflict decisions. For store selections,
+`distinct_scanned` counts source-qualified log IDs, not distinct texts or
+independent support. Catalogue/vector support must deduplicate texts separately.
+
+Reviewed exports introduce explicit MarkSet format 3 and `ReviewedSelection`
+query provenance containing selection/review revision references. Existing
+formats 1/2 and their queries retain their behavior. Format 3 supports the existing
+redaction rules and fitting path; readers that do not know the format refuse it.
+Persist the reviewed SelectionSet as the detailed action receipt before or
+alongside exported marks in the discovery CLI. Exports retain the requested
+resolved label plus unresolved/conflicting members as de-selected exclusions,
+so one-MarkSet fitting cannot treat these as assumed opposite-class background.
+`count()` includes exclusions; `selected_count()` does not. Exact member-kind and
+selected-plus-excluded capacities match downstream retained-memory accounting.
+
+Direct FTS reserves the existing `PHRASE_BYTE_BYTES` and `INDEX_TEXT_FACTOR`
+workspace over the whole expression, using longest stored text read in the same
+transaction, before preparing/counting/executing MATCH. Unquoted prefix expansion
+refuses because vocabulary growth cannot be bounded by expression length; quoted
+literal stars remain supported. The native regression reproduced 126,065,960
+SQLite bytes under an admitted 40 MiB usable budget before correction. The fixed
+path refuses with 21,848–30,576 bytes of SQLite growth and executes long/compound
+queries within the larger declared budget, preserving exact results. Tests cover
+one byte below/at the required reservation, zero callbacks on refusal, caller
+budget restoration and Rust plus native SQLite heap.
+
+Independent re-review approved the change. Full workspace: 831 passed, 0 failed,
+50 ignored before final capacity/FTS corrections; after those scoped corrections,
+54 affected tests, the native regression, fmt, Clippy and CLI help passed. Evidence:
+D:\BuildArtifacts\log2decision\task-1.26\. Discovery commands remain task 1.28.

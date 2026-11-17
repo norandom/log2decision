@@ -37,9 +37,24 @@ throughput reservations; outside-tool NPU utilization is unknown. These are not
 claims that all of Requirements 15.2/15.12 are closed.
 
 Keep work scoped to this project: do not monitor, inspect or wait for unrelated
-processes. Serialize this project's own heavy jobs. Next: task 1.26.
+processes. Serialize this project's own heavy jobs.
 
-Remaining execution order: 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
+Task 1.26 is complete (reviewed commit `65a00fb`): unlabelled SelectionSets,
+literal/whole-record glob/regex and explicit store FTS5 trigram modes, source-bound
+review previews and format-3 reviewed MarkSet exports. Unresolved/conflicting
+members remain explicit exclusions from both supervised classes. Existing MarkSet
+formats 1/2 retain their behavior. Persist the reviewed SelectionSet receipt
+alongside exports when building the discovery CLI (1.28). Store counts are
+source-qualified log IDs, not independent text support.
+Independent re-review approved the native FTS memory fix. The full workspace had
+831 passed, 0 failed, 50 ignored before scoped capacity/FTS corrections; all 54
+affected tests, native SQLite heap regression, fmt, Clippy and CLI help passed on
+the corrected source. Evidence: `D:\BuildArtifacts\log2decision\task-1.26\`.
+FTS is store-only and intrinsically insensitive; unquoted prefix expansion
+refuses because its native allocation cannot be bounded by expression length.
+Selection membership overflow refuses explicitly. Next: task 1.27.
+
+Remaining execution order: 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be
