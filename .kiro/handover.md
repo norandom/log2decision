@@ -16,10 +16,15 @@ review found and then approved fixes for redaction expansion before a budget che
 and held-out reporting copies before refusal. Verification: 788 passed, 0 failed,
 49 ignored; fmt, Clippy and CLI help passed. Logs are in
 `D:\BuildArtifacts\log2decision\fix-1.23-memory\`. Both old task worktrees were
-verified clean/merged and removed. Next: task 1.25. The accepted roadmap is saved
+verified clean/merged and removed. Task 1.25 is complete (reviewed commit `cd103f6`):
+file/archive phrase and regex marking, matching text/positions, whole JSON and
+optional saved MarkSets. Independent review approved; 9 task tests and 797
+workspace tests passed (0 failed, 49 ignored); fmt, Clippy and actual CLI smoke
+passed. Logs: `D:\BuildArtifacts\log2decision\task-1.25\`. Next: task 1.24.
+The accepted roadmap is saved
 with the specification; no later implementation task has been marked complete.
 
-Execution order: 1.25 → 1.24 → 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
+Remaining execution order: 1.24 → 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be

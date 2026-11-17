@@ -2,7 +2,9 @@
 
 ## Active roadmap — owner alignment, 2026-11-17
 
-This order supersedes earlier sequencing notes; completed task records remain historical evidence. Task 1.23 wrap-up was verified and merged as `883ce5e` on 2026-11-17, including two memory fixes found by fresh independent review. The source passed 788 workspace tests (0 failed, 49 ignored), 27 targeted tests, fmt, Clippy with warnings denied and CLI help. Both old task worktrees were verified and removed. Next is 1.25; no future task is completed by the spec update.
+This order supersedes earlier sequencing notes; completed task records remain historical evidence. Task 1.23 wrap-up was verified and merged as `883ce5e` on 2026-11-17, including two memory fixes found by fresh independent review. The source passed 788 workspace tests (0 failed, 49 ignored), 27 targeted tests, fmt, Clippy with warnings denied and CLI help. Both old task worktrees were verified and removed. Task 1.25 is also complete (reviewed commit `cd103f6`); next is 1.24.
+
+1.25 review (2026-11-17): APPROVED independently. Nine task tests passed; workspace 797 passed, 0 failed, 49 ignored; fmt, Clippy with warnings denied, help and actual saved-regex smoke passed. Merged source matches the reviewed commit; main-checkout fmt/help passed. Evidence: `D:\BuildArtifacts\log2decision\task-1.25\`. `l2d mark` uses existing MarkSet APIs, a second bounded archive pass for borrowed matching text, unchanged entry selection and source checks before saving. Damaged archives do not save marks and preserve the whole-report plus error JSON-line contract. The first-pass summary is dropped before reopening; fixed retained-set/output reservation avoids reader-lag growth. No dependencies or core changes. RED: six flag-off failures, then two additional tests exposed missing entry summary and premature reader-count reporting. Temporary flag removed.
 
 1.23 follow-up evidence: `D:\BuildArtifacts\log2decision\fix-1.23-memory\`. RED showed redaction allocating 16,778,330 bytes and reporting 4,870,235/5,117,269 bytes with only 65,536 bytes available. Nonallocating redaction bounds and report-workspace preflight now refuse at about 550 bytes; successful reports retain the same results and restore the caller's hold. Independent re-review: APPROVED. Conservative estimates can refuse workloads whose actual heap would fit. This closes the earlier held-out-copy follow-up.
 
@@ -287,7 +289,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 1.7, 1.12, 1.22_
   - _Requirements: 16.6, 16.7, 16.8, 16.9, 6.1, 6.6_
 
-- [ ] 1.25 `l2d mark`: search and mark a file or an archive from the command line (runs after 1.23, before 1.24; owner decision of 2026-11-16)
+- [x] 1.25 `l2d mark`: search and mark a file or an archive from the command line (runs after 1.23, before 1.24; owner decision of 2026-11-16)
   - Pulled forward from 2.9 so that a new dataset can be searched from the command line before the store and the NPU are wired: `l2d mark --input <file|archive> (--phrase <text> | --regex <pattern>) [--label bad|good] [--name <name>] [--entry <pattern>...]`
   - Prints the matching logs with their positions (entry path and line for an archive) and their count, in text and with `--json`; with `--name` saves the mark set as `marks/<name>.json` (1.21) in the project; refused when a mark set of that name was made on another input
   - Under the memory limit of the global options, as `ingest` and `baseline score`; an archive read in batches with the entries-at-once default of `ingest`
