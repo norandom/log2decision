@@ -1263,6 +1263,11 @@ pub fn evaluate_with_progress(
     budget: &MemoryBudget,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Vec<ArrangementResult>, L2dError> {
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "fold evaluation",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )?;
     if workers == 0 {
         return invalid("an evaluation needs at least one worker".into());
     }
@@ -1294,6 +1299,7 @@ pub fn evaluate_with_progress(
     }
 
     let next = AtomicUsize::new(0);
+    let usages: Vec<_> = budgets.iter().map(MemoryBudget::usage).collect();
     let done = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let slots: Mutex<Vec<Option<Result<FoldResult, L2dError>>>> =
@@ -1330,6 +1336,19 @@ pub fn evaluate_with_progress(
         }
     });
 
+    // Workers execute concurrently. Sum their counted peaks as a conservative
+    // bound, retaining the parent's already-held data and only one process baseline.
+    budget.count_peak(
+        usages
+            .iter()
+            .map(|usage| {
+                usage
+                    .report()
+                    .counted_peak_bytes
+                    .saturating_sub(PROCESS_BASELINE_BYTES)
+            })
+            .sum(),
+    );
     let mut slots = slots
         .into_inner()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1359,6 +1378,7 @@ pub fn evaluate_with_progress(
         }
         found.push(ArrangementResult { modes: by_mode });
     }
+    guard.finish()?;
     Ok(found)
 }
 

@@ -188,6 +188,11 @@ pub fn held_out_report(
     settings: &HeldOutSettings,
     budget: &mut MemoryBudget,
 ) -> Result<Option<HeldOutReport>, L2dError> {
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "held-out fold evaluation",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )?;
     settings.validate()?;
     if fit
         .logs
@@ -202,6 +207,7 @@ pub fn held_out_report(
     let before = budget.held_bytes();
     let report = report(fit, settings, budget, before);
     budget.hold(before);
+    guard.finish()?;
     report.map(Some)
 }
 

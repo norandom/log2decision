@@ -5,6 +5,8 @@
 //! Requirements 1.1, 1.2, 1.6, 2.1, 2.2, 6.4 to 6.6, 10.3 to 10.7, 11.1, 11.5 to 11.7,
 //! 11.9, 11.10, 12.2, 12.3, 12.6, 12.8.
 
+mod support;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -200,7 +202,7 @@ fn stdout(output: &Output) -> String {
 }
 
 fn stderr(output: &Output) -> String {
-    String::from_utf8(output.stderr.clone()).expect("stderr is UTF-8")
+    support::diagnostics(output)
 }
 
 fn rows<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {

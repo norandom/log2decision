@@ -195,6 +195,11 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
     )?;
     let paths = context.paths()?;
     let mut budget = context.budget()?;
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "archive scoring",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )?;
     let directory = find_model(
         &paths.baselines_dir(),
         "--baseline",
@@ -276,6 +281,7 @@ pub fn score(context: &Context, args: &ScoreArgs, archive: &Path) -> Result<(), 
     };
     let summary = outcome?;
     ended.map_err(output_failed)?;
+    guard.finish()?;
     fail_when_damaged(&summary, archive)
 }
 

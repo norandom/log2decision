@@ -17,9 +17,12 @@ import json
 import os
 import time
 from ctypes import wintypes
+from pathlib import Path
+import msvcrt
 
 GIB = 1024 ** 3
-LOCK = os.environ.get("L2D_HUNGRY_LOCK", r"D:\BuildArtifacts\log2decision\hungry.lock")
+LOCK = str(Path(os.environ.get("ProgramData", r"C:\ProgramData")) /
+           "log2decision-resource-gates" / "host.lock")
 
 
 class _IoCounters(ctypes.Structure):
@@ -100,48 +103,129 @@ def host_memory() -> dict:
 
 
 class hungry:
-    """`with hungry("training fold 0 seed 0"):` holds the project's lock for hungry
-    processes; a second one refuses and names the holder."""
+    """Host-wide gate shared with l2d-core. OS ownership, never PID-file deletion.
 
-    def __init__(self, name: str):
-        self.name = name
+    `wait=False` refuses naming the holder; `wait=True` waits and records that fact.
+    Hardware NPU utilization by software outside this protocol remains unknown.
+    """
+
+    def __init__(self, name: str, wait: bool = False):
+        if not name or len(name.encode()) > 512:
+            raise ValueError("operation name must contain 1 to 512 bytes")
+        self.name, self.wait = name, wait
         self.handle = None
+        self.waited = False
+        self.observation = None
+        self.witness = None
+        self.witness_path = None
+
+    @staticmethod
+    def _holder(path, observer=None):
+        started = time.monotonic()
+        while True:
+            try:
+                with open(Path(path).with_suffix(".holder.json"), encoding="utf-8") as handle:
+                    holder = json.loads(handle.read(4096))
+                name = holder.get("lease_file", "")
+                if not isinstance(holder.get("operation"), str) or not isinstance(holder.get("process_id"), int) or not name or Path(name).name != name:
+                    raise ValueError("invalid holder or lease witness")
+                witness = os.open(Path(path).with_name(name), os.O_RDWR | os.O_BINARY)
+                try:
+                    if hungry._try(witness):
+                        raise ValueError("stale or incomplete holder publication")
+                finally:
+                    os.close(witness)
+                return holder
+            except (OSError, ValueError, AttributeError) as error:
+                probe = os.open(path, os.O_RDWR | os.O_BINARY)
+                try:
+                    if hungry._try(probe):
+                        return None
+                finally:
+                    os.close(probe)
+                if time.monotonic() - started >= 5:
+                    raise SystemExit(f"refused: cannot read resource holder: {error}") from error
+                if observer is not None:
+                    observer.waited = True
+                time.sleep(0.01)
+
+    @staticmethod
+    def _try(handle):
+        os.lseek(handle, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(handle, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as error:
+            if error.errno in (13, 36):
+                return False
+            raise
+
+    @classmethod
+    def _observe(cls, path, observer=None):
+        handle = os.open(path, os.O_CREAT | os.O_RDWR | os.O_BINARY)
+        try:
+            return None if cls._try(handle) else cls._holder(path, observer)
+        finally:
+            os.close(handle)
 
     def __enter__(self):
         os.makedirs(os.path.dirname(LOCK), exist_ok=True)
+        self.observation = {"host_memory": host_memory(),
+                            "host_holder": self._observe(LOCK, self),
+                            "npu_holder": self._observe(str(Path(LOCK).with_name("npu.lock")), self),
+                            "external_npu_utilization": "unknown"}
+        self.handle = os.open(LOCK, os.O_CREAT | os.O_RDWR | os.O_BINARY)
         try:
-            self.handle = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+            announced = False
+            while not self._try(self.handle):
+                holder = self._holder(LOCK, self)
+                if holder is None:
+                    continue
+                message = f"{holder['operation']} (process {holder['process_id']}) holds host; requested {self.name}"
+                if not self.wait:
+                    raise SystemExit(f"refused: {message}")
+                if not announced:
+                    print(f"waiting: {message}", file=__import__('sys').stderr, flush=True)
+                    announced = True
+                self.waited = True
+                time.sleep(0.025)
+            name = f"lease-{os.getpid()}-{time.time_ns()}.lock"
+            self.witness_path = Path(LOCK).with_name(name)
+            self.witness = os.open(self.witness_path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_BINARY)
+            if not self._try(self.witness):
+                raise OSError("new lease witness was busy")
+            publication = self.witness_path.with_suffix(".publishing")
+            with open(publication, "w", encoding="utf-8") as handle:
+                json.dump({"process_id": os.getpid(), "operation": self.name, "lease_file": name}, handle)
+            os.replace(publication, Path(LOCK).with_suffix(".holder.json"))
+            return self
+        except BaseException:
+            if self.witness is not None:
+                os.close(self.witness)
+                self.witness = None
+            os.close(self.handle)
+            self.handle = None
+            raise
+
+    def report(self):
+        return {"gate_held": True, "operation": self.name, "waited_for_host": self.waited,
+                "observation": self.observation, "memory_scope": "this process only",
+                "spilled": False}
+
+    def __exit__(self, *args):
+        if self.handle is not None:
             try:
-                with open(LOCK, encoding="utf-8") as handle:
-                    holder = json.load(handle)
-            except (OSError, ValueError):
-                holder = "unknown"
-            # A lock whose process is gone is stale.
-            pid = holder.get("pid") if isinstance(holder, dict) else None
-            if pid and not _alive(pid):
-                os.remove(LOCK)
-                return self.__enter__()
-            raise SystemExit(f"refused: another hungry process of the project holds the host: {holder}")
-        os.write(self.handle, json.dumps({"pid": os.getpid(), "operation": self.name,
-                                          "since": time.strftime("%Y-%m-%d %H:%M:%S")}).encode())
-        os.close(self.handle)
-        return self
-
-    def __exit__(self, *_):
-        try:
-            os.remove(LOCK)
-        except OSError:
-            pass
-
-
-def _alive(pid: int) -> bool:
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenProcess.restype = wintypes.HANDLE
-    handle = kernel.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return False
-    code = wintypes.DWORD()
-    kernel.GetExitCodeProcess(wintypes.HANDLE(handle), ctypes.byref(code))
-    kernel.CloseHandle(wintypes.HANDLE(handle))
-    return code.value == 259                                  # STILL_ACTIVE
+                try:
+                    Path(LOCK).with_suffix(".holder.json").unlink(missing_ok=True)
+                finally:
+                    if self.witness is not None:
+                        os.close(self.witness)
+                        self.witness = None
+                        self.witness_path.unlink(missing_ok=True)
+            except OSError as error:
+                if not args or args[0] is None:
+                    raise
+                print(f"resource gate cleanup failed: {error}", file=__import__('sys').stderr)
+            finally:
+                os.close(self.handle)
+                self.handle = None

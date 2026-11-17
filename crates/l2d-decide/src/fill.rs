@@ -537,6 +537,16 @@ pub fn encode_into_store<E: LogEncoder>(
     source: &str,
     budget: &mut MemoryBudget,
 ) -> Result<FillReport, FillError> {
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "store fill",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )
+    .map_err(|error| FillError {
+        cause: Box::new(FillCause::Memory(error)),
+        logs: logs.len() as u64,
+        encoded: 0,
+    })?;
     let held_before = budget.held_bytes();
     let mut encoded = 0u64;
     let result = fill(
@@ -549,6 +559,11 @@ pub fn encode_into_store<E: LogEncoder>(
         &mut encoded,
     );
     budget.hold(held_before);
+    // A record-write failure after commit must not become a FillError, whose
+    // contract says that nothing was stored. Preserve the transaction's outcome.
+    if let Err(error) = guard.finish() {
+        eprintln!("{error}");
+    }
     result.map_err(|cause| FillError {
         cause: Box::new(cause),
         logs: logs.len() as u64,

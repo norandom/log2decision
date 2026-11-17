@@ -1352,7 +1352,7 @@ Where the design stands against them:
 
 What follows for the design. The criteria are Requirement 15 since 2026-11-14 (resource management as a key design objective for an analyst with a busy machine); its wording is with the owner for review, and no task implements the gate yet:
 
-- **A gate for hungry processes** in `l2d-core`: a named lock for the project on the machine, taken by the commands and tests that count as hungry and by the development scripts through a small wrapper. A second process waits with a message that names the holder, or refuses when asked not to wait. The NPU gets a lock of its own, so that one session at a time is a property of the tool and not of the people running it. The run record states that the gate was held.
+- **A gate for hungry processes** in `l2d-core`: host-wide OS file locks shared across projects/worktrees by cooperating tool operations, with a separate NPU lock. Task 1.24 implements wait/refuse with holder identification and final accounting; see the as-built note below for coverage and limits. It does not monitor unrelated processes.
 - **The trainer reads batches from a source,** not a slice of all records, and its calibration texts are drawn from the stream. Its contract in the Training section is changed when the training task is specified.
 - **Development pipelines follow the same rules.** A training or qualification script reads memory-mapped files or a batch iterator, states its peak memory in its record, takes the gate, and is run alone on the machine. A run that needed a restart says so in its record.
 - **Operations that need all rows at once** stay refusals for now; each is a candidate for a spilling form (out-of-core fit, sampled or partitioned assessments), decided per operation when it is built.
@@ -1447,3 +1447,55 @@ not hidden by reporting quality only among supported cases.
 Observed outcomes produce a new evidence revision; queue suggestions never become
 training labels automatically. Explicit refit/recalibration invalidates prior
 qualification for changed artifacts and triggers renewed evaluation.
+
+## Task 1.24 as built — 2026-11-17
+
+`ResourceGuard` uses host/NPU OS file locks under ProgramData, shared by cooperating
+Rust and Python operations across project directories. Atomic holder publication
+and a locked acquisition witness distinguish live ownership from stale metadata.
+CLI `--busy wait|refuse` names the holder. Guards are thread-affine; nested work
+reuses admission. EncoderSession holds host then NPU admission for its lifetime,
+which avoids session-before-fill lock-order deadlocks but also reserves the host
+while that session is idle. Raw multi-session throughput tests run within one
+admitted measurement. External NPU utilization remains explicitly unknown.
+
+Admission covers CLI baseline fitting, mark-set fitting, fold evaluation and
+held-out reporting, archive scoring, encode/store fill, direct store fill
+transactions, EncoderSession opening, the documented throughput tests and the
+existing hg17 training hook. Numerical `BaselineScorer::fit` primitives require
+caller-owned operation admission; fold workers belong to their parent's admitted
+operation. Historical training pipelines without that hook have not been audited
+into compliance by this task.
+
+Final resource records under TEMP/log2decision-resource-records retain limit,
+counted reservation peak, waiting, spilling and observed holders/free RAM through
+budget lifetime. Direct fill accounting preserves the original admission's wait
+and holder, including refused additions. hg17 records completion or failure while
+admission is held; accounting errors do not mask the primary training exception.
+Native provider memory is not included in Rust throughput reservations: those
+records state their accounting scope and native_memory_unaccounted, with measured
+OS process peaks separate. This task does not close the broader native-memory
+coverage gaps in Requirements 15.2/15.12.
+
+Store mark IDs spill through bounded sorted runs and binary merges. Membership,
+iteration, comparison and serialization propagate disk errors; explicit ID
+materialization requires a budget. Persistence streams IDs and bounds non-ID JSON
+before parsing. Memory/disk forms preserve canonical bytes, source identity,
+ordering and de-selections. Large-file loading accepts the canonical unescaped
+64-character hexadecimal IDs written by this tool; noncanonical escaped ID
+spellings are refused, while the whole-file path may accept them. Reader tests
+cover actual read failure, thread panic, cancellation inside a long rejected line
+and freezing to disk while readers are active. An actual second store writer
+between source-hash reads causes refusal before saving.
+
+The two-round release comparison on AIT russellmitchell.zip, `*.log`, 512 MiB,
+retains 64-piece batches. Forced two readers: 64 takes 44.312/46.744 s versus
+128 at 38.688/40.702 s. Defaults: 64 admits two readers and takes 42.511/41.295 s;
+128 admits one and takes 55.968/57.383 s. Admission policy was not retuned.
+All eight runs preserve 22,880,272 records, 5,642,082 distinct texts and input
+identity. These are observed timings, not claims of exclusive host availability.
+A conservative batch-reservation overlap discovered by the comparison was fixed
+by allowing room for the configured maximum expanded next record before appending.
+Post-fix smoke preserves the full input report and counts, with counted peak
+536,483,110 bytes under the 536,870,912-byte limit (measured OS peak 419,237,888).
+Evidence and raw reports: D:\BuildArtifacts\log2decision\task-1.24\.

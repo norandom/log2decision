@@ -2,6 +2,8 @@
 //! as the built binary: the ratios go to Parquet parts in a work directory, one row per
 //! distinct log, and the deduplication goes on on disk when it outgrows the memory.
 
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -123,7 +125,7 @@ fn stdout(output: &Output) -> String {
 }
 
 fn stderr(output: &Output) -> String {
-    String::from_utf8(output.stderr.clone()).expect("stderr is UTF-8")
+    support::diagnostics(output)
 }
 
 fn gzip(content: &[u8]) -> Vec<u8> {

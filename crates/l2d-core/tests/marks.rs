@@ -146,7 +146,7 @@ fn phrase_regex_and_positions_mark_the_expected_logs_on_the_fixture() {
     assert_eq!(input.path, fixture_path().to_string_lossy());
     assert_eq!(input.archive_entries, None);
     assert!(phrase.store().is_none());
-    assert!(phrase.ids().is_empty());
+    assert!(phrase.ids(&budget).unwrap().is_empty());
     // The same logs as a plain scan of the rows: every text that contains the phrase.
     let scanned: Vec<u64> = logs
         .records()
@@ -326,7 +326,7 @@ fn a_mark_set_survives_save_and_load() {
     assert_eq!(saved, paths.mark_set_path("attacks"));
 
     let loaded = MarkSet::load(&paths, "attacks", &budget()).unwrap();
-    assert_eq!(loaded, set);
+    assert!(loaded.try_eq(&set).unwrap());
     assert_eq!(loaded.positions(), DROP_TABLE);
     assert_eq!(loaded.count(), 8);
 
@@ -428,7 +428,7 @@ fn deselection_of_single_logs_is_recorded_and_kept() {
     set.save(&paths, &budget()).unwrap();
     let loaded = MarkSet::load(&paths, "attacks", &budget()).unwrap();
     assert_eq!(loaded.deselected(), [57, 188]);
-    assert_eq!(loaded, set);
+    assert!(loaded.try_eq(&set).unwrap());
 }
 
 #[test]

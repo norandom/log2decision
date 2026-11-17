@@ -321,13 +321,18 @@ impl Reader {
                 Err(format!("it has more than {MAX_ENTRY_LINES} lines"))
             } else {
                 lines
-                    .next_line(&mut self.line, self.max_record_bytes)
+                    .next_line_until(&mut self.line, self.max_record_bytes, || {
+                        self.shared.stop.load(Ordering::Relaxed)
+                    })
                     .map_err(|error| format!("reading stopped after line {line_number}: {error}"))
             };
             let read = match read {
                 Ok(Some(read)) => read,
                 Ok(None) => break Ending::Read,
                 Err(reason) => {
+                    if self.shared.stop.load(Ordering::Relaxed) {
+                        return Err(Gone);
+                    }
                     // The file could not be read: the run fails. Anything else is
                     // the entry's data.
                     if let Some(error) = failure.borrow().as_ref() {
@@ -508,5 +513,80 @@ impl Drop for Readers {
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::zip_input::EntryLines;
+    use std::sync::atomic::AtomicUsize;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("l2d-reader-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn panicking_reader_wakes_the_caller_and_joins() {
+        let path = scratch("panic");
+        let file = File::create(&path).unwrap();
+        // The real reader claims an entry and then panics looking it up. Its Running
+        // guard and channel teardown must wake a caller waiting for the first piece.
+        let mut readers = Readers::start(&file, 0, &Arc::new(vec![]), vec![0], 1024, 1).unwrap();
+        let error = readers.first(0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stopped before the end of entry 1")
+        );
+        drop(readers);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_file_read_inside_a_reader_is_reported_and_joins() {
+        let path = scratch("io");
+        // A real write-only handle: seek_read/read_at fails inside the reader thread.
+        let file = File::create(&path).unwrap();
+        let entry = DirectoryEntry {
+            method: 0,
+            flags: 0,
+            crc32: 0,
+            compressed_size: 1,
+            size: 1,
+            header_at: 0,
+            kind: crate::zip_directory::EntryKind::File,
+        };
+        let mut readers =
+            Readers::start(&file, 64, &Arc::new(vec![entry]), vec![0], 1024, 1).unwrap();
+        let (_, piece) = readers.first(0).unwrap();
+        assert!(matches!(piece.end, Some(Ending::FileFailed(ref reason)) if !reason.is_empty()));
+        drop(readers);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cancellation_is_checked_inside_an_overlong_line() {
+        struct LongLine(Arc<AtomicUsize>);
+        impl Read for LongLine {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let reads = self.0.fetch_add(1, Ordering::Relaxed);
+                assert!(
+                    reads < 4,
+                    "reader kept draining the long line after cancellation"
+                );
+                out.fill(b'x');
+                Ok(out.len())
+            }
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut lines = EntryLines::new(&[], Box::new(LongLine(Arc::clone(&reads))), Vec::new());
+        let mut line = Vec::new();
+        let error = lines.next_line_until(&mut line, 32, || reads.load(Ordering::Relaxed) > 0);
+        assert!(error.is_err());
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        assert!(line.len() <= 33);
     }
 }

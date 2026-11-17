@@ -18,11 +18,12 @@
 #![allow(dead_code)]
 
 pub mod quality;
+pub mod resources;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use l2d_core::{Csic2010Adapter, InputAdapter, L2dError, Label, ProjectPaths};
+use l2d_core::{Csic2010Adapter, L2dError, Label, ProjectPaths};
 use l2d_encoder::{
     CheckDepth, EncoderArch, EncoderPackage, InputMode, NpuStatus, PackageParts, RuntimeFiles,
 };
@@ -466,6 +467,7 @@ pub fn directory_from(tag: &str, variable: &str, what: &str) -> Option<PathBuf> 
 }
 
 pub fn read(path: &Path) -> Vec<u8> {
+    resources::file(path);
     std::fs::read(path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
@@ -558,9 +560,8 @@ pub fn csic_logs() -> Vec<CsicLog> {
     let supplied = std::env::var_os("L2D_CSIC_CSV").map(PathBuf::from);
     let path = Csic2010Adapter::locate(&ProjectPaths::new(workspace_root()), supplied.as_deref())
         .unwrap_or_else(|error| panic!("{error} (set L2D_CSIC_CSV to csic_database.csv)"));
-    let (logs, _) = Csic2010Adapter::new()
-        .read(&path)
-        .unwrap_or_else(|error| panic!("{error}"));
+    let logs = resources::csic(&path);
+    resources::copied_logs(&logs);
     logs.records()
         .map(|record| CsicLog {
             bad: match record.label {

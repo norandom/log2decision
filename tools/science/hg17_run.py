@@ -818,6 +818,7 @@ def main() -> None:
     parser.add_argument("--tag", default="")
     parser.add_argument("--threads", type=int, default=12)
     parser.add_argument("--memory-gib", type=float, default=6.0)
+    parser.add_argument("--busy", choices=("wait", "refuse"), default="refuse")
     parser.add_argument("--lm-epochs", type=int, default=None, help="smoke tests only")
     parser.add_argument("--line-epochs", type=int, default=None, help="smoke tests only")
     args = parser.parse_args()
@@ -830,16 +831,31 @@ def main() -> None:
     memguard.limit(args.memory_gib)
     name = f"{args.step} f{args.fold} s{args.seed} {args.variant} {args.tag}".strip()
     started = time.perf_counter()
-    with memguard.hungry(f"task 2.17 {name}"):
-        result = STEPS[args.step](args)
-    if args.step == "prepare":
-        print(json.dumps(result, indent=1))
-    run ={"step": name, "argv": sys.argv[1:], "seconds": round(time.perf_counter() - started, 1),
-           "memory": memguard.peaks(), "host_memory_at_end": memguard.host_memory(), "finished": time.strftime("%Y-%m-%d %H:%M:%S")}
-    with open(hg17.path("runs.jsonl"), "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(run) + "\n")
-    print(f"RUN {name}: {run['seconds']:.0f} s, peak committed {run['memory']['peak_committed_gib']} GiB, "
-          f"peak working set {run['memory']['peak_working_set_gib']} GiB, limit {args.memory_gib} GiB")
+    with memguard.hungry(f"task 2.17 {name}", wait=args.busy == "wait") as admission:
+        failure = None
+        try:
+            result = STEPS[args.step](args)
+            if args.step == "prepare":
+                print(json.dumps(result, indent=1))
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            try:
+                run = {"step": name, "argv": sys.argv[1:], "seconds": round(time.perf_counter() - started, 1),
+                       "status": "completed" if failure is None else "failed",
+                       "error": None if failure is None else {"type": type(failure).__name__, "message": str(failure)},
+                       "memory": memguard.peaks(), "resource_admission": admission.report(),
+                       "host_memory_at_end": memguard.host_memory(), "finished": time.strftime("%Y-%m-%d %H:%M:%S")}
+                with open(hg17.path("runs.jsonl"), "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(run) + "\n")
+                print(f"RUN {name}: {run['status']}, {run['seconds']:.0f} s, "
+                      f"peak committed {run['memory']['peak_committed_gib']} GiB, "
+                      f"peak working set {run['memory']['peak_working_set_gib']} GiB, limit {args.memory_gib} GiB")
+            except BaseException as recording_error:
+                if failure is None:
+                    raise
+                print(f"could not finalize resource record for {name}: {recording_error}", file=sys.stderr)
 
 
 if __name__ == "__main__":

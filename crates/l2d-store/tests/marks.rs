@@ -145,6 +145,191 @@ fn all_ids(logs: &LogsFrame) -> Vec<String> {
 }
 
 #[test]
+fn concurrent_mark_writer_child() {
+    let Ok(root) = std::env::var("L2D_MARK_WRITER_PROJECT") else {
+        return;
+    };
+    let mut store = Store::open(&ProjectPaths::new(root), "s").unwrap();
+    let (logs, _) = fixture();
+    let vectors: Vec<f32> = (0..logs.len()).flat_map(|_| [1.0, 0.0, 0.0, 0.0]).collect();
+    let data = rows_frame(
+        &logs,
+        "second-process",
+        &vectors,
+        DIM,
+        &vec![LogFlags::default(); logs.len()],
+    )
+    .unwrap();
+    store
+        .add_with(
+            &data,
+            VectorOrigin::without_release(&identity()),
+            &mut budget(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn direct_fill_accounting_child() {
+    let Some(root) = std::env::var_os("L2D_DIRECT_FILL_ACCOUNTING") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let identity = identity();
+    let origin = VectorOrigin::without_release(&identity);
+    let mut store = Store::create(&ProjectPaths::new(root.join("project")), "s", origin).unwrap();
+    let (logs, _) = fixture();
+    let rows = rows(&logs);
+    std::fs::write(root.join("ready"), "").unwrap();
+    let mut fill = store.begin_fill(origin).unwrap();
+    fill.add_with(&rows, &mut budget()).unwrap();
+    let mut tiny = budget_with(Some(l2d_core::memory::PROCESS_BASELINE_BYTES + 1), None);
+    assert!(fill.add_with(&rows, &mut tiny).is_err());
+    drop(fill);
+    let records =
+        std::fs::read_dir(std::env::temp_dir().join("log2decision-resource-records")).unwrap();
+    let mut seen = 0;
+    for record in records {
+        let report: l2d_core::resource::ResourceReport =
+            serde_json::from_slice(&std::fs::read(record.unwrap().path()).unwrap()).unwrap();
+        assert_eq!(report.operation, "store fill add");
+        assert!(
+            report.waited_for_host,
+            "a direct fill waited before its adds: {report:?}"
+        );
+        assert_eq!(
+            report.observation.host_holder.as_ref().unwrap().operation,
+            "direct store fill holder"
+        );
+        assert!(report.memory.counted_peak_bytes <= report.memory.memory_limit_bytes);
+        assert!(!report.memory.spilled);
+        seen += 1;
+    }
+    assert_eq!(
+        seen, 2,
+        "both successful and refused adds retain admission accounting"
+    );
+}
+
+#[test]
+fn a_direct_store_fill_records_the_admission_it_waited_for() {
+    use l2d_core::resource::{BusyChoice, ResourceGuard};
+    use std::time::{Duration, Instant};
+    let scratch = Scratch::new("direct-fill-accounting");
+    let temporary = scratch.root.join("temporary");
+    std::fs::create_dir_all(&temporary).unwrap();
+    let holder = ResourceGuard::enter("direct store fill holder", BusyChoice::Wait).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "direct_fill_accounting_child", "--nocapture"])
+        .env("L2D_DIRECT_FILL_ACCOUNTING", &scratch.root)
+        .env("TEMP", &temporary)
+        .env("TMP", &temporary)
+        .env("TMPDIR", &temporary)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while !scratch.root.join("ready").exists() {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(child.try_wait().unwrap().is_none());
+    drop(holder);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_actual_second_process_writer_between_hash_reads_is_refused() {
+    struct BetweenHashes<'a> {
+        store: &'a Store,
+        root: &'a Path,
+        hashes: std::cell::Cell<usize>,
+    }
+    impl MarkStore for BetweenHashes<'_> {
+        fn store_name(&self) -> &str {
+            self.store.store_name()
+        }
+        fn content_sha256(&self, budget: &mut MemoryBudget) -> Result<String, L2dError> {
+            let hash = self.store.content_sha256(budget)?;
+            let calls = self.hashes.get();
+            self.hashes.set(calls + 1);
+            if calls == 0 {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "concurrent_mark_writer_child", "--nocapture"])
+                    .env("L2D_MARK_WRITER_PROJECT", self.root)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(hash)
+        }
+        fn phrase_ids(
+            &self,
+            phrase: &str,
+            id_bytes: u64,
+            budget: &mut MemoryBudget,
+            each: &mut dyn FnMut(&str),
+        ) -> Result<(), L2dError> {
+            self.store.phrase_ids(phrase, id_bytes, budget, each)
+        }
+        fn text_batches(
+            &self,
+            beside: u64,
+            per_row: u64,
+            budget: &mut MemoryBudget,
+            each: &mut dyn FnMut(&DataFrame) -> Result<u64, L2dError>,
+        ) -> Result<(), L2dError> {
+            self.store.text_batches(beside, per_row, budget, each)
+        }
+    }
+    let scratch = Scratch::new("actual-concurrent-writer");
+    let (logs, _) = fixture();
+    let store = store_named(&scratch, "s", &logs);
+    let before = store.content_sha256(&mut budget()).unwrap();
+    let wrapped = BetweenHashes {
+        store: &store,
+        root: &scratch.root,
+        hashes: std::cell::Cell::new(0),
+    };
+    let error = MarkSet::mark_store(
+        "concurrent",
+        Label::Bad,
+        MarkQuery::Phrase {
+            phrase: "UNION SELECT".into(),
+        },
+        &wrapped,
+        &mut budget(),
+    )
+    .unwrap_err();
+    assert_eq!(wrapped.hashes.get(), 2);
+    let after = store.content_sha256(&mut budget()).unwrap();
+    assert_ne!(before, after, "the other process really committed new logs");
+    assert!(
+        error
+            .to_string()
+            .contains("changed while `concurrent` was marked"),
+        "{error}"
+    );
+    assert!(error.to_string().contains(&before));
+    assert!(error.to_string().contains(&after));
+    assert!(!scratch.paths().mark_set_path("concurrent").exists());
+}
+
+#[test]
 fn phrase_and_regex_mark_the_expected_logs_of_a_store() {
     let scratch = Scratch::new("phrase-regex");
     let (logs, _) = fixture();
@@ -157,7 +342,7 @@ fn phrase_and_regex_mark_the_expected_logs_of_a_store() {
         MarkSet::mark_store("union", Label::Bad, union.clone(), &store, &mut budget()).unwrap();
     let expected = expected_ids(union);
     assert_eq!(expected.len(), 4);
-    assert_eq!(set.ids(), expected);
+    assert_eq!(set.ids(&budget()).unwrap(), expected);
     assert_eq!(set.count(), 4);
     assert!(set.positions().is_empty());
     let source = set.store().expect("a mark set of a store");
@@ -184,7 +369,7 @@ fn phrase_and_regex_mark_the_expected_logs_of_a_store() {
     let expected = expected_ids(drop.clone());
     assert_eq!(expected.len(), 8);
     let set = MarkSet::mark_store("drop", Label::Bad, drop.clone(), &store, &mut budget()).unwrap();
-    assert_eq!(set.ids(), expected);
+    assert_eq!(set.ids(&budget()).unwrap(), expected);
     // In batches of seven rows the same.
     let small = MarkSet::mark_store(
         "drop",
@@ -194,7 +379,7 @@ fn phrase_and_regex_mark_the_expected_logs_of_a_store() {
         &mut budget_with(None, Some(7)),
     )
     .unwrap();
-    assert_eq!(small, set);
+    assert!(small.try_eq(&set).unwrap());
 }
 
 #[test]
@@ -379,14 +564,18 @@ fn a_mark_set_of_a_store_survives_save_and_load_with_its_deselection() {
         &mut budget(),
     )
     .unwrap();
-    let first = set.ids()[0].clone();
-    set.deselect_ids(std::slice::from_ref(&first)).unwrap();
-    assert_eq!(set.deselected_ids(), std::slice::from_ref(&first));
+    let first = set.ids(&budget()).unwrap()[0].clone();
+    set.deselect_ids(std::slice::from_ref(&first), &budget())
+        .unwrap();
+    assert_eq!(
+        set.deselected_ids(&budget()).unwrap(),
+        std::slice::from_ref(&first)
+    );
     assert_eq!(set.selected_count(), 7);
     assert_eq!(set.selected_ids().count(), 7);
     // An id that is not marked is refused; positions are not this set's.
     assert!(matches!(
-        set.deselect_ids(&["0".repeat(64)]),
+        set.deselect_ids(&["0".repeat(64)], &budget()),
         Err(L2dError::InvalidInput { .. })
     ));
     assert!(matches!(
@@ -396,7 +585,7 @@ fn a_mark_set_of_a_store_survives_save_and_load_with_its_deselection() {
 
     let saved = set.save(&paths, &budget()).unwrap();
     let loaded = MarkSet::load(&paths, "drop", &budget()).unwrap();
-    assert_eq!(loaded, set);
+    assert!(loaded.try_eq(&set).unwrap());
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
     assert_eq!(json["source"]["kind"], "store");
     assert_eq!(json["source"]["name"], "s");

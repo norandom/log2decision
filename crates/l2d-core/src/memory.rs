@@ -46,6 +46,8 @@
 //! ([`MemoryBudget::observe_with`]), so that tests can let it fall and recover.
 
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -415,7 +417,34 @@ pub struct MemoryBudget {
     limit_bytes: u64,
     reserve_bytes: u64,
     held_bytes: u64,
+    usage: MemoryUsage,
     read_free: Box<dyn FnMut() -> Result<u64, L2dError> + Send>,
+}
+
+/// Shared accounting handle, retained by the resource gate until the operation ends.
+/// Peaks are admitted estimates, not operating-system resident-set measurements.
+#[derive(Debug, Clone)]
+pub struct MemoryUsage {
+    limit: u64,
+    peak: Arc<AtomicU64>,
+    spilled: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryUsageReport {
+    pub memory_limit_bytes: u64,
+    pub counted_peak_bytes: u64,
+    pub spilled: bool,
+}
+
+impl MemoryUsage {
+    pub fn report(&self) -> MemoryUsageReport {
+        MemoryUsageReport {
+            memory_limit_bytes: self.limit,
+            counted_peak_bytes: self.peak.load(Ordering::Relaxed),
+            spilled: self.spilled.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl fmt::Debug for MemoryBudget {
@@ -489,6 +518,11 @@ impl MemoryBudget {
             limit_bytes,
             reserve_bytes: share_of(free_bytes, settings.reserve_share),
             held_bytes: 0,
+            usage: MemoryUsage {
+                limit: limit_bytes,
+                peak: Arc::new(AtomicU64::new(PROCESS_BASELINE_BYTES)),
+                spilled: Arc::new(AtomicBool::new(false)),
+            },
             read_free: Box::new(read_free),
         })
     }
@@ -545,6 +579,26 @@ impl MemoryBudget {
     /// and the operation is refused when nothing is left for the smallest batch.
     pub fn hold(&mut self, bytes: u64) {
         self.held_bytes = bytes;
+        self.count_peak(0);
+    }
+
+    pub fn usage(&self) -> MemoryUsage {
+        self.usage.clone()
+    }
+
+    /// Count a known live batch beside the retained memory. This is accounting only;
+    /// callers must still check the budget BEFORE allocating, as before.
+    pub fn count_peak(&self, beside: u64) {
+        self.usage.peak.fetch_max(
+            PROCESS_BASELINE_BYTES
+                .saturating_add(self.held_bytes)
+                .saturating_add(beside),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn note_spill(&self) {
+        self.usage.spilled.store(true, Ordering::Relaxed);
     }
 
     /// [`L2dError::Refused`] when what the operation holds is more than the usable
@@ -693,6 +747,7 @@ impl MemoryBudget {
             used => used.min(rows),
         };
         plan.max_rows_used = plan.max_rows_used.max(rows);
+        self.count_peak(needed(rows));
         Ok(rows)
     }
 
@@ -704,6 +759,7 @@ impl MemoryBudget {
     pub fn require_whole(&self, estimated_bytes: u64, operation: &str) -> Result<(), L2dError> {
         let left = self.left_bytes();
         if estimated_bytes <= left {
+            self.count_peak(estimated_bytes);
             return Ok(());
         }
         Err(L2dError::Refused {
@@ -843,6 +899,16 @@ impl<'b> Batcher<'b> {
     /// current batch. `true` means the batch is complete: process it, then call
     /// [`Batcher::processed`].
     pub fn record(&mut self, source_bytes: u64) -> Result<bool, L2dError> {
+        self.record_with_headroom(source_bytes, 0)
+    }
+
+    /// Ends a variable-size batch early enough to admit the next worst-case record.
+    /// `headroom` is its expanded cost, bounded by the input's configured record limit.
+    pub fn record_with_headroom(
+        &mut self,
+        source_bytes: u64,
+        headroom: u64,
+    ) -> Result<bool, L2dError> {
         self.batch_rows += 1;
         self.batch_bytes += source_bytes;
         if self.plan.is_none() {
@@ -854,7 +920,9 @@ impl<'b> Batcher<'b> {
         self.choose_size()?;
         let estimated = self.batch_bytes as f64 * self.cost.expansion
             + (self.batch_rows * self.cost.row_bytes) as f64;
-        Ok(self.batch_rows >= self.target_rows || estimated >= self.budget.left_bytes() as f64)
+        self.budget.count_peak(estimated.ceil() as u64);
+        Ok(self.batch_rows >= self.target_rows
+            || estimated >= self.budget.left_bytes().saturating_sub(headroom) as f64)
     }
 
     /// Notes that the current batch was processed and that the operation now needs

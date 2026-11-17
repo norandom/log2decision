@@ -646,6 +646,8 @@ fn start_up_cold_and_warm() {
 #[test]
 #[ignore = "hardware measurement: needs the AMD runtime files, the NPU and the trained model; run on request"]
 fn throughput_from_text_to_vector_on_csic() {
+    let _resources = npu_support::resources::Measurement::start("EncoderSession throughput", true)
+        .with_process_memory(npu_support::process_memory);
     let Some(paths) = session_project(TAG) else {
         return;
     };
@@ -653,6 +655,11 @@ fn throughput_from_text_to_vector_on_csic() {
         return;
     };
     let texts: Vec<String> = csic_logs().into_iter().map(|log| log.text).collect();
+    npu_support::resources::reserve(
+        8 * 1024 * 1024
+            + texts.len() as u64 * (12 * u64::from(package.identity().dimension) * 4 + 256),
+        "session buffers, vector copies and text references",
+    );
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let logs = refs.len();
     let dimension = usize::from(package.identity().dimension);

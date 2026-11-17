@@ -875,6 +875,8 @@ pub struct EncoderSession {
     encoder: ImageEncoder<NpuModel>,
     info: SessionInfo,
     opened: Instant,
+    // Last field: release admission only after the native encoder has been dropped.
+    _admission: l2d_core::resource::ResourceGuard,
 }
 
 impl std::fmt::Debug for EncoderSession {
@@ -912,6 +914,13 @@ impl EncoderSession {
         paths: &ProjectPaths,
         runtime_dir: &Path,
     ) -> Result<Self, EncoderError> {
+        let admission = l2d_core::resource::ResourceGuard::npu(
+            "encoder session",
+            l2d_core::resource::busy_choice(),
+        )
+        .map_err(|error| EncoderError::NpuUnavailable {
+            reason: error.to_string(),
+        })?;
         let opened = Instant::now();
         let started_utc = utc_timestamp(SystemTime::now());
         let (files, npu, npu_match) = preconditions(
@@ -1091,6 +1100,7 @@ impl EncoderSession {
             encoder,
             info,
             opened,
+            _admission: admission,
         })
     }
 

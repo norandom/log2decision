@@ -11,7 +11,7 @@ It is built for a security analyst with a laptop and too many logs. Nothing is
 sent anywhere, and the tool is designed to stay out of the way of whatever else
 the machine is doing.
 
-Status, 2026-11-13: under construction. You can read, score, calibrate and
+Status, 2026-11-17: under construction. You can read, mark, score, calibrate and
 triage a file of logs from the command line with the simple scorer. The store,
 the search and the encoder on the NPU exist as tested library code and are not
 wired to commands yet. See
@@ -60,6 +60,7 @@ it is allowed in.
 | Reading logs: one per line, labelled CSV or JSONL, HTTP CSIC 2010 | Done, tested |
 | Deduplication, with skipped rows reported by position and reason | Done, tested |
 | Batches sized to free memory, with a memory limit that holds | Done, measured on files up to 564 MB |
+| Admission and resource reporting for expensive operations | Done (1.24): `--busy wait` (default) or `--busy refuse` names the holder; cooperating tool processes share host/NPU locks. Final records include the limit, counted peak, waiting and spilling. Native NPU runtime memory is not included in counted Rust reservations; outside-tool NPU utilization is unknown |
 | Zip archives as input: entries read without unpacking, in batches, within the memory limit | `l2d ingest` reads an archive and reports every entry and its records; `l2d baseline score` scores one into Parquet parts on disk, one row per distinct log; both deduplicate on disk when the distinct texts outgrow the memory limit, in `--work-dir` (by default a directory of the run below `work/` in the project), after a check of the free disk space; `ingest` touches the disk only then and leaves nothing behind; the other commands do not read archives yet. Measured on a 7.1 GB archive of the AIT data set under a limit of 512 MB: `ingest` reads its 272 `*.log` entries (22.9 million lines, 5.6 million distinct) in 40 s with a peak of 349 MiB, in memory, and all of its entries (30.9 million lines, 8.3 million distinct) in 58 s with a peak of 374 MiB, deduplicating on disk (task 1.20); `baseline score` scores all of its entries (30.9 million lines, 8.3 million distinct) in about 8 minutes with a peak of 359 MiB, deduplicating on disk, and writes 273 MiB of parts. `ingest` reads two entries at once by default when their readers fit (`--entries-at-once`, 1 to 8), with the same results as one at a time: on that archive 28 s for the `*.log` entries against 33 to 34 s, and 50 to 71 s for all of them against 74 to 81 s, peaks under 400 MiB; `baseline score` reads one entry at a time by default, because reading entries at once did not make it faster (task 1.19) |
 | Character-sequence features and the scoring model | Done, tested |
 | Baseline scorer (fit, score, save, load) | Done, tested |

@@ -163,7 +163,15 @@ fn checksum(vectors: &[f32]) -> f64 {
 #[test]
 #[ignore = "hardware measurement: needs the AMD runtime files, the NPU and the trained model; run on request"]
 fn throughput_from_text_to_vector() {
+    let _resources = npu_support::resources::Measurement::start("raw NPU throughput", true)
+        .with_process_memory(npu_support::process_memory);
     let Some(fixture) = fixture() else { return };
+    npu_support::resources::reserve(
+        4 * 256 * 64 * 256 * 4
+            + fixture.texts.len() as u64 * (8 * fixture.interface.output.shape[1] as u64 * 4 + 128)
+            + passes() as u64 * 4096,
+        "throughput images, parallel sessions, output copies and timings",
+    );
     let texts: Vec<&str> = fixture.texts.iter().map(String::as_str).collect();
     let logs = texts.len();
     println!(
@@ -564,8 +572,14 @@ fn throughput_from_text_to_vector() {
 #[test]
 #[ignore = "hardware measurement: needs the AMD runtime files, the NPU and the trained model; run on request"]
 fn start_up_and_the_provider_cache() {
+    let _resources = npu_support::resources::Measurement::start("NPU startup measurement", true)
+        .with_process_memory(npu_support::process_memory);
     let process_started = Instant::now();
     let Some(fixture) = fixture() else { return };
+    npu_support::resources::reserve(
+        4 * 256 * 64 * 256 * 4 + 1024 * fixture.interface.output.shape[1] as u64 * 4,
+        "startup images and output copies",
+    );
     let texts: Vec<&str> = fixture
         .texts
         .iter()

@@ -20,11 +20,26 @@ verified clean/merged and removed. Task 1.25 is complete (reviewed commit `cd103
 file/archive phrase and regex marking, matching text/positions, whole JSON and
 optional saved MarkSets. Independent review approved; 9 task tests and 797
 workspace tests passed (0 failed, 49 ignored); fmt, Clippy and actual CLI smoke
-passed. Logs: `D:\BuildArtifacts\log2decision\task-1.25\`. Next: task 1.24.
-The accepted roadmap is saved
-with the specification; no later implementation task has been marked complete.
+passed. Logs: `D:\BuildArtifacts\log2decision\task-1.25\`.
 
-Remaining execution order: 1.24 → 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
+Task 1.24 is complete (reviewed commit `84bb15a`): host/NPU admission with
+wait/refuse policy, final resource accounting, bounded store-ID spilling, reader
+fault/cancellation coverage and a real concurrent store-writer test. Independent
+review caught two reporting defects; re-review approved their fixes. Verification:
+820 passed, 0 failed, 50 ignored; fmt, Clippy, three Python regressions and actual
+CLI/AIT smoke passed. Evidence: `D:\BuildArtifacts\log2decision\task-1.24\`.
+The two-round AIT comparison retains 64 pieces: 128 is faster with two readers
+forced but slower with defaults, which admit only one reader at 512 MiB. All
+eight runs preserved 22,880,272 records and 5,642,082 distinct texts. A batch
+boundary accounting fix also preserves the results and keeps the counted peak
+within the limit. Native NPU memory remains explicitly unaccounted in the Rust
+throughput reservations; outside-tool NPU utilization is unknown. These are not
+claims that all of Requirements 15.2/15.12 are closed.
+
+Keep work scoped to this project: do not monitor, inspect or wait for unrelated
+processes. Serialize this project's own heavy jobs. Next: task 1.26.
+
+Remaining execution order: 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be
