@@ -7,6 +7,7 @@
 //! - [`fill`]: logs encoded on the NPU and added, with their vectors, to a store.
 
 pub mod conformal;
+pub mod exploration;
 pub mod fill;
 pub mod scorer;
 pub mod triage;

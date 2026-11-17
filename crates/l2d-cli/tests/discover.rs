@@ -47,6 +47,145 @@ impl Drop for Scratch {
     }
 }
 #[test]
+fn exploration_is_explicit_source_bound_unlabelled_and_replayable() {
+    let s = Scratch::new();
+    let file = s.path("explore.log");
+    fs::write(&file,"login failed user=alice\nlogin failed user=bob\nlogin denied user=carol\nlogin succeeded user=dave\n").unwrap();
+    s.json(&[
+        "discover",
+        "search",
+        "--input",
+        &file,
+        "--phrase",
+        "failed",
+        "--out",
+        &s.path("seed"),
+    ]);
+    s.json(&[
+        "discover",
+        "search",
+        "--input",
+        &file,
+        "--glob",
+        "*",
+        "--out",
+        &s.path("scope"),
+    ]);
+    let seed = s.path("seed/refinement.json");
+    let scope = s.path("scope/refinement.json");
+    let before = fs::read(&seed).unwrap();
+    let args = [
+        "discover",
+        "explore",
+        "--artifact",
+        &seed,
+        "--exemplar-row",
+        "0",
+        "--method",
+        "character-trigram",
+        "--radius",
+        "1",
+        "--top-k",
+        "5",
+        "--expand-artifact",
+        &scope,
+        "--out",
+        &s.path("report"),
+    ];
+    let output = s.json(&args);
+    let r = &output["exploration"];
+    assert_eq!(r["method"], "direct-exemplar-character-trigram-jaccard");
+    assert_eq!(r["neighbours"].as_array().unwrap().len(), 3);
+    assert_eq!(r["support"]["distinct_texts"], 3);
+    assert_eq!(
+        r["neighbours"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|h| h["outside_saved_search"] == true)
+            .count(),
+        2
+    );
+    assert!(
+        r["neighbours"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["row"]["review"].is_null())
+    );
+    assert_eq!(fs::read(&seed).unwrap(), before);
+    let replay = s.json(&[
+        "discover",
+        "explore",
+        "--artifact",
+        &seed,
+        "--exemplar-row",
+        "0",
+        "--method",
+        "character-trigram",
+        "--radius",
+        "1",
+        "--top-k",
+        "5",
+        "--expand-artifact",
+        &scope,
+        "--expect-profile",
+        r["profile"].as_str().unwrap(),
+        "--out",
+        &s.path("replay"),
+    ]);
+    assert_eq!(r["neighbours"], replay["exploration"]["neighbours"]);
+    assert!(!s.run(&args).status.success());
+    let mismatch = s.run(&[
+        "discover",
+        "explore",
+        "--artifact",
+        &seed,
+        "--exemplar-row",
+        "0",
+        "--method",
+        "character-trigram",
+        "--expect-profile",
+        "wrong",
+        "--out",
+        &s.path("mismatch"),
+    ]);
+    assert!(!mismatch.status.success());
+    assert!(String::from_utf8_lossy(&mismatch.stderr).contains("incompatible"));
+    assert!(!s.0.join("mismatch").exists());
+    let npu = s.run(&[
+        "discover",
+        "explore",
+        "--artifact",
+        &seed,
+        "--exemplar-row",
+        "0",
+        "--method",
+        "npu",
+        "--out",
+        &s.path("no-fallback"),
+    ]);
+    assert!(!npu.status.success());
+    assert!(!s.0.join("no-fallback").exists());
+    fs::write(&file, "changed source\n").unwrap();
+    assert!(
+        !s.run(&[
+            "discover",
+            "explore",
+            "--artifact",
+            &seed,
+            "--exemplar-row",
+            "0",
+            "--method",
+            "character-trigram",
+            "--out",
+            &s.path("stale")
+        ])
+        .status
+        .success()
+    );
+}
+#[test]
 fn broad_search_refinement_preview_review_and_export_replay() {
     let s = Scratch::new();
     let file = s.path("logs.txt");

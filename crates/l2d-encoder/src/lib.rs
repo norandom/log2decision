@@ -29,6 +29,7 @@
 
 pub mod codec;
 pub mod encode;
+pub mod hierarchy;
 pub mod npu;
 pub mod onnx;
 pub mod onnx_edit;

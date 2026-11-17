@@ -34,6 +34,48 @@ pub enum DiscoverCommand {
     Review(ReviewArgs),
     /// Export reviewed labels with a SelectionSet receipt in an immutable bundle
     Export(ExportArgs),
+    /// Retrieve directly similar originals; explicit method and outside-query scope
+    Explore(ExploreArgs),
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExploreMethod {
+    Npu,
+    CharacterTrigram,
+}
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExploreScope {
+    WithinPattern,
+    AcrossPatterns,
+    AllPatterns,
+}
+#[derive(Debug, Args)]
+pub struct ExploreArgs {
+    #[command(flatten)]
+    pub artifact: ArtifactArgs,
+    /// Zero-based row in saved refinement membership (see details)
+    #[arg(long)]
+    pub exemplar_row: usize,
+    #[arg(long, value_enum)]
+    pub method: ExploreMethod,
+    #[arg(long, value_enum, default_value = "all-patterns")]
+    pub scope: ExploreScope,
+    #[arg(long, default_value_t = 20)]
+    pub top_k: usize,
+    #[arg(long, default_value_t = 0.2)]
+    /// NPU cosine distance, or lexical 1-Jaccard; these scales are not calibrated alike
+    pub radius: f64,
+    /// Explicit outside-query scope: another source-bound saved refinement
+    #[arg(long)]
+    pub expand_artifact: Option<PathBuf>,
+    /// Immutable 2.17 f0-s0-mask directory (two graphs/table/layout/exp-table)
+    #[arg(long)]
+    pub profile_dir: Option<PathBuf>,
+    /// Require the exact profile from a previous report when replaying
+    #[arg(long)]
+    pub expect_profile: Option<String>,
+    /// New immutable output bundle with report.json
+    #[arg(long)]
+    pub out: PathBuf,
 }
 #[derive(Debug, Args)]
 pub struct SearchArgs {
@@ -522,6 +564,7 @@ fn execute(
     b: &mut MemoryBudget,
 ) -> Result<(), L2dError> {
     match command {
+        DiscoverCommand::Explore(a) => explore(context, a, b),
         DiscoverCommand::Search(a) => search(context, a, b),
         DiscoverCommand::Patterns(a) => {
             let r = load(a, b)?;
@@ -541,7 +584,7 @@ fn execute(
             output(
                 context,
                 b,
-                &serde_json::json!({"revision":r.revision,"pattern":a.pattern,"members":r.rows.iter().filter(|row|row.pattern==a.pattern).collect::<Vec<_>>(),"scope":"exact saved members, including exceptions and differing outcome tokens"}),
+                &serde_json::json!({"revision":r.revision,"pattern":a.pattern,"members":r.rows.iter().filter(|row|row.pattern==a.pattern).collect::<Vec<_>>(),"exploration_exemplars":r.rows.iter().enumerate().filter(|(_,row)|row.pattern==a.pattern).map(|(i,row)|serde_json::json!({"exemplar_row":i,"member":row.member,"text":row.text})).collect::<Vec<_>>(),"scope":"exact saved members, including exceptions and differing outcome tokens"}),
             )
         }
         DiscoverCommand::Split(a) => {
@@ -698,5 +741,95 @@ fn export(context: &Context, a: &ExportArgs, b: &mut MemoryBudget) -> Result<(),
         context,
         b,
         &serde_json::json!({"saved":a.out,"mark_set":format!("marks/{}.json",a.name),"review_receipt":"selection.json","format":3,"selected":selected,"excluded_unresolved_or_conflict":total-selected,"label":label}),
+    )
+}
+
+fn explore(context: &Context, a: &ExploreArgs, b: &mut MemoryBudget) -> Result<(), L2dError> {
+    use l2d_decide::exploration::{
+        self, CharacterTrigram, ExplorationEncoder, ExploreSettings, Scope,
+    };
+    if a.out.exists() {
+        return Err(invalid(
+            "output already exists; choose a new exploration revision destination",
+        ));
+    }
+    let seed = load(&a.artifact, b)?;
+    current(context, &seed, b)?;
+    let expansion = if let Some(path) = &a.expand_artifact {
+        let r = load(
+            &ArtifactArgs {
+                artifact: path.clone(),
+            },
+            b,
+        )?;
+        current(context, &r, b)?;
+        Some(r)
+    } else {
+        None
+    };
+    let settings = ExploreSettings {
+        exemplar_row: a.exemplar_row,
+        scope: match a.scope {
+            ExploreScope::WithinPattern => Scope::WithinPattern,
+            ExploreScope::AcrossPatterns => Scope::AcrossPatterns,
+            ExploreScope::AllPatterns => Scope::AllPatterns,
+        },
+        top_k: a.top_k,
+        radius: a.radius,
+        expected_profile: a.expect_profile.clone(),
+    };
+    let prior = b.held_bytes();
+    let mut encoder: Box<dyn ExplorationEncoder> = match a.method {
+        ExploreMethod::CharacterTrigram => {
+            if a.profile_dir.is_some() {
+                return Err(invalid("--profile-dir applies only to --method npu"));
+            }
+            Box::new(CharacterTrigram)
+        }
+        ExploreMethod::Npu => {
+            use l2d_encoder::hierarchy::{HierarchicalSession, PROFILE, SESSION_BYTES};
+            if a.expect_profile.as_deref().is_some_and(|p| p != PROFILE) {
+                return Err(invalid(format!(
+                    "incompatible exploration profiles: requested {}; actual {PROFILE}",
+                    a.expect_profile.as_deref().unwrap()
+                )));
+            }
+            let directory=a.profile_dir.as_deref().ok_or_else(||invalid("--method npu requires --profile-dir; use character-trigram explicitly without an NPU"))?;
+            let paths = context.paths()?;
+            let runtime =
+                paths.runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref());
+            let cache = std::env::var_os("L2D_NPU_WORK_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("l2d-hierarchy"))
+                .join("cache");
+            let session = HierarchicalSession::open(directory, &runtime, &cache, b)?;
+            b.hold(prior.saturating_add(SESSION_BYTES));
+            Box::new(session)
+        }
+    };
+    let report = exploration::explore(&seed, expansion.as_ref(), &settings, encoder.as_mut(), b);
+    drop(encoder);
+    if matches!(a.method, ExploreMethod::Npu) {
+        b.hold(
+            b.held_bytes()
+                .saturating_sub(l2d_encoder::hierarchy::SESSION_BYTES),
+        );
+    }
+    let report = report?;
+    // Recheck after retrieval, before atomically publishing source-bound results.
+    current(context, &seed, b)?;
+    if let Some(r) = &expansion {
+        current(context, r, b)?;
+    }
+    bundle(&a.out, |stage| {
+        let mut file = fs::File::create(stage.join("report.json")).map_err(failed)?;
+        serde_json::to_writer_pretty(&mut file, &report).map_err(failed)?;
+        file.sync_all().map_err(failed)?;
+        Ok(())
+    })?;
+    output(
+        context,
+        b,
+        &serde_json::json!({"saved":a.out,"exploration":report,"qualification":"retrieval only; no classification or deployment qualification","native_memory":"NPU provider admission estimate, not a measured allocation bound; external NPU utilization unknown"}),
     )
 }

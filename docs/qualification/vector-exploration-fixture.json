@@ -1,0 +1,56 @@
+{
+  "kind": "synthetic engineering relevance review, authored before retrieval; not independent human security labels",
+  "records": [
+    {
+      "relevant": true,
+      "text": "login failed user=alice host=edge1",
+      "seed": true
+    },
+    {
+      "relevant": true,
+      "text": "login failed user=bob host=edge1",
+      "seed": true
+    },
+    {
+      "relevant": true,
+      "text": "login denied user=carol host=edge2",
+      "seed": false
+    },
+    {
+      "relevant": true,
+      "text": "authentication rejected user=dave host=edge3",
+      "seed": false
+    },
+    {
+      "relevant": true,
+      "text": "login unsuccessful user=erin host=edge2",
+      "seed": false
+    },
+    {
+      "relevant": false,
+      "text": "login succeeded user=alice host=edge1",
+      "seed": false
+    },
+    {
+      "relevant": false,
+      "text": "backup completed host=edge2",
+      "seed": false
+    },
+    {
+      "relevant": false,
+      "text": "disk usage percent=98 host=edge3",
+      "seed": false
+    },
+    {
+      "relevant": false,
+      "text": "logout completed user=bob host=edge1",
+      "seed": false
+    }
+  ],
+  "query": "login failed",
+  "settings": {
+    "exemplar_row": 0,
+    "top_k": 5,
+    "radius": 0.2
+  }
+}
