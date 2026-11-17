@@ -1126,6 +1126,7 @@ dependencies = [
  "l2d-core",
  "l2d-encoder",
  "l2d-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

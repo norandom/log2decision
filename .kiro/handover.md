@@ -139,7 +139,20 @@ original equality is the only positive payload-match test; live-store consumers
 must enforce snapshot checks. MarkSet scorers now identify as `mark-set`; legacy
 baseline-tagged calibration must be recalibrated. Native-provider memory remains
 estimated, and no deployment qualification follows. Build cache: 21.204 GiB.
-Remaining execution order: 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
+Task 2.11 is complete (reviewed commit `43e2101`): bounded k-th-neighbour
+squared-L2 distance ranking, default k=5, exact stored-query exclusion, per-label
+counts/means, and Store-owned original-vector validation and generation guards.
+Independent review APPROVED; 880 workspace tests passed, 0 failed, 56 ignored;
+fmt, Clippy and CLI smoke passed. All 384 CSIC result rows reproduced, and the
+reviewer independently checked distances and metrics. Larger k did not improve
+the constructed endpoint-presence proxy: AUC 0.89019/0.87370/0.85113/0.85938 for
+k=1/5/11/21. Three endpoint groups per class and encoder-training overlap make
+this development evidence only. Default k=5 stays. Report:
+`docs/2026-11-17-outlier-k-comparison.md`; evidence:
+`D:\BuildArtifacts\log2decision\task-2.11\validation.md`. External-query provenance
+is a caller precondition; task 2.9 enforces actual encoder flags/profile. Memory
+evidence is counted reservation, not full process-peak qualification. Cache: 23.559 GiB.
+Remaining execution order: 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone 1.28 is complete. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be
 recorded before final evaluation; no universal thresholds were selected.

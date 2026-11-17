@@ -192,3 +192,12 @@ are `uv.exe run --project tools/science python -m unittest discover -s
 tools/science/tests -p test_transfer218.py`. Keep its environment and all disposable
 outputs under the configured D: build storage. This is development-only Python;
 the product acquires no new Python dependency or classifier.
+
+## Task 2.11: outlier neighbourhood comparison
+
+`outlier211.py prepare` freezes a bounded CSIC endpoint-presence panel from the
+verified actual-NPU vectors of task 2.18. The Rust `outlier_csic` integration test
+runs production Store ranking; `outlier211.py report` compares k=1/5/11/21.
+See the [report and replay instructions](../../docs/2026-11-17-outlier-k-comparison.md).
+Use a fresh directory under `D:\BuildArtifacts\log2decision` for replay. This is
+development-only evidence, with no operational threshold or deployment claim.

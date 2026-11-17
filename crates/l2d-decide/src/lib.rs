@@ -10,6 +10,8 @@ pub mod close_enough;
 pub mod conformal;
 pub mod exploration;
 pub mod fill;
+pub mod neighbour_evidence;
+pub mod outlier;
 pub mod scorer;
 pub mod triage;
 
