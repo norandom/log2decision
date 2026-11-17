@@ -6,6 +6,7 @@
 //! - [`triage`]: every log of a set ranked for review, scored down, or abstained on.
 //! - [`fill`]: logs encoded on the NPU and added, with their vectors, to a store.
 
+pub mod close_enough;
 pub mod conformal;
 pub mod exploration;
 pub mod fill;
@@ -36,6 +37,9 @@ pub enum ScorerKind {
     Baseline,
     /// Nearest neighbours in an encoder's vector space.
     Neighbour,
+    /// Character n-gram score fitted from recorded analyst marks.
+    #[serde(rename = "mark-set")]
+    MarkSet,
 }
 
 impl ScorerKind {
@@ -44,6 +48,7 @@ impl ScorerKind {
         match self {
             ScorerKind::Baseline => "baseline",
             ScorerKind::Neighbour => "neighbour",
+            ScorerKind::MarkSet => "mark-set",
         }
     }
 
@@ -52,6 +57,7 @@ impl ScorerKind {
         match name {
             "baseline" => Some(ScorerKind::Baseline),
             "neighbour" => Some(ScorerKind::Neighbour),
+            "mark-set" => Some(ScorerKind::MarkSet),
             _ => None,
         }
     }
@@ -71,7 +77,8 @@ mod tests {
         match kind {
             None => Some(ScorerKind::Baseline),
             Some(ScorerKind::Baseline) => Some(ScorerKind::Neighbour),
-            Some(ScorerKind::Neighbour) => None,
+            Some(ScorerKind::Neighbour) => Some(ScorerKind::MarkSet),
+            Some(ScorerKind::MarkSet) => None,
         }
     }
 
@@ -90,7 +97,7 @@ mod tests {
             names.push(found.as_str());
             kind = next(kind);
         }
-        assert_eq!(names, ["baseline", "neighbour"]);
+        assert_eq!(names, ["baseline", "neighbour", "mark-set"]);
         for other in ["", "Baseline", "baseline ", "neighbor"] {
             assert_eq!(ScorerKind::from_name(other), None, "'{other}'");
         }

@@ -799,6 +799,7 @@ fn scorer_code(kind: ScorerKind) -> u8 {
     match kind {
         ScorerKind::Baseline => 0,
         ScorerKind::Neighbour => 1,
+        ScorerKind::MarkSet => 2,
     }
 }
 
@@ -1159,7 +1160,7 @@ impl ConformalCalibrator {
         let (logs, _) = held_out_logs(scorer, logs, inputs, budget)?;
         let scoring_bytes = (logs.len() as u64).saturating_mul(SCORING_BYTES_PER_ROW);
         Self::fit_scored(
-            ScorerKind::Baseline,
+            scorer.kind(),
             scorer.revision(),
             |logs| scorer.score(logs),
             scoring_bytes,

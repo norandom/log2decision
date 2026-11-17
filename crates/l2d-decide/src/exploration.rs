@@ -65,6 +65,48 @@ fn distance(a: &Representation, b: &Representation) -> Result<f64, L2dError> {
         _ => Err(refused("incompatible vector and lexical representations")),
     }
 }
+
+/// The shared direct-exemplar engine. Callers reserve encoder scratch and at least
+/// 256 bytes per original UTF-8 byte for the two live representations before use.
+/// Unsupported originals remain unsupported; this never selects another provider.
+pub(crate) struct DirectExemplar(Representation);
+/// Successful encoding can still return unusable data. Only this inner outcome
+/// is unsupported; the outer Result exclusively propagates encoder/runtime errors.
+pub(crate) enum DirectResult<T> {
+    Supported(T),
+    Unsupported(String),
+}
+impl DirectExemplar {
+    pub(crate) fn new(
+        text: &str,
+        encoder: &mut dyn ExplorationEncoder,
+    ) -> Result<DirectResult<Self>, L2dError> {
+        let Some(value) = encoder.encode(text)? else {
+            return Ok(DirectResult::Unsupported(
+                encoder.unsupported_reason().into(),
+            ));
+        };
+        Ok(match distance(&value, &value) {
+            Ok(_) => DirectResult::Supported(Self(value)),
+            Err(error) => DirectResult::Unsupported(error.to_string()),
+        })
+    }
+    pub(crate) fn distance(
+        &self,
+        text: &str,
+        encoder: &mut dyn ExplorationEncoder,
+    ) -> Result<DirectResult<f64>, L2dError> {
+        let Some(value) = encoder.encode(text)? else {
+            return Ok(DirectResult::Unsupported(
+                encoder.unsupported_reason().into(),
+            ));
+        };
+        Ok(match distance(&self.0, &value) {
+            Ok(distance) => DirectResult::Supported(distance),
+            Err(error) => DirectResult::Unsupported(error.to_string()),
+        })
+    }
+}
 impl ExplorationEncoder for l2d_encoder::hierarchy::HierarchicalSession {
     fn profile(&self) -> &str {
         l2d_encoder::hierarchy::PROFILE
@@ -263,13 +305,12 @@ pub fn explore(
         // candidate; model images have a fixed shape and are reserved above.
         plan.batch_rows = 1;
         budget.next_batch_rows(&mut plan, 0)?;
-        let query = encoder.encode(&exemplar.text)?.ok_or_else(|| {
-            refused(format!(
-                "unsupported exemplar: {}",
-                encoder.unsupported_reason()
-            ))
-        })?;
-        distance(&query, &query)?;
+        let query = match DirectExemplar::new(&exemplar.text, encoder)? {
+            DirectResult::Supported(query) => query,
+            DirectResult::Unsupported(reason) => {
+                return Err(refused(format!("unsupported exemplar: {reason}")));
+            }
+        };
         let mut report=ExplorationReport { format:1,method:encoder.method().into(),profile:encoder.profile().into(),settings:settings.clone(),expansion_revision:expansion.map(|r|r.revision.clone()),representative:member(seed,exemplar,Some(0.),false),neighbours:Vec::new(),boundary:None,distance_range:None,unsupported:Vec::new(),support:Support::default(),support_basis:"all eligible members within radius before top-k; distinct-text counts exclude repetitions of the exemplar; representative is analyst-selected, and boundary/distance range describe returned top-k only".into(),group_basis:"source snapshot + refinement revision + pattern ID; ungrouped is not independent group evidence; endpoint/host independence unavailable; same/cross counts may overlap for texts appearing in both".into(),connectivity:"direct reach to the recorded exemplar only; transitive connectivity/chaining not computed".into(),scanned:0,eligible:0,plan };
         let mut texts = BTreeSet::new();
         let mut same = BTreeSet::new();
@@ -298,17 +339,12 @@ pub fn explore(
                 budget.next_batch_rows(&mut report.plan, report.eligible - 1)?;
                 report.plan.min_rows_used = 1;
                 report.plan.max_rows_used = 1;
-                let vector = encoder.encode(&row.text)?;
-                let distance = match vector {
-                    Some(v) => distance(&query, &v),
-                    None => Err(refused(encoder.unsupported_reason())),
-                };
-                let d = match distance {
-                    Ok(d) => d,
-                    Err(e) => {
+                let d = match query.distance(&row.text, encoder)? {
+                    DirectResult::Supported(d) => d,
+                    DirectResult::Unsupported(reason) => {
                         report.unsupported.push(UnsupportedMember {
                             member: member(r, row, None, outside),
-                            reason: e.to_string(),
+                            reason,
                         });
                         continue;
                     }
