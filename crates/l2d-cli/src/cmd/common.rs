@@ -479,8 +479,8 @@ pub enum AdapterChoice {
     Jsonl,
     /// The HTTP CSIC 2010 dataset (data/csic-2010/csic_database.csv unless --input)
     Csic2010,
-    /// A zip archive of text logs, one log per line in every entry; read by `ingest`
-    /// and `baseline score`
+    /// A zip archive of text logs, one log per line in every entry; read by `ingest`,
+    /// `mark` and `baseline score`
     Zip,
 }
 
