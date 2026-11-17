@@ -270,3 +270,189 @@ fn marking_a_store_stays_within_its_memory_limit() {
     );
     assert_eq!(ID_HASHES.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn selection_fts_native_heap_is_reserved_before_match_execution() {
+    use l2d_core::selections::{SearchQuery, SearchSettings, SelectionSet};
+    use l2d_store::{INDEX_TEXT_FACTOR, PHRASE_BYTE_BYTES, SEARCH_FIXED_BYTES};
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch {
+        root: std::env::temp_dir().join(format!("l2d-selection-fts-native-{}", std::process::id())),
+    };
+    let paths = ProjectPaths::new(&scratch.root);
+    let mut records: Vec<LogRecord> = (0..200)
+        .map(|i| LogRecord {
+            text: format!("request {i} needle"),
+            label: Label::Unknown,
+            group: None,
+            first_position: i + 1,
+            occurrences: 1,
+        })
+        .collect();
+    records.push(LogRecord {
+        text: "a".repeat(64 * 1024),
+        label: Label::Unknown,
+        group: None,
+        first_position: 201,
+        occurrences: 1,
+    });
+    records.push(LogRecord {
+        text: "a*b literal star".into(),
+        label: Label::Unknown,
+        group: None,
+        first_position: 202,
+        occurrences: 1,
+    });
+    let logs = LogsFrame::from_records(&records).unwrap();
+    let vectors: Vec<f32> = (0..records.len())
+        .flat_map(|_| [1.0, 0.0, 0.0, 0.0])
+        .collect();
+    let frame = rows_frame(
+        &logs,
+        "native-regression",
+        &vectors,
+        DIM,
+        &vec![LogFlags::default(); records.len()],
+    )
+    .unwrap();
+    let identity = identity();
+    let mut roomy =
+        MemoryBudget::observe_with(&MemorySettings::default(), || Ok(64 * GIB)).unwrap();
+    {
+        let mut store =
+            Store::create(&paths, "fts", VectorOrigin::without_release(&identity)).unwrap();
+        store
+            .add_with(&frame, VectorOrigin::without_release(&identity), &mut roomy)
+            .unwrap();
+    }
+    drop((records, logs, vectors, frame));
+    let store = Store::open(&paths, "fts").unwrap();
+    let phrase = format!("\"{}\"", "a".repeat(891));
+    let expressions = [
+        phrase.clone(),
+        format!("{phrase} OR \"needle\""),
+        format!("({phrase} AND \"aaaa\") NOT \"needle\""),
+    ];
+    let budget = |usable| {
+        MemoryBudget::observe_with(
+            &MemorySettings {
+                memory_limit_bytes: Some(BASELINE + usable),
+                ..Default::default()
+            },
+            || Ok(64 * GIB),
+        )
+        .unwrap()
+    };
+    for (expression, expected) in expressions.iter().zip([1, 201, 1]) {
+        for (usable, should_refuse) in [(40 * MIB, true), (512 * MIB, false)] {
+            let mut b = budget(usable);
+            b.hold(MIB); // caller state, beside SelectionSet's own reservations
+            let (sqlite_before, _) = sqlite_now_and_peak();
+            let rust_before = CURRENT.load(Ordering::Relaxed);
+            PEAK.store(rust_before, Ordering::Relaxed);
+            let result = SelectionSet::search_store(
+                "fts",
+                SearchQuery::Fts5Trigram {
+                    expression: expression.clone(),
+                },
+                SearchSettings { max_members: 512 },
+                &store,
+                &mut b,
+            );
+            let rust = PEAK.load(Ordering::Relaxed).saturating_sub(rust_before) as u64;
+            let (_, sqlite_peak) = sqlite_now_and_peak();
+            let sqlite = sqlite_peak.saturating_sub(sqlite_before);
+            eprintln!(
+                "FTS expression bytes={} usable={usable} rust={rust} sqlite={sqlite} refused={}",
+                expression.len(),
+                result.is_err()
+            );
+            assert_eq!(b.held_bytes(), MIB);
+            if should_refuse {
+                assert!(
+                    matches!(result, Err(L2dError::Refused { .. })),
+                    "long expression must refuse BEFORE MATCH at {usable} bytes; Rust={rust}, SQLite={sqlite}"
+                );
+                assert!(
+                    sqlite <= SEARCH_FIXED_BYTES,
+                    "native MATCH ran before refusal: {sqlite}"
+                );
+            } else {
+                let set = result.unwrap();
+                assert_eq!(set.members().len(), expected);
+                let index = PHRASE_BYTE_BYTES * expression.len() as u64
+                    + INDEX_TEXT_FACTOR * expression.chars().count() as u64 * 64 * 1024;
+                assert!(sqlite <= SEARCH_FIXED_BYTES + index);
+            }
+            assert!(
+                MIB + rust + sqlite <= usable,
+                "combined heaps exceed usable: caller {} + Rust {rust} + SQLite {sqlite} > {usable}",
+                MIB
+            );
+        }
+    }
+    // Isolate longest-text position lists: one byte below the exact native
+    // reservation must refuse even though the phrase-reader share alone fits.
+    use l2d_core::selections::SelectionStore;
+    let short = "\"aaaa\"";
+    let native = PHRASE_BYTE_BYTES * short.len() as u64
+        + INDEX_TEXT_FACTOR * short.chars().count() as u64 * 64 * 1024;
+    for (usable, refused) in [
+        (MIB + SEARCH_FIXED_BYTES + native - 1, true),
+        (MIB + SEARCH_FIXED_BYTES + native, false),
+    ] {
+        let mut b = budget(usable);
+        b.hold(MIB);
+        let (sqlite_before, _) = sqlite_now_and_peak();
+        let mut callbacks = 0;
+        let result = store.fts5_trigram_ids(short, &mut b, &mut |_| {
+            callbacks += 1;
+            Ok(())
+        });
+        let (_, peak) = sqlite_now_and_peak();
+        assert!(MIB + peak.saturating_sub(sqlite_before) <= usable);
+        assert_eq!(b.held_bytes(), MIB);
+        if refused {
+            assert!(matches!(result, Err(L2dError::Refused { .. })));
+            assert_eq!(callbacks, 0);
+        } else {
+            assert_eq!(result.unwrap(), 202);
+            assert_eq!(callbacks, 1);
+        }
+    }
+    // A memory refusal precedes even malformed MATCH preparation.
+    let error = SelectionSet::search_store(
+        "syntax",
+        SearchQuery::Fts5Trigram {
+            expression: format!("{phrase} AND"),
+        },
+        SearchSettings { max_members: 512 },
+        &store,
+        &mut budget(40 * MIB),
+    )
+    .unwrap_err();
+    assert!(matches!(error, L2dError::Refused { .. }));
+    let prefix = SelectionSet::search_store(
+        "prefix",
+        SearchQuery::Fts5Trigram {
+            expression: "aaa*".into(),
+        },
+        SearchSettings { max_members: 512 },
+        &store,
+        &mut budget(512 * MIB),
+    )
+    .unwrap_err();
+    assert!(matches!(prefix, L2dError::Refused { .. }));
+    assert!(prefix.to_string().contains("prefix expansion"));
+    let literal_star = SelectionSet::search_store(
+        "literal-star",
+        SearchQuery::Fts5Trigram {
+            expression: "\"a*b\"".into(),
+        },
+        SearchSettings { max_members: 512 },
+        &store,
+        &mut budget(40 * MIB),
+    )
+    .unwrap();
+    assert_eq!(literal_star.members().len(), 1);
+}

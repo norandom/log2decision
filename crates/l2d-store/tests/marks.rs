@@ -619,3 +619,129 @@ fn marking_a_store_refuses_what_does_not_fit() {
     assert!(matches!(error, L2dError::Refused { .. }), "{error:?}");
     assert_eq!(tight.held_bytes(), 0, "nothing stays held after a refusal");
 }
+
+#[test]
+fn selections_keep_literal_glob_regex_and_trigram_fts_distinct() {
+    use l2d_core::selections::{
+        ReviewAction, ReviewDecision, ReviewState, SearchQuery, SearchSettings, SelectionSet,
+    };
+    let scratch = Scratch::new("selections");
+    let (logs, _) = fixture();
+    let mut store = store_named(&scratch, "selections", &logs);
+    let mut b = budget();
+    let search = |query, b: &mut MemoryBudget| {
+        SelectionSet::search_store("s", query, SearchSettings { max_members: 1000 }, &store, b)
+            .unwrap()
+    };
+    let literal = search(SearchQuery::literal("UNION SELECT"), &mut b);
+    assert_eq!(literal.members().len(), 4);
+    let glob = search(SearchQuery::glob("UNION SELECT"), &mut b);
+    assert!(glob.members().is_empty());
+    let regex = search(SearchQuery::regex("UNION.SELECT"), &mut b);
+    assert_eq!(regex.members().len(), 8);
+    assert!(
+        literal
+            .members()
+            .iter()
+            .all(|m| regex.members().contains(m))
+    );
+    let fts = search(
+        SearchQuery::Fts5Trigram {
+            expression: "UNION OR DROP".into(),
+        },
+        &mut b,
+    );
+    let words = search(SearchQuery::literal("UNION OR DROP"), &mut b);
+    assert!(words.members().is_empty());
+    assert!(fts.members().len() > 4);
+    let short = search(
+        SearchQuery::Fts5Trigram {
+            expression: "an".into(),
+        },
+        &mut b,
+    );
+    assert!(short.members().is_empty());
+    assert!(
+        !search(SearchQuery::literal("an"), &mut b)
+            .members()
+            .is_empty()
+    );
+    assert!(
+        SelectionSet::search_store(
+            "limit",
+            SearchQuery::regex("."),
+            SearchSettings { max_members: 1 },
+            &store,
+            &mut b
+        )
+        .is_err()
+    );
+    assert!(
+        SelectionSet::search_store(
+            "invalid",
+            SearchQuery::Fts5Trigram {
+                expression: "\"unterminated".into()
+            },
+            SearchSettings::default(),
+            &store,
+            &mut b
+        )
+        .is_err()
+    );
+    let mut selected = fts;
+    let decisions = [
+        ReviewDecision {
+            member: selected.members()[0].clone(),
+            state: ReviewState::Bad,
+        },
+        ReviewDecision {
+            member: selected.members()[1].clone(),
+            state: ReviewState::Conflict,
+        },
+    ];
+    let preview = selected.preview_review(&decisions, &b).unwrap();
+    selected
+        .review_store(
+            preview,
+            ReviewAction {
+                analyst: "reviewer".into(),
+                action: "inspected selected records".into(),
+            },
+            &store,
+            &mut b,
+        )
+        .unwrap();
+    let marks = selected
+        .export_mark_set("fts-reviewed", Label::Bad, &b)
+        .unwrap();
+    assert_eq!(marks.selected_count(), 1);
+    assert_eq!(marks.deselected_id_count(), selected.members().len() - 1);
+    marks.save(&scratch.paths(), &b).unwrap();
+    assert!(
+        MarkSet::load(&scratch.paths(), "fts-reviewed", &b)
+            .unwrap()
+            .try_eq(&marks)
+            .unwrap()
+    );
+    let saved = scratch.root.join("selection.json");
+    selected.save(&saved, &b).unwrap();
+    let loaded = SelectionSet::load(&saved, &b).unwrap();
+    assert_eq!(loaded.revision(&b).unwrap(), selected.revision(&b).unwrap());
+    loaded.require_store(&store, &mut b).unwrap();
+    let extra = l2d_core::LogsFrame::from_records(&[l2d_core::LogRecord {
+        text: "new content".into(),
+        label: Label::Unknown,
+        group: None,
+        first_position: 1,
+        occurrences: 1,
+    }])
+    .unwrap();
+    store
+        .add_with(
+            &rows(&extra),
+            VectorOrigin::without_release(&identity()),
+            &mut b,
+        )
+        .unwrap();
+    assert!(loaded.require_store(&store, &mut b).is_err());
+}

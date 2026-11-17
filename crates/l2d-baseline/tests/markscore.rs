@@ -1074,3 +1074,196 @@ fn scoring_memory_covers_rules_that_lengthen_a_text() {
     assert!(scorer.scoring_bytes(5) >= plain.scoring_bytes(redacted) + redacted);
     assert!(scorer.scoring_bytes(5) > plain.scoring_bytes(5));
 }
+
+#[test]
+fn reviewed_selection_exports_fit_and_redact_without_unresolved_background() {
+    use l2d_core::selections::{
+        ReviewAction, ReviewDecision, ReviewState, SearchQuery, SearchSettings, SelectionSet,
+    };
+    let scratch = Scratch::new("reviewed-selection");
+    let (logs, summary, mut b) = read_fixture();
+    let mut selection = SelectionSet::search_input(
+        "all",
+        SearchQuery::regex("."),
+        SearchSettings::default(),
+        &logs,
+        &summary,
+        &b,
+    )
+    .unwrap();
+    let decisions: Vec<_> = selection
+        .members()
+        .iter()
+        .take(11)
+        .enumerate()
+        .map(|(i, m)| ReviewDecision {
+            member: m.clone(),
+            state: if i < 5 {
+                ReviewState::Bad
+            } else if i < 10 {
+                ReviewState::Good
+            } else {
+                ReviewState::Conflict
+            },
+        })
+        .collect();
+    let preview = selection.preview_review(&decisions, &b).unwrap();
+    selection
+        .review_input(
+            preview,
+            ReviewAction {
+                analyst: "fixture reviewer".into(),
+                action: "explicitly reviewed first ten and left one conflicting".into(),
+            },
+            &summary,
+            None,
+            &b,
+        )
+        .unwrap();
+    let bad = selection.export_mark_set("bad", Label::Bad, &b).unwrap();
+    let good = selection.export_mark_set("good", Label::Good, &b).unwrap();
+    let project = scratch.project("reviewed");
+    bad.save(&project, &b).unwrap();
+    good.save(&project, &b).unwrap();
+    let bad = MarkSet::load(&project, "bad", &b).unwrap();
+    let good = MarkSet::load(&project, "good", &b).unwrap();
+    assert_eq!(bad.selected_count(), 5);
+    assert_eq!(good.selected_count(), 5);
+    assert_eq!(bad.deselected().len(), logs.len() - 10);
+    let fit = fit_from_marks(
+        &bad,
+        None,
+        RedactionInput::File {
+            logs: &logs,
+            summary: &summary,
+        },
+        &settings(),
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(fit.counts.marked, 5);
+    assert_eq!(fit.counts.other, 5);
+    assert_eq!(fit.counts.deselected, (logs.len() - 10) as u64);
+    let both = fit_from_marks(
+        &bad,
+        Some(&good),
+        RedactionInput::File {
+            logs: &logs,
+            summary: &summary,
+        },
+        &settings(),
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(both.counts.marked, 5);
+    assert_eq!(both.counts.other, 5);
+    let proposals = propose_redactions(
+        &bad,
+        RedactionInput::File {
+            logs: &logs,
+            summary: &summary,
+        },
+        &RedactionSettings::default(),
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(proposals.deselected_logs, (logs.len() - 10) as u64);
+    let saved = fit.scorer.save(&project, "reviewed-scorer").unwrap();
+    let loaded = BaselineScorer::load(&saved).unwrap();
+    assert!(loaded.mark_set_origin().is_some());
+}
+
+impl l2d_core::selections::SelectionStore for FixtureStore {
+    fn fts5_trigram_ids(
+        &self,
+        _: &str,
+        _: &mut MemoryBudget,
+        _: &mut dyn FnMut(&str) -> Result<(), L2dError>,
+    ) -> Result<u64, L2dError> {
+        Err(L2dError::InvalidInput {
+            detail: "test store has no FTS backend".into(),
+        })
+    }
+}
+#[test]
+fn reviewed_archive_and_store_exports_are_consumed_by_fitting_and_redaction() {
+    use l2d_core::selections::{
+        ReviewAction, ReviewDecision, ReviewState, SearchQuery, SearchSettings, SelectionSet,
+    };
+    let scratch = Scratch::new("reviewed-archive-store");
+    let mut b = budget();
+    let lines: Vec<String> = (0..14)
+        .map(|i| format!("request {i} outcome {}", if i < 5 { "bad" } else { "good" }))
+        .collect();
+    let path = scratch.archive("input.zip", &[("host/a.log", &lines)]);
+    let options = ZipInputSettings::default();
+    let (mut archive, report) = SelectionSet::search_archive(
+        "archive",
+        SearchQuery::regex("."),
+        SearchSettings::default(),
+        &path,
+        &options,
+        &mut b,
+    )
+    .unwrap();
+    let store = FixtureStore::new(&lines);
+    let mut stored = SelectionSet::search_store(
+        "stored",
+        SearchQuery::regex("."),
+        SearchSettings::default(),
+        &store,
+        &mut b,
+    )
+    .unwrap();
+    for (index, set) in [&mut archive, &mut stored].into_iter().enumerate() {
+        let decisions: Vec<_> = set
+            .members()
+            .iter()
+            .take(11)
+            .enumerate()
+            .map(|(i, m)| ReviewDecision {
+                member: m.clone(),
+                state: if i < 5 {
+                    ReviewState::Bad
+                } else if i < 10 {
+                    ReviewState::Good
+                } else {
+                    ReviewState::Conflict
+                },
+            })
+            .collect();
+        let preview = set.preview_review(&decisions, &b).unwrap();
+        let action = ReviewAction {
+            analyst: "fixture".into(),
+            action: "reviewed exact members".into(),
+        };
+        if index == 0 {
+            set.review_input(preview, action, &report.input, Some(&options.entries), &b)
+                .unwrap();
+        } else {
+            set.review_store(preview, action, &store, &mut b).unwrap();
+        }
+        let name = format!("reviewed-{index}");
+        let marks = set.export_mark_set(&name, Label::Bad, &b).unwrap();
+        let project = scratch.project(&name);
+        marks.save(&project, &b).unwrap();
+        let marks = MarkSet::load(&project, &name, &b).unwrap();
+        let input = || {
+            if index == 0 {
+                RedactionInput::Archive {
+                    path: &path,
+                    settings: &options,
+                }
+            } else {
+                RedactionInput::Store(&store)
+            }
+        };
+        let fit = fit_from_marks(&marks, None, input(), &settings(), &mut b).unwrap();
+        assert_eq!(fit.counts.marked, 5);
+        assert_eq!(fit.counts.other, 5);
+        assert_eq!(fit.counts.deselected, 4);
+        let proposals =
+            propose_redactions(&marks, input(), &RedactionSettings::default(), &mut b).unwrap();
+        assert_eq!(proposals.deselected_logs, 4);
+    }
+}

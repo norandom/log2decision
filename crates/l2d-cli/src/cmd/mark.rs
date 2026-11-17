@@ -114,6 +114,12 @@ fn mark_bytes(marks: &MarkSet) -> u64 {
         MarkQuery::Phrase { phrase } => phrase.len(),
         MarkQuery::Regex { pattern } => pattern.len(),
         MarkQuery::Positions { positions } => positions.len().saturating_mul(8),
+        MarkQuery::ReviewedSelection {
+            selection_revision,
+            review_revision,
+        } => selection_revision
+            .len()
+            .saturating_add(review_revision.len()),
     } as u64;
     let source = marks.input().map_or(0, |source| {
         source.path.len() as u64
