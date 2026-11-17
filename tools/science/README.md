@@ -173,3 +173,22 @@ uv run python hg17_run.py export --fold 0 --seed 0 --variant mask
 - The neighbour store and the linear head hold fitting-side vectors only; the head's
   penalty is chosen by grouped cross-validation inside the fitting side.
 - Held-out labels are read in one function, `metrics`.
+
+## Task 2.18: frozen exploratory redaction comparison
+
+`transfer218.ps1` reproduces preparation, actual product MarkSet fits, fold-specific
+NPU exports, identity audits and independent-label reporting. It uses the existing
+2.17 graphs and training/calibration records without retraining. See the dated
+[report](../../docs/2026-11-17-redaction-transfer-comparison.md) for the frozen plan,
+resource bounds, caveats and measured results. Run from this repository:
+
+```powershell
+.\tools\science\transfer218.ps1 -Root D:\BuildArtifacts\log2decision\task-2.18-replay
+```
+
+Use a fresh artifact root for a complete replay. `-Stage audit` and `-Stage report`
+reuse an existing root's `run01` outputs without encoding again. The helper checks
+are `uv.exe run --project tools/science python -m unittest discover -s
+tools/science/tests -p test_transfer218.py`. Keep its environment and all disposable
+outputs under the configured D: build storage. This is development-only Python;
+the product acquires no new Python dependency or classifier.

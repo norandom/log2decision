@@ -58,7 +58,7 @@ affected tests, native SQLite heap regression, fmt, Clippy and CLI help passed o
 the corrected source. Evidence: `D:\BuildArtifacts\log2decision\task-1.26\`.
 FTS is store-only and intrinsically insensitive; unquoted prefix expansion
 refuses because its native allocation cannot be bounded by expression length.
-Selection membership overflow refuses explicitly. Next: task 2.18 (exploratory comparison).
+Selection membership overflow refuses explicitly. Next: task 2.8 (support gate).
 
 Task 1.27 is complete (reviewed commit `b62236d`): bounded pattern catalogue,
 disk membership, deterministic source-bound revisions, representative/variable/
@@ -106,7 +106,24 @@ an estimate; source/pattern diversity is not endpoint independence. Guide and li
 `docs/qualification/vector-exploration-contract.md`. Evidence:
 `D:\BuildArtifacts\log2decision\task-2.19\validation.md`. Build cache: 18.18 GiB.
 Next: the owner-selected exploratory score-transfer comparison in task 2.18.
-Remaining execution order: 2.18 → 2.8 →
+Task 2.18 completed the owner-selected exploratory comparison (reviewed commit
+`d99bd59`), independently APPROVED as measurement only. The product MarkSet
+baseline's held-endpoint mean ROC AUC was 0.61631 raw versus 0.61581 redacted:
+these training-derived host/path redactions did not demonstrate agnostic transfer.
+The vector diagnostic's mean rose slightly but its gap change was uncertain and
+pooled ranking worsened. P@100=1 in every arm is the diagnostic budget ceiling,
+not qualification. Beyond-seed/collision sensitivity retains the conclusion.
+The reviewer verified all 412 hashes, 40 ROC/AP partition results, original and
+transformed separation, fold-correct encoder training/calibration and accounting.
+All five NPU exports (256,080 vectors), product fits, six helpers and deterministic
+replays passed; fmt/targeted Clippy passed. No production behavior changed.
+Report: `docs/2026-11-17-redaction-transfer-comparison.md`; evidence:
+`D:\BuildArtifacts\log2decision\task-2.18\validation.md`. Final Requirements
+19.1/19.2/19.5/19.6 remain incomplete: no new human review, untouched final cohort,
+finished policy comparison or operational targets. Temporal transfer is untested.
+Next: task 2.8, conservative support gating; never infer qualification from this
+exploratory result. Build target 19.313 GiB, D: free about 208 GiB after review.
+Remaining execution order: 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone 1.28 is complete. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be

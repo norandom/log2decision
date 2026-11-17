@@ -1607,3 +1607,19 @@ precision 3/4, but every candidate satisfied the chosen radius. No generalizatio
 or classification claim follows. See `docs/qualification/vector-exploration-contract.md`.
 The owner selected exploratory transfer comparison next; final deployment
 qualification remains gated on independent evidence and operational targets.
+## Task 2.18 exploratory result — 2026-11-17
+
+The owner selected exploratory comparison without deployment qualification. Actual
+product MarkSet scores and frozen fold-correct 2.17 NPU vectors were measured on
+five historical CSIC endpoint folds, with training-only redactions and independent
+benchmark labels beyond the seed. Baseline held mean ROC AUC remained about 0.616;
+redaction did not demonstrate agnostic transfer. Small fitted/held gaps and perfect
+precision at the 100-record budget ceiling do not establish qualification. Vector
+heads are diagnostics, not a production classifier; their modest mean change was
+uncertain and pooled ranking worsened. Conservative support gating remains next.
+
+See `docs/2026-11-17-redaction-transfer-comparison.md` for paired collision
+sensitivity, fold spread, calibration/training provenance and resource limits.
+Final independent review labels, untouched report cohort, operational targets and
+finished-policy comparison remain missing; temporal transfer is untested. No final
+holdout was examined, and this result must not be represented as deployment approval.
