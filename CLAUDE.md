@@ -53,6 +53,7 @@ Skills are located in `.claude/skills/kiro-*/SKILL.md`
 - Follow explicit host and project rules and retain required workflow checks. Do not skip relevant skills just because the task is small.
 
 ## Development Rules
+- Follow `AGENTS.md` for project build storage limits, cache reuse and validation scheduling.
 - 3-phase approval workflow: Requirements → Design → Tasks → Implementation
 - Human review required each phase; use `-y` only for intentional fast-track
 - Keep steering current and verify alignment with `/kiro-spec-status`

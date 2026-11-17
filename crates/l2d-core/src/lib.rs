@@ -49,4 +49,5 @@ pub use zip_input::{
 };
 
 pub use parts::{PartInfo, PartTable, PartWriter, WorkDir};
+pub mod patterns;
 pub mod selections;

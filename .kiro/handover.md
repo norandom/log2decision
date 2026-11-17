@@ -52,9 +52,28 @@ affected tests, native SQLite heap regression, fmt, Clippy and CLI help passed o
 the corrected source. Evidence: `D:\BuildArtifacts\log2decision\task-1.26\`.
 FTS is store-only and intrinsically insensitive; unquoted prefix expansion
 refuses because its native allocation cannot be bounded by expression length.
-Selection membership overflow refuses explicitly. Next: task 1.27.
+Selection membership overflow refuses explicitly. Next: task 1.28.
 
-Remaining execution order: 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
+Task 1.27 is complete (reviewed commit `b62236d`): bounded pattern catalogue,
+disk membership, deterministic source-bound revisions, representative/variable/
+boundary evidence, separate occurrence and distinct/reviewed support, explicit
+ungrouped overflow and an occurrence-aware store adapter. Independent review:
+APPROVED; 26 independently replayed tests passed. Workspace evidence: 843 passed,
+0 failed, 51 ignored before the final transaction admission fix; after that fix,
+19 store, 39 baseline/redaction, 8 core and one release qualification test passed.
+Fmt, Clippy and CLI help passed. Parent rechecked artifact hashes, fmt and the
+release qualification before merging. Evidence: `D:\BuildArtifacts\log2decision\task-1.27`.
+The frozen 20-text engineering comparison selected Drain-style (TP7/FP0/FN1)
+over trigram (TP6/FP1/FN2); this is not human-labelled deployment qualification.
+
+Task 1.28 uses the owner-selected `l2d discover ...` group. Partial batch review
+must preserve existing decisions outside its target; save the reviewed SelectionSet
+receipt alongside exported MarkSets. Query preview must state its background scope.
+Build storage now follows `AGENTS.md`: one reused project target, no debug symbols
+or incremental compilation, 30 GiB target/50 GiB free preflight limits, serialized
+heavy jobs. The old project debug cache was cleaned (27.7 GiB); release evidence
+was retained. The owner resolved the shared cargo-target cleanup separately.
+Remaining execution order: 1.28 → 2.19 → 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be

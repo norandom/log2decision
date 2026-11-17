@@ -2,7 +2,7 @@
 
 ## Active roadmap — owner alignment, 2026-11-17
 
-This order supersedes earlier sequencing notes; completed task records remain historical evidence. Task 1.23 wrap-up was verified and merged as `883ce5e` on 2026-11-17, including two memory fixes found by fresh independent review. The source passed 788 workspace tests (0 failed, 49 ignored), 27 targeted tests, fmt, Clippy with warnings denied and CLI help. Both old task worktrees were verified and removed. Tasks 1.25 (reviewed commit `cd103f6`), 1.24 (`84bb15a`) and 1.26 (`65a00fb`) are complete; next is 1.27. Task 1.24 passed independent re-review, 820 workspace tests (0 failed, 50 ignored), fmt, Clippy and CLI/AIT smoke.
+This order supersedes earlier sequencing notes; completed task records remain historical evidence. Task 1.23 wrap-up was verified and merged as `883ce5e` on 2026-11-17, including two memory fixes found by fresh independent review. The source passed 788 workspace tests (0 failed, 49 ignored), 27 targeted tests, fmt, Clippy with warnings denied and CLI help. Both old task worktrees were verified and removed. Tasks 1.25 (reviewed commit `cd103f6`), 1.24 (`84bb15a`) and 1.26 (`65a00fb`) are complete. Task 1.27 (`b62236d`) is also complete; next is 1.28, using the owner-selected `l2d discover ...` command group. Task 1.24 passed independent re-review, 820 workspace tests (0 failed, 50 ignored), fmt, Clippy and CLI/AIT smoke.
 
 1.25 review (2026-11-17): APPROVED independently. Nine task tests passed; workspace 797 passed, 0 failed, 49 ignored; fmt, Clippy with warnings denied, help and actual saved-regex smoke passed. Merged source matches the reviewed commit; main-checkout fmt/help passed. Evidence: `D:\BuildArtifacts\log2decision\task-1.25\`. `l2d mark` uses existing MarkSet APIs, a second bounded archive pass for borrowed matching text, unchanged entry selection and source checks before saving. Damaged archives do not save marks and preserve the whole-report plus error JSON-line contract. The first-pass summary is dropped before reopening; fixed retained-set/output reservation avoids reader-lag growth. No dependencies or core changes. RED: six flag-off failures, then two additional tests exposed missing entry summary and premature reader-count reporting. Temporary flag removed.
 
@@ -28,7 +28,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 1.21, 1.25, 1.24_
   - _Requirements: 17.1, 17.2, 17.6, 17.7, 19.7_
 
-- [ ] 1.27 Pattern extraction qualification and bounded catalogue
+- [x] 1.27 Pattern extraction qualification and bounded catalogue
   - Compare Drain-style template mining with n-gram grouping on reviewed same/different-pattern examples, including rare events, negation and success/failure variants. Record review usefulness, membership quality, memory and timing; choose the engine from these measurements, with no Python product dependency.
   - Implement bounded catalogue, disk memberships, deterministic revisions, occurrence versus distinct/reviewed counts and explicit ungrouped overflow. Discovery masks are separate from confirmed fitting redactions.
   - Done when every selected member is accounted for, a repeat yields the same catalogue, outcome collisions are exposed, and resource-limit cases refuse or retain an explicit ungrouped remainder.

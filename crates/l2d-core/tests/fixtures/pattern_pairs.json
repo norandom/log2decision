@@ -1,0 +1,26 @@
+{
+  "provenance": "Task 1.27 agent-authored engineering cases, 2026-11-17; explicit semantic annotations below, pending independent review. No human-labelled deployment qualification claim.",
+  "criteria": "Frozen before engine implementation: compare all explicitly annotated same/different pairs via the group annotations (same group means same pattern). Require zero protected-outcome collisions and precision >= 0.95; maximize recall, then minimize representative inspection burden, then median elapsed time. Report unsupported scope. Parameters frozen: Drain-style token agreement 800/1000, character-trigram Jaccard 720/1000; no tuning on held-out stress cases.",
+  "cases": [
+    {"text":"login succeeded user=alice id=101", "group":"login-ok", "rationale":"Success event; user and request identity vary."},
+    {"text":"login succeeded user=bob id=202", "group":"login-ok", "rationale":"Same success event, different user and request."},
+    {"text":"login failed user=alice id=303", "group":"login-fail", "rationale":"Failure must differ from success."},
+    {"text":"login failed user=charlie id=404", "group":"login-fail", "rationale":"Same failure, user and ID are incidental."},
+    {"text":"operation permitted user=alice", "group":"permit", "rationale":"Permission granted."},
+    {"text":"operation permitted user=bob", "group":"permit", "rationale":"Same grant, different principal."},
+    {"text":"operation not permitted user=alice", "group":"deny", "rationale":"Negation reverses permission."},
+    {"text":"operation not permitted user=bob", "group":"deny", "rationale":"Same denied outcome."},
+    {"text":"request completed status=200 id=101", "group":"http200", "rationale":"Numeric status is outcome, ID is variable."},
+    {"text":"request completed status=200 id=999", "group":"http200", "rationale":"Same status with a different ID."},
+    {"text":"request completed status=500 id=101", "group":"http500", "rationale":"Error status must not be masked as an ID."},
+    {"text":"request completed status=500 id=999", "group":"http500", "rationale":"Same error status with a different ID."},
+    {"text":"worker alpha completed batch", "group":"worker", "rationale":"Worker name is a free token variable."},
+    {"text":"worker beta completed batch", "group":"worker", "rationale":"Same batch completion with different worker name."},
+    {"text":"cache shard blue lookup complete", "group":"cache", "rationale":"Shard name is incidental; preserve lookup action."},
+    {"text":"cache shard green lookup complete", "group":"cache", "rationale":"Same lookup with different shard name."},
+    {"text":"certificate revoked reason=compromised", "group":"rare-revoked", "rationale":"Rare singleton security event; must remain visible."},
+    {"text":"disk read-only emergency", "group":"rare-disk", "rationale":"Rare singleton; punctuation read-only carries meaning."},
+    {"text":"parser accepted payload=[ok]", "group":"bracket", "rationale":"Payload punctuation carries structure."},
+    {"text":"parser accepted payload={ok}", "group":"brace", "rationale":"Different payload structure must remain distinct."}
+  ]
+}

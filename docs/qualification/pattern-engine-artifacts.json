@@ -1,0 +1,35 @@
+{
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "fixture_positive_pairs": 8,
+  "fixture_negative_pairs": 182,
+  "budget_bytes": 536870912,
+  "max_patterns": 64,
+  "max_text_bytes": 4096,
+  "algorithm_revision": "bounded-patterns-v1",
+  "drain_similarity_per_mille": 800,
+  "trigram_similarity_per_mille": 720,
+  "mask_revision": "key-values-v1",
+  "mask_keys": [
+    "id",
+    "user",
+    "host"
+  ],
+  "artifacts": [
+    {
+      "artifact": "crates/l2d-core/src/patterns.rs",
+      "sha256": "9df0e729ca7a2c01e893e94b7ddd22277c03c6bf1c3b1a545206d83d1fe23c8e"
+    },
+    {
+      "artifact": "crates/l2d-core/tests/pattern_qualification.rs",
+      "sha256": "1af4e90421656bf84c6582ca7e7215d539cb364ada9cbb285cfcb28192e68ad3"
+    },
+    {
+      "artifact": "crates/l2d-core/tests/fixtures/pattern_pairs.json",
+      "sha256": "ff4d57d2c0c5daebda28e5c6af504ca8ff22e3e39f7f074723d87c754a744c88"
+    },
+    {
+      "artifact": "D:/BuildArtifacts/log2decision/task-1.26-target/release/deps/pattern_qualification-fac0ff14c5adbde7.exe",
+      "sha256": "fd98eff90bbf84d88f041998f826637855cda72d4c3ae069519a6fd9e7fbb6f8"
+    }
+  ]
+}

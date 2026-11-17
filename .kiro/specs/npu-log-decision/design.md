@@ -1547,3 +1547,21 @@ Independent re-review approved the change. Full workspace: 831 passed, 0 failed,
 50 ignored before final capacity/FTS corrections; after those scoped corrections,
 54 affected tests, the native regression, fmt, Clippy and CLI help passed. Evidence:
 D:\BuildArtifacts\log2decision\task-1.26\. Discovery commands remain task 1.28.
+
+## Task 1.27 as built — 2026-11-17
+
+`PatternCatalogue` persists source/selection-bound deterministic revisions and
+hashed disk memberships, including ungrouped overflow. It exposes real
+representatives, variable and boundary examples and differing-literal collision
+evidence. Discovery masks do not alter fitting redactions or assign labels.
+Occurrence counts remain distinct from independent text/review support. Store
+admission measures the longest text inside the read transaction before reserving
+cursor workspace; final source counts detect concurrent snapshot changes.
+
+The bounded Drain-style variant is the default after the frozen engineering
+comparison (20 texts, eight positive and 182 negative pairs): TP7/FP0/FN1 versus
+trigram TP6/FP1/FN2. Both covered 20 members using 13 representatives. The fixture
+is engineering evidence, not human-labelled deployment qualification. See
+`docs/qualification/pattern-engine-qualification.md` and the catalogue contract
+for variant limits, measurements, hashes and replay commands. Refinement and the
+owner-selected `l2d discover ...` command group remain task 1.28.
