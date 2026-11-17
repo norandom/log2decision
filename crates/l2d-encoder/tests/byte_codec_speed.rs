@@ -22,7 +22,9 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use l2d_core::{Csic2010Adapter, InputAdapter, ProjectPaths};
+use l2d_core::{Csic2010Adapter, ProjectPaths};
+#[path = "npu_support/resources.rs"]
+mod resources;
 use l2d_encoder::{ByteCodec, ByteTable, InputArch, InputMode};
 
 struct Counting;
@@ -245,10 +247,16 @@ fn the_image_buffer_of_a_session_allocates_nothing_per_text_or_per_image() {
 #[test]
 #[ignore = "on request, in release: the image writers on the CSIC texts"]
 fn csic_throughput_of_the_image_writers_on_one_thread() {
+    let _resources = resources::Measurement::start("image writer throughput", false);
     use l2d_encoder::encode::{ImageInput, RowImage};
     const PASSES: usize = 15;
     const ROWS: usize = 64;
-    let (logs, _) = Csic2010Adapter::new().read(&csic_path()).unwrap();
+    let logs = resources::csic(&csic_path());
+    resources::copied_logs(&logs);
+    resources::reserve(
+        4 * ROWS as u64 * 64 * 256 * 4 + 4 * 1024 * 1024,
+        "image writers and codec buffers",
+    );
     let texts: Vec<String> = logs.records().map(|record| record.text).collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let n = refs.len();
@@ -340,9 +348,12 @@ fn rate(texts: usize, seconds: &mut [f64]) -> (f64, f64) {
 #[test]
 #[ignore = "on request, in release: throughput on the CSIC texts"]
 fn csic_throughput_of_text_to_model_input_on_one_thread() {
+    let _resources = resources::Measurement::start("byte codec throughput", false);
     const NPU_LOGS_PER_SECOND: f64 = 30_000.0;
     const PASSES: usize = 15;
-    let (logs, _) = Csic2010Adapter::new().read(&csic_path()).unwrap();
+    let logs = resources::csic(&csic_path());
+    resources::copied_logs(&logs);
+    resources::reserve(4 * 1024 * 1024, "codec batch, table and timing buffers");
     let texts: Vec<String> = logs.records().map(|record| record.text).collect();
     let total_bytes: usize = texts.iter().map(String::len).sum();
     println!(

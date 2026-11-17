@@ -898,7 +898,23 @@ fn every_row_is_right_in_both_graphs() {
 #[test]
 #[ignore = "needs the NPU and the fixture of task 2.16; run on request"]
 fn vectors_against_the_reference_and_throughput() {
+    let _resources =
+        npu_support::resources::Measurement::start("hierarchical NPU throughput", true)
+            .with_process_memory(npu_support::process_memory);
     let Some(fixture) = fixture() else { return };
+    let layout = &fixture.layout;
+    let images = layout.table_width * layout.byte_rows * layout.input_bytes
+        + layout.features * layout.patch_rows * layout.patch_limit
+        + 8 * layout.input_bytes
+        + layout.byte_rows
+        + layout.patch_rows;
+    npu_support::resources::reserve(
+        4 * images as u64 * 8
+            + fixture.texts.len() as u64
+                * (8 * layout.dimension as u64 * 4 + 8 * layout.patch_limit as u64 * 8 + 128)
+            + 4 * 1024 * 1024,
+        "hierarchical images, patch scratch, recorded starts and output copies",
+    );
     let mut hierarchy = Hierarchy::open(&fixture, false);
     let dimension = fixture.layout.dimension;
     let texts = refs(&fixture.texts);

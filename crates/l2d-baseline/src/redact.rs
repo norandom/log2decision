@@ -521,7 +521,7 @@ impl Counter {
 /// What the mark set holds of its logs, in bytes.
 pub(crate) fn marks_bytes(marks: &MarkSet) -> u64 {
     8 * (marks.positions().len() + marks.deselected().len()) as u64
-        + MARKED_ID_BYTES * (marks.ids().len() + marks.deselected_ids().len()) as u64
+        + MARKED_ID_BYTES * (marks.id_count() + marks.deselected_id_count()) as u64
 }
 
 fn frame_failed(doing: &str, error: &PolarsError) -> L2dError {
@@ -559,8 +559,8 @@ pub(crate) enum MarkSide {
 }
 
 impl MarkSide {
-    pub(crate) fn of(marks: &MarkSet, view: &LogView<'_>) -> Self {
-        match (view.position, view.id) {
+    pub(crate) fn of(marks: &MarkSet, view: &LogView<'_>) -> Result<Self, L2dError> {
+        Ok(match (view.position, view.id) {
             (Some(position), _) => {
                 if marks.is_selected(position) {
                     MarkSide::Marked
@@ -571,20 +571,16 @@ impl MarkSide {
                 }
             }
             (None, Some(id)) => {
-                if marks.is_selected_id(id) {
+                if marks.is_selected_id(id)? {
                     MarkSide::Marked
-                } else if marks
-                    .deselected_ids()
-                    .binary_search_by(|marked| marked.as_str().cmp(id))
-                    .is_ok()
-                {
+                } else if marks.is_deselected_id(id)? {
                     MarkSide::Deselected
                 } else {
                     MarkSide::Unmarked
                 }
             }
             (None, None) => MarkSide::Unmarked,
-        }
+        })
     }
 }
 
@@ -777,7 +773,7 @@ struct SideSink<'m, F: FnMut(&str, MarkSide)> {
 
 impl<F: FnMut(&str, MarkSide)> LogSink for SideSink<'_, F> {
     fn log(&mut self, view: &LogView<'_>) -> Result<(), L2dError> {
-        (self.each)(view.text, MarkSide::of(self.marks, view));
+        (self.each)(view.text, MarkSide::of(self.marks, view)?);
         Ok(())
     }
 

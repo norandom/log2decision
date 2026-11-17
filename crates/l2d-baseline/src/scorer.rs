@@ -1164,6 +1164,11 @@ static SAVES: AtomicU64 = AtomicU64::new(0);
 impl BaselineScorer {
     /// Fits a scorer under a memory budget observed now with the default settings (half
     /// of the free physical memory). See [`BaselineScorer::fit_with`].
+    ///
+    /// This is a numerical primitive: standalone expensive callers must hold a
+    /// `l2d_core::resource::ResourceGuard` for their operation. CLI baseline fitting,
+    /// mark-set fitting and fold evaluation acquire admission at their operation
+    /// entry; fold workers share that operation and do not acquire independent gates.
     pub fn fit(
         logs: &LogsFrame,
         inputs: &[InputSummary],
@@ -1180,6 +1185,7 @@ impl BaselineScorer {
     /// The fit is refused before the feature matrix is allocated when its estimated
     /// memory exceeds what `budget` leaves. See the module documentation for the
     /// refusal rule, determinism and the memory estimate.
+    /// Operation admission is caller-owned, as documented on [`BaselineScorer::fit`].
     pub fn fit_with(
         logs: &LogsFrame,
         inputs: &[InputSummary],
@@ -1638,7 +1644,7 @@ impl BaselineScorer {
                 file: MARK_SET_FILE.into(),
                 sha256: origin.marks_sha256().to_string(),
                 deselected: (origin.marks().deselected().len()
-                    + origin.marks().deselected_ids().len()) as u64,
+                    + origin.marks().deselected_id_count()) as u64,
                 other: match origin.other() {
                     None => OtherFile::Unmarked,
                     Some(other) => OtherFile::MarkSet {

@@ -175,6 +175,11 @@ fn fit(context: &Context, args: &FitArgs) -> Result<(), L2dError> {
     check_name("--name", name)?;
     let paths = context.paths()?;
     let mut budget = context.budget()?;
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "baseline training",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )?;
     let input = read_input(&paths, &args.input, &mut budget)?;
     let input_report = InputReport::of(&input.logs, &input.summary, input.adapter, &budget)?;
 
@@ -208,6 +213,7 @@ fn fit(context: &Context, args: &FitArgs) -> Result<(), L2dError> {
     } else {
         fit_text(out, &report, &fitted, &input_report, &memory)
     };
+    guard.finish()?;
     written.map_err(output_failed)
 }
 

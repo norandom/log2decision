@@ -472,6 +472,40 @@ fn deduplication_on_disk_gives_the_rows_and_counts_of_one_at_a_time() {
 }
 
 #[test]
+fn freeze_inside_the_first_batch_preserves_rows_while_readers_are_active() {
+    let scratch = Scratch::new("freeze-inside-batch");
+    let path = scratch.write("big.zip", &varied(true));
+    let spill = scratch.path("spill");
+    let (reference, _) = read(&path, &settings(Some(1)), Some(1024));
+    // No previously completed batch exists when the first batch crosses this set
+    // threshold. This exercises accept_batch's freeze, rather than the between-batch
+    // memory check, with later-entry readers already running and handing on pieces.
+    for at_once in [2, MAX_ENTRIES_AT_ONCE] {
+        let (got, readers) = read_with(
+            &path,
+            &settings(Some(at_once)),
+            &mut budget(None, Some(1024)),
+            Some((&spill, Some(3))),
+        )
+        .unwrap();
+        assert_eq!(readers, at_once);
+        let disk = got.dedup.as_ref().unwrap();
+        assert_eq!(disk.set_texts, 0, "frozen before accepting the first batch");
+        assert!(disk.spilled_records > 1024);
+        let texts = |read: &Read| {
+            read.rows()
+                .into_iter()
+                .map(|(text, position, _)| (text.clone(), *position))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&got), texts(&reference));
+        assert_eq!(got.counts, reference.counts);
+        assert_eq!(got.summary, reference.summary);
+        assert!(!spill.exists());
+    }
+}
+
+#[test]
 fn a_set_that_outgrows_a_tight_limit_goes_to_disk_with_entries_read_at_once() {
     let scratch = Scratch::new("tight");
     // 250,000 distinct lines in each of four entries, each line in two of them: the

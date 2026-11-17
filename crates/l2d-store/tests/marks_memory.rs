@@ -12,6 +12,7 @@
 //! is created, filled and opened before it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,6 +23,7 @@ use l2d_core::{
     ProjectPaths,
 };
 use l2d_store::{LogFlags, Store, VectorOrigin, rows_frame};
+use sha2::{Digest, Sha256};
 
 struct Counting;
 
@@ -144,6 +146,24 @@ fn mark_within(
     let (outcome, detail) = match &result {
         Ok(set) => {
             assert_eq!(set.count(), marked, "{shape}");
+            if set.ids_spilled() {
+                SPILLED.fetch_add(1, Ordering::Relaxed);
+                assert!(budget.usage().report().spilled);
+            }
+            let mut hash = Sha256::new();
+            set.for_each_id(|id| {
+                hash.update(id.as_bytes());
+                Ok(())
+            })
+            .unwrap();
+            let digest = format!("{:x}", hash.finalize());
+            let mut hashes = ID_HASHES.lock().unwrap();
+            if let Some(previous) = hashes.insert(shape.to_string(), digest.clone()) {
+                assert_eq!(
+                    digest, previous,
+                    "{shape}: the same sorted IDs at every budget and batch size"
+                );
+            }
             (Outcome::Completed, format!("{} marked", set.count()))
         }
         Err(L2dError::Refused { reason }) => (Outcome::Refused, reason.clone()),
@@ -165,14 +185,11 @@ fn mark_within(
          bytes beside the baseline ({outcome:?})"
     );
     assert_eq!(budget.held_bytes(), 0, "{shape}: nothing stays held");
-    if outcome == Outcome::Refused {
-        REFUSALS.lock().unwrap().push(detail);
-    }
     outcome
 }
 
-/// The reasons of the refusals so far.
-static REFUSALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SPILLED: AtomicUsize = AtomicUsize::new(0);
+static ID_HASHES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 #[test]
 fn marking_a_store_stays_within_its_memory_limit() {
@@ -183,7 +200,7 @@ fn marking_a_store_stays_within_its_memory_limit() {
         root: std::env::temp_dir().join(format!("l2d-store-marks-memory-{}", std::process::id())),
     };
     let _ = std::fs::remove_dir_all(&scratch.root);
-    let rows = 30_000u64;
+    let rows = 70_000u64;
     let records: Vec<LogRecord> = (0..rows)
         .map(|index| LogRecord {
             text: format!(
@@ -223,7 +240,8 @@ fn marking_a_store_stays_within_its_memory_limit() {
     let phrase_marked = (0..rows)
         .filter(|index| format!("/shop/item/{index}/").contains("item/1"))
         .count() as u64;
-    // 25 and 26 MiB leave the regular expression room to start, not to hold every id.
+    // The smaller budgets refuse before SQLite starts; successful tight budgets
+    // spill the IDs, and larger ones retain them. Both must give the same IDs.
     let ladder = [16, 24, 25, 26, 28, 32, 48].map(|mib| mib * MIB);
     for (shape, query, marked) in [
         ("regex, every log", &every, rows),
@@ -246,13 +264,9 @@ fn marking_a_store_stays_within_its_memory_limit() {
             );
         }
     }
-    // Some read was refused while it held ids already: the ids are counted as they grow.
-    let refusals = REFUSALS.lock().unwrap();
     assert!(
-        refusals
-            .iter()
-            .any(|reason| reason.contains("logs marked so far")
-                && !reason.contains("the ids of 0 logs")),
-        "{refusals:#?}"
+        SPILLED.load(Ordering::Relaxed) > 0,
+        "tight successful marks must spill instead of refusing growing IDs"
     );
+    assert_eq!(ID_HASHES.lock().unwrap().len(), 2);
 }

@@ -190,13 +190,25 @@ pub struct MarkFitCounts {
 /// The mark sets a score was fitted from, as they were then, and what the fit took of
 /// the logs. Saved with the score as copies of the mark-set files; their SHA-256 are
 /// part of the score's revision.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MarkSetOrigin {
     marks: MarkSet,
     marks_file: Vec<u8>,
     marks_sha256: String,
     other: Option<(MarkSet, Vec<u8>, String)>,
     counts: MarkFitCounts,
+}
+
+impl PartialEq for MarkSetOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        // These immutable, validated JSON copies cover every mark-set field and are
+        // already retained for the scorer's revision. Comparing them never reads disk.
+        self.marks_file == other.marks_file
+            && self.marks_sha256 == other.marks_sha256
+            && self.other.as_ref().map(|(_, bytes, hash)| (bytes, hash))
+                == other.other.as_ref().map(|(_, bytes, hash)| (bytes, hash))
+            && self.counts == other.counts
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -409,8 +421,11 @@ impl Collector<'_> {
 impl LogSink for Collector<'_> {
     fn log(&mut self, view: &LogView<'_>) -> Result<(), L2dError> {
         self.counts.read += 1;
-        let primary = MarkSide::of(self.marks, view);
-        let second = self.other.map(|other| MarkSide::of(other, view));
+        let primary = MarkSide::of(self.marks, view)?;
+        let second = self
+            .other
+            .map(|other| MarkSide::of(other, view))
+            .transpose()?;
         if primary == MarkSide::Marked {
             self.marked_seen += 1;
         }
@@ -693,9 +708,15 @@ pub fn fit_from_marks(
     settings: &MarkFitSettings,
     budget: &mut MemoryBudget,
 ) -> Result<MarkFit, L2dError> {
+    let guard = l2d_core::resource::ResourceGuard::tracked(
+        "mark-set training",
+        l2d_core::resource::busy_choice(),
+        budget.usage(),
+    )?;
     let held = budget.held_bytes();
     let fitted = fit(marks, other, &input, settings, budget, held);
     budget.hold(held);
+    guard.finish()?;
     fitted
 }
 
@@ -860,7 +881,7 @@ fn fit(
                  class ({other_class}); nothing was fitted",
                 counts.marked,
                 marks.count(),
-                marks.deselected().len() + marks.deselected_ids().len(),
+                marks.deselected().len() + marks.deselected_id_count(),
                 counts.other
             ),
         });

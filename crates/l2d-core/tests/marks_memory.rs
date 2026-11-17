@@ -88,6 +88,94 @@ fn measure<T>(run: impl FnOnce() -> T) -> (T, u64) {
     (result, peak.saturating_sub(before) as u64)
 }
 
+#[test]
+fn store_id_spill_save_and_load_stay_within_the_memory_limit() {
+    use l2d_core::MarkStore;
+    use l2d_core::polars::prelude::DataFrame;
+    struct Many;
+    impl MarkStore for Many {
+        fn store_name(&self) -> &str {
+            "many"
+        }
+        fn content_sha256(&self, _: &mut MemoryBudget) -> Result<String, L2dError> {
+            Ok("a".repeat(64))
+        }
+        fn phrase_ids(
+            &self,
+            _: &str,
+            bytes: u64,
+            budget: &mut MemoryBudget,
+            each: &mut dyn FnMut(&str),
+        ) -> Result<(), L2dError> {
+            budget.require_whole(100_000 * bytes, "IDs")?;
+            for index in (0..100_000).rev() {
+                each(&format!("{index:064x}"));
+            }
+            Ok(())
+        }
+        fn text_batches(
+            &self,
+            _: u64,
+            _: u64,
+            _: &mut MemoryBudget,
+            _: &mut dyn FnMut(&DataFrame) -> Result<u64, L2dError>,
+        ) -> Result<(), L2dError> {
+            unreachable!()
+        }
+    }
+    let _serial = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = std::env::temp_dir().join(format!("l2d-store-mark-memory-{}", std::process::id()));
+    let paths = l2d_core::ProjectPaths::new(&root);
+    for usable in [MIB / 2, MIB, 2 * MIB, 8 * MIB] {
+        let mut budget = MemoryBudget::observe_with(
+            &MemorySettings {
+                memory_limit_bytes: Some(BASELINE + usable),
+                ..MemorySettings::default()
+            },
+            || Ok(8 * GIB),
+        )
+        .unwrap();
+        let (result, peak) = measure(|| {
+            MarkSet::mark_store(
+                "many",
+                Label::Bad,
+                MarkQuery::Phrase {
+                    phrase: "match".into(),
+                },
+                &Many,
+                &mut budget,
+            )
+        });
+        assert!(peak <= usable, "mark at {usable}: {peak}");
+        let set = result.unwrap();
+        assert!(set.ids_spilled());
+        budget.hold(256 * 1024); // the disk-ID object's fixed share, beside save/load
+        let (saved, peak) = measure(|| set.save(&paths, &budget));
+        assert!(
+            peak + budget.held_bytes() <= usable,
+            "save at {usable}: {peak}"
+        );
+        if let Err(error) = saved {
+            assert!(matches!(error, L2dError::Refused { .. }));
+            continue;
+        }
+        let (loaded, peak) = measure(|| MarkSet::load(&paths, "many", &budget));
+        assert!(
+            peak + budget.held_bytes() <= usable,
+            "load at {usable}: {peak}"
+        );
+        if usable >= 2 * MIB {
+            assert_eq!(loaded.unwrap().count(), 100_000);
+        } else if let Err(error) = loaded {
+            assert!(matches!(error, L2dError::Refused { .. }));
+        }
+        std::fs::remove_file(paths.mark_set_path("many")).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 struct Scratch {
     dir: PathBuf,
 }

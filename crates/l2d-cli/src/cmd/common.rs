@@ -191,6 +191,8 @@ impl Context {
         MemoryReport {
             free_bytes: budget.free_bytes(),
             limit_bytes: budget.limit_bytes(),
+            counted_peak_bytes: budget.usage().report().counted_peak_bytes,
+            spilled: budget.usage().report().spilled,
             reserve_bytes: budget.reserve_bytes(),
             limit_share: (!limit_set).then_some(shares.limit),
             limit_share_adjusted: shares.limit_adjusted,
@@ -392,6 +394,9 @@ pub struct MemoryReport {
     pub free_bytes: u64,
     /// The memory limit applied.
     pub limit_bytes: u64,
+    /// Peak of the conservative estimates counted by the budget, including baseline.
+    pub counted_peak_bytes: u64,
+    pub spilled: bool,
     /// Free memory below this halves the next batch.
     pub reserve_bytes: u64,
     /// The share of the free memory used as the limit; `null` with `--memory-limit`.

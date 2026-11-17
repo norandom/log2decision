@@ -86,7 +86,8 @@
 //! - the marked positions, collected in chunks of [`CHUNK_POSITIONS`] so that no list
 //!   is copied as it grows, and at the end copied once into the sorted list of the mark
 //!   set (8 bytes each, beside the chunks);
-//! - the marked ids of a store, [`MARKED_ID_BYTES`] each;
+//! - the in-memory run of marked store ids, [`MARKED_ID_BYTES`] each, and bounded
+//!   merge/read buffers when IDs spill to sorted temporary files;
 //! - saving: the file is written as a stream ([`SAVE_BUFFER_BYTES`]), and a file of the
 //!   same name is read for the comparison only when [`LOAD_FACTOR`] times its size fits.
 //!
@@ -113,6 +114,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::L2dError;
 use crate::input::{PARSE_BATCH_BYTES, frame_error};
+use crate::mark_ids::{Builder as IdBuilder, Ids, WORK_BYTES as ID_WORK_BYTES};
 use crate::memory::{MemoryBudget, PROCESS_BASELINE_BYTES, exact};
 use crate::paths::ProjectPaths;
 use crate::types::{InputSummary, Label, LogsFrame};
@@ -298,7 +300,7 @@ pub trait MarkStore {
 }
 
 /// A named set of marked logs of one input or one store (see the module description).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MarkSet {
     name: String,
     label: Label,
@@ -308,8 +310,8 @@ pub struct MarkSet {
     positions: Vec<u64>,
     deselected: Vec<u64>,
     /// The marked ids of a store, ascending; empty for an input.
-    ids: Vec<String>,
-    deselected_ids: Vec<String>,
+    ids: Ids,
+    deselected_ids: Ids,
     /// The confirmed redaction rules, in order (task 1.22); empty until the analyst
     /// confirms some.
     redactions: Vec<RedactionRule>,
@@ -327,8 +329,8 @@ struct FileOut<'a> {
     count: u64,
     positions: &'a [u64],
     deselected: &'a [u64],
-    ids: &'a [String],
-    deselected_ids: &'a [String],
+    ids: &'a Ids,
+    deselected_ids: &'a Ids,
     #[serde(skip_serializing_if = "<[RedactionRule]>::is_empty")]
     redactions: &'a [RedactionRule],
 }
@@ -345,8 +347,8 @@ struct FileIn {
     count: u64,
     positions: Vec<u64>,
     deselected: Vec<u64>,
-    ids: Vec<String>,
-    deselected_ids: Vec<String>,
+    ids: Ids,
+    deselected_ids: Ids,
     #[serde(default)]
     redactions: Vec<RedactionRule>,
 }
@@ -542,12 +544,13 @@ impl MarkSet {
         budget.hold(held + fixed);
         let marked = Self::store_ids(name, &query, store, budget);
         budget.hold(held);
-        let mut ids = marked?;
-        ids.sort_unstable();
-        ids.dedup();
+        let ids = marked?;
+        if ids.spilled() {
+            budget.note_spill();
+        }
         // The hash and the marks are read in two transactions: the hash is taken again,
         // with the ids held, and a store whose logs changed in between is refused.
-        budget.hold(held + MARKED_ID_BYTES * ids.len() as u64);
+        budget.hold(held + fixed + ids.held());
         let after = store.content_sha256(budget);
         budget.hold(held);
         let after = after?;
@@ -573,7 +576,7 @@ impl MarkSet {
             positions: Vec::new(),
             deselected: Vec::new(),
             ids,
-            deselected_ids: Vec::new(),
+            deselected_ids: Ids::default(),
             redactions: Vec::new(),
         })
     }
@@ -584,45 +587,57 @@ impl MarkSet {
         query: &MarkQuery,
         store: &dyn MarkStore,
         budget: &mut MemoryBudget,
-    ) -> Result<Vec<String>, L2dError> {
-        let mut ids: Vec<String> = Vec::new();
-        match query {
-            MarkQuery::Phrase { phrase } => {
-                store.phrase_ids(phrase, MARKED_ID_BYTES, budget, &mut |id| {
-                    ids.push(id.to_string())
-                })?;
-            }
-            MarkQuery::Regex { .. } => {
-                let mut matcher = Matcher::new(query)?;
-                let failed = |error| frame_error("marking the logs of a batch", &error);
-                store
-                    .text_batches(0, MARKED_ID_BYTES, budget, &mut |batch| {
-                        let found = batch.column("id").and_then(Column::str).map_err(failed)?;
-                        let texts = batch
-                            .column(LogsFrame::TEXT)
-                            .and_then(Column::str)
-                            .map_err(failed)?;
-                        for (id, text) in found.into_no_null_iter().zip(texts.into_no_null_iter()) {
-                            if matcher.matches(0, text) {
-                                ids.push(id.to_string());
-                            }
+    ) -> Result<Ids, L2dError> {
+        let cap = (budget.left_bytes() / 4).clamp(MARKED_ID_BYTES, 16 * 1024 * 1024);
+        budget.require_whole(cap + ID_WORK_BYTES, &format!("collecting IDs for `{name}`"))?;
+        let before = budget.held_bytes();
+        budget.hold(before + cap + ID_WORK_BYTES);
+        let result = (|| {
+            let mut ids = IdBuilder::new(cap);
+            match query {
+                MarkQuery::Phrase { phrase } => {
+                    let mut failure = None;
+                    store.phrase_ids(phrase, 0, budget, &mut |id| {
+                        if failure.is_none() {
+                            failure = ids.push(id).err();
                         }
-                        Ok(MARKED_ID_BYTES * ids.len() as u64)
-                    })
-                    .map_err(|error| match error {
-                        L2dError::Refused { reason } => L2dError::Refused {
-                            reason: format!(
-                                "marking `{name}` holds the ids of {} logs marked so far: \
-                                 {reason}; nothing was saved",
-                                ids.len()
-                            ),
-                        },
-                        other => other,
                     })?;
+                    if let Some(error) = failure {
+                        return Err(error);
+                    }
+                }
+                MarkQuery::Regex { .. } => {
+                    let mut matcher = Matcher::new(query)?;
+                    let failed = |error| frame_error("marking the logs of a batch", &error);
+                    store
+                        .text_batches(0, 0, budget, &mut |batch| {
+                            let found = batch.column("id").and_then(Column::str).map_err(failed)?;
+                            let texts = batch
+                                .column(LogsFrame::TEXT)
+                                .and_then(Column::str)
+                                .map_err(failed)?;
+                            for (id, text) in
+                                found.into_no_null_iter().zip(texts.into_no_null_iter())
+                            {
+                                if matcher.matches(0, text) {
+                                    ids.push(id)?;
+                                }
+                            }
+                            Ok(0)
+                        })
+                        .map_err(|error| match error {
+                            L2dError::Refused { reason } => L2dError::Refused {
+                                reason: format!("marking `{name}`: {reason}; nothing was saved"),
+                            },
+                            other => other,
+                        })?;
+                }
+                MarkQuery::Positions { .. } => {}
             }
-            MarkQuery::Positions { .. } => {}
-        }
-        Ok(ids)
+            ids.finish()
+        })();
+        budget.hold(before);
+        result
     }
 
     fn of_positions(
@@ -639,8 +654,8 @@ impl MarkSet {
             source: MarkedSource::Input(input),
             positions,
             deselected: Vec::new(),
-            ids: Vec::new(),
-            deselected_ids: Vec::new(),
+            ids: Ids::default(),
+            deselected_ids: Ids::default(),
             redactions: Vec::new(),
         }
     }
@@ -689,8 +704,27 @@ impl MarkSet {
 
     /// The marked ids of a store, ascending, de-selected ones included; empty for a
     /// mark set of an input.
-    pub fn ids(&self) -> &[String] {
-        &self.ids
+    pub fn ids(&self, budget: &MemoryBudget) -> Result<Vec<String>, L2dError> {
+        budget.require_whole(
+            self.ids.len() as u64 * MARKED_ID_BYTES,
+            "materializing marked IDs",
+        )?;
+        (0..self.ids.len())
+            .map(|index| self.ids.get(index))
+            .collect()
+    }
+
+    pub fn id_count(&self) -> usize {
+        self.ids.len()
+    }
+    pub fn ids_spilled(&self) -> bool {
+        self.ids.spilled()
+    }
+    pub fn for_each_id(
+        &self,
+        each: impl FnMut(&str) -> Result<(), L2dError>,
+    ) -> Result<(), L2dError> {
+        self.ids.each(each)
     }
 
     /// How many logs were marked, de-selected ones included.
@@ -704,8 +738,21 @@ impl MarkSet {
     }
 
     /// The de-selected ids, ascending.
-    pub fn deselected_ids(&self) -> &[String] {
-        &self.deselected_ids
+    pub fn deselected_ids(&self, budget: &MemoryBudget) -> Result<Vec<String>, L2dError> {
+        budget.require_whole(
+            self.deselected_ids.len() as u64 * MARKED_ID_BYTES,
+            "materializing de-selected IDs",
+        )?;
+        (0..self.deselected_ids.len())
+            .map(|index| self.deselected_ids.get(index))
+            .collect()
+    }
+
+    pub fn deselected_id_count(&self) -> usize {
+        self.deselected_ids.len()
+    }
+    pub fn is_deselected_id(&self, id: &str) -> Result<bool, L2dError> {
+        self.deselected_ids.contains(id)
     }
 
     /// The marked positions that are not de-selected, ascending.
@@ -717,11 +764,18 @@ impl MarkSet {
     }
 
     /// The marked ids that are not de-selected, ascending.
-    pub fn selected_ids(&self) -> impl Iterator<Item = &str> + '_ {
-        self.ids
-            .iter()
-            .filter(|id| self.deselected_ids.binary_search(id).is_err())
-            .map(String::as_str)
+    pub fn selected_ids(&self) -> impl Iterator<Item = Result<String, L2dError>> + '_ {
+        (0..self.ids.len()).filter_map(|index| {
+            let id = match self.ids.get(index) {
+                Ok(id) => id,
+                Err(error) => return Some(Err(error)),
+            };
+            match self.deselected_ids.contains(&id) {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(id)),
+                Err(error) => Some(Err(error)),
+            }
+        })
     }
 
     /// How many marked logs are not de-selected.
@@ -736,12 +790,8 @@ impl MarkSet {
     }
 
     /// Whether the stored log `id` is marked and not de-selected.
-    pub fn is_selected_id(&self, id: &str) -> bool {
-        let found = |ids: &[String]| {
-            ids.binary_search_by(|marked| marked.as_str().cmp(id))
-                .is_ok()
-        };
-        found(&self.ids) && !found(&self.deselected_ids)
+    pub fn is_selected_id(&self, id: &str) -> Result<bool, L2dError> {
+        Ok(self.ids.contains(id)? && !self.deselected_ids.contains(id)?)
     }
 
     /// The redaction rules kept with the mark set, in order (task 1.22); empty when none
@@ -800,7 +850,7 @@ impl MarkSet {
     /// De-selects single marked logs of a store by their ids, as [`MarkSet::deselect`]
     /// does by positions. [`L2dError::InvalidInput`] naming the ids that are not
     /// marked, or for a mark set of an input; nothing is de-selected then.
-    pub fn deselect_ids(&mut self, ids: &[String]) -> Result<(), L2dError> {
+    pub fn deselect_ids(&mut self, ids: &[String], budget: &MemoryBudget) -> Result<(), L2dError> {
         if let MarkedSource::Input(input) = &self.source {
             return Err(L2dError::InvalidInput {
                 detail: format!(
@@ -810,18 +860,27 @@ impl MarkSet {
                 ),
             });
         }
-        let mut unmarked: Vec<&String> = ids
-            .iter()
-            .filter(|id| self.ids.binary_search(id).is_err())
-            .collect();
+        budget.require_whole(
+            ID_WORK_BYTES + 64 * 1024 + ids.len() as u64 * 8,
+            "de-selecting IDs",
+        )?;
+        let mut unmarked = Vec::new();
+        for id in ids {
+            if !self.ids.contains(id)? {
+                unmarked.push(id);
+            }
+        }
         if !unmarked.is_empty() {
             unmarked.sort_unstable();
             unmarked.dedup();
             return Err(not_marked(&self.name, "id", &unmarked));
         }
-        self.deselected_ids.extend_from_slice(ids);
-        self.deselected_ids.sort_unstable();
-        self.deselected_ids.dedup();
+        let mut collected = IdBuilder::new(64 * 1024);
+        self.deselected_ids.each(|id| collected.push(id))?;
+        for id in ids {
+            collected.push(id)?;
+        }
+        self.deselected_ids = collected.finish()?;
         Ok(())
     }
 
@@ -1010,8 +1069,10 @@ impl MarkSet {
         let path = paths.mark_set_path(&self.name);
         let operation = format!("saving the mark set `{}`", self.name);
         if let Ok(metadata) = fs::metadata(&path) {
-            budget.require_whole(metadata.len().saturating_mul(LOAD_FACTOR), &operation)?;
-            let same = read_file(&path, &self.name).is_ok_and(|stored| stored.same_marks(self));
+            if metadata.len() < (64 * 1024 / MARKED_ID_BYTES) * 67 {
+                budget.require_whole(metadata.len().saturating_mul(LOAD_FACTOR), &operation)?;
+            }
+            let same = Self::load(paths, &self.name, budget)?.same_marks(self)?;
             if !same {
                 return Err(L2dError::Refused {
                     reason: format!(
@@ -1061,8 +1122,11 @@ impl MarkSet {
 
     /// Loads the mark set `name` from `<project>/marks/<name>.json`.
     ///
-    /// The file is read whole: it is counted as [`LOAD_FACTOR`] times its size and
-    /// refused when that does not fit what `budget` leaves. A name that cannot be a
+    /// Small files are counted at [`LOAD_FACTOR`] times their size plus spill workspace.
+    /// Larger files stream canonical, unescaped hexadecimal IDs into bounded sorted
+    /// runs, while non-ID metadata is bounded before deserialization. Noncanonical
+    /// escaped ID spellings in this streaming path are cleanly refused; this loader
+    /// guarantees the format written by [`MarkSet::save`]. A name that cannot be a
     /// mark set's is [`L2dError::InvalidInput`], a file that is not there
     /// [`L2dError::Missing`], and a file that is not a mark set this tool wrote (not
     /// readable, another format or kind, another name, a label other than bad or good,
@@ -1080,11 +1144,46 @@ impl MarkSet {
                 });
             }
         };
-        budget.require_whole(
-            metadata.len().saturating_mul(LOAD_FACTOR),
-            &format!("loading the mark set `{name}`"),
-        )?;
-        read_file(&path, name)
+        // Below this size neither ID array can reach the deserializer's run size.
+        // Otherwise include both external-sort workspaces even on the whole-file path.
+        let extra = if metadata.len() >= (64 * 1024 / MARKED_ID_BYTES) * 67 {
+            2 * ID_WORK_BYTES
+        } else {
+            0
+        };
+        let whole = metadata
+            .len()
+            .saturating_mul(LOAD_FACTOR)
+            .saturating_add(extra);
+        if extra == 0 {
+            budget.require_whole(whole, &format!("loading the mark set `{name}`"))?;
+        }
+        if whole <= budget.left_bytes() {
+            budget.require_whole(whole, &format!("loading the mark set `{name}`"))?;
+            let set = read_file(&path, name)?;
+            if set.ids.spilled() || set.deselected_ids.spilled() {
+                budget.note_spill();
+            }
+            return Ok(set);
+        }
+        let fixed = 2 * (ID_WORK_BYTES + 64 * 1024) + 2 * 8192;
+        budget.require_whole(fixed, &format!("streaming the mark set `{name}`"))?;
+        let allowance = budget.left_bytes().saturating_sub(fixed) / LOAD_FACTOR;
+        budget.require_whole(fixed + allowance * LOAD_FACTOR, "bounded mark-set metadata")?;
+        let file = fs::File::open(&path).map_err(|e| io_failure("reading", &path, &e))?;
+        let reader =
+            io::BufReader::with_capacity(8192, crate::mark_ids::JsonReader::new(file, allowance));
+        let file: FileIn = serde_json::from_reader(reader).map_err(|e| {
+            not_a_mark_set(
+                &path,
+                format!("it is not readable within the memory limit: {e}"),
+            )
+        })?;
+        let set = check_file(file, &path, name)?;
+        if set.ids.spilled() || set.deselected_ids.spilled() {
+            budget.note_spill();
+        }
+        Ok(set)
     }
 
     /// The names of the mark sets saved in the project, sorted; none when there is no
@@ -1116,13 +1215,21 @@ impl MarkSet {
 
     /// Whether `other` holds the same marks: everything but the de-selections and the
     /// redaction rules.
-    fn same_marks(&self, other: &Self) -> bool {
-        self.name == other.name
+    fn same_marks(&self, other: &Self) -> Result<bool, L2dError> {
+        Ok(self.name == other.name
             && self.label == other.label
             && self.query == other.query
             && self.source == other.source
             && self.positions == other.positions
-            && self.ids == other.ids
+            && self.ids.equals(&other.ids)?)
+    }
+
+    /// Full equality with disk errors propagated, including de-selections and rules.
+    pub fn try_eq(&self, other: &Self) -> Result<bool, L2dError> {
+        Ok(self.same_marks(other)?
+            && self.deselected == other.deselected
+            && self.deselected_ids.equals(&other.deselected_ids)?
+            && self.redactions == other.redactions)
     }
 }
 
@@ -1372,14 +1479,6 @@ fn check_label(label: Label) -> Result<(), L2dError> {
     }
 }
 
-/// Whether `id` can be a store's log id: 64 lower-case hexadecimal characters.
-fn is_id(id: &str) -> bool {
-    id.len() == ID_CHARS
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 /// `text` up to [`SHOWN_BYTES`] bytes in a message, and how long it is when it is
 /// longer.
 fn shortened(text: &str) -> String {
@@ -1500,6 +1599,10 @@ fn read_file(path: &Path, name: &str) -> Result<MarkSet, L2dError> {
 fn parse_file(bytes: &[u8], path: &Path, name: &str) -> Result<MarkSet, L2dError> {
     let file: FileIn = serde_json::from_slice(bytes)
         .map_err(|error| not_a_mark_set(path, format!("it is not readable: {error}")))?;
+    check_file(file, path, name)
+}
+
+fn check_file(file: FileIn, path: &Path, name: &str) -> Result<MarkSet, L2dError> {
     if (file.format != FORMAT && file.format != FORMAT_WITH_REDACTIONS) || file.kind != KIND {
         return Err(not_a_mark_set(
             path,
@@ -1545,10 +1648,7 @@ fn parse_file(bytes: &[u8], path: &Path, name: &str) -> Result<MarkSet, L2dError
             "it was made on an input but holds ids",
         ));
     }
-    if !file.positions.windows(2).all(|pair| pair[0] < pair[1])
-        || !file.ids.windows(2).all(|pair| pair[0] < pair[1])
-        || !file.ids.iter().all(|id| is_id(id))
-    {
+    if !file.positions.windows(2).all(|pair| pair[0] < pair[1]) {
         return Err(not_a_mark_set(
             path,
             "its positions or ids are not in ascending order, or an id is not one",
@@ -1564,9 +1664,12 @@ fn parse_file(bytes: &[u8], path: &Path, name: &str) -> Result<MarkSet, L2dError
             ),
         ));
     }
-    if !ascending_within(&file.deselected, &file.positions)
-        || !ascending_within(&file.deselected_ids, &file.ids)
-    {
+    let mut subset = true;
+    file.deselected_ids.each(|id| {
+        subset &= file.ids.contains(id)?;
+        Ok(())
+    })?;
+    if !ascending_within(&file.deselected, &file.positions) || !subset {
         return Err(not_a_mark_set(
             path,
             "its de-selected logs are not marked ones in ascending order",

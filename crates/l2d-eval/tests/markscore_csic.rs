@@ -90,7 +90,14 @@ fn fit_and_report(
     let dir = fit.scorer.save(paths, label).unwrap();
     let loaded = BaselineScorer::load_under(paths, &dir).unwrap();
     assert_eq!(loaded.revision(), fit.scorer.revision());
-    assert_eq!(loaded.mark_set_origin().unwrap().marks(), marks);
+    assert!(
+        loaded
+            .mark_set_origin()
+            .unwrap()
+            .marks()
+            .try_eq(marks)
+            .unwrap()
+    );
     for (text, ratio) in texts.iter().zip(&ratios) {
         assert_eq!(loaded.ratio(text).to_bits(), ratio.to_bits());
     }

@@ -767,6 +767,88 @@ struct FixtureStore {
     hash: String,
 }
 
+#[test]
+fn unreadable_spilled_marks_fail_the_actual_matching_consumer() {
+    const CHILD: &str = "L2D_TEST_CORRUPT_MARK_IDS";
+    if std::env::var_os(CHILD).is_none() {
+        let root = std::env::temp_dir().join(format!("l2d-corrupt-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "unreadable_spilled_marks_fail_the_actual_matching_consumer",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TEMP", &root)
+            .env("TMP", &root)
+            .env("TMPDIR", &root)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let root = std::env::temp_dir();
+    let paths = ProjectPaths::new(root.join("project"));
+    let texts: Vec<_> = (0..1000)
+        .map(|index| format!("attack unique {index}"))
+        .collect();
+    let store = FixtureStore::new(&texts);
+    let mut budget = MemoryBudget::observe(&MemorySettings::default()).unwrap();
+    let memory = MarkSet::mark_store(
+        "attacks",
+        Label::Bad,
+        MarkQuery::Phrase {
+            phrase: "attack".into(),
+        },
+        &store,
+        &mut budget,
+    )
+    .unwrap();
+    memory.save(&paths, &budget).unwrap();
+    let disk = MarkSet::load(&paths, "attacks", &budget).unwrap();
+    assert!(disk.ids_spilled());
+    // This child owns its entire temporary root. Corrupt only its spill run files,
+    // after deserialization, to exercise a failure during matching rather than load.
+    let mut corrupted = 0;
+    for directory in std::fs::read_dir(&root).unwrap() {
+        let directory = directory.unwrap();
+        if directory
+            .file_name()
+            .to_string_lossy()
+            .starts_with("l2d-mark-ids-")
+        {
+            for file in std::fs::read_dir(directory.path()).unwrap() {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(file.unwrap().path())
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                corrupted += 1;
+            }
+        }
+    }
+    assert!(corrupted > 0);
+    assert!(disk.try_eq(&memory).is_err());
+    assert!(disk.to_file_bytes().is_err());
+    assert!(disk.save(&paths, &budget).is_err());
+    let error = propose_redactions(
+        &disk,
+        RedactionInput::Store(&store),
+        &RedactionSettings::default(),
+        &mut budget,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("ID file ended early"), "{error}");
+}
+
 impl FixtureStore {
     fn new(texts: &[String]) -> Self {
         let rows: Vec<(String, String)> = texts
@@ -1004,7 +1086,7 @@ fn rules_are_saved_with_the_mark_set_and_loaded_back() {
     assert_eq!(saved["redactions"][2]["kind"], "pattern");
 
     let loaded = MarkSet::load(&paths, "attacks", &budget).unwrap();
-    assert_eq!(loaded, set);
+    assert!(loaded.try_eq(&set).unwrap());
     let again = RedactionRules::of_mark_set(&loaded, &budget).unwrap();
     assert_eq!(again.rules(), confirmed.rules());
     assert_eq!(again.content_sha256(), confirmed.content_sha256());

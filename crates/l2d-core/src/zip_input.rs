@@ -498,6 +498,15 @@ impl EntryLines {
         line: &mut Vec<u8>,
         max_bytes: u64,
     ) -> std::io::Result<Option<LineRead>> {
+        self.next_line_until(line, max_bytes, || false)
+    }
+
+    fn next_line_until(
+        &mut self,
+        line: &mut Vec<u8>,
+        max_bytes: u64,
+        mut stopped: impl FnMut() -> bool,
+    ) -> std::io::Result<Option<LineRead>> {
         line.clear();
         // One byte more is kept for a carriage return before the line feed.
         let room = max_bytes as usize + 1;
@@ -508,8 +517,14 @@ impl EntryLines {
         };
         let mut last = None;
         loop {
+            if stopped() {
+                return Err(std::io::Error::other("archive reader cancelled"));
+            }
             if self.start == self.end {
                 let count = loop {
+                    if stopped() {
+                        return Err(std::io::Error::other("archive reader cancelled"));
+                    }
                     match self.reader.read(&mut self.buffer) {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         other => break other?,
@@ -1352,6 +1367,7 @@ impl ZipInput {
                 .usable_bytes()
                 .saturating_sub(self.held_bytes() + PARSE_BATCH_BYTES + smallest);
             self.freeze(room)?;
+            budget.note_spill();
             held = self.held_with_growth(rows);
         }
         let needed = held + PARSE_BATCH_BYTES;
@@ -1600,6 +1616,7 @@ impl ZipInput {
             };
             if let Some(room) = freeze {
                 self.freeze(room)?;
+                budget.note_spill();
                 // What is held now, the buffers of a directory made now included,
                 // must leave the fixed memory of a batch.
                 self.require_held(budget, 0)?;
@@ -2180,8 +2197,15 @@ impl ZipBatches<'_> {
                 detail: "a line of the archive was read after the end of its batches".into(),
             });
         };
+        // Reader buffers already reserve the next line, including its expansion.
+        // Close before that bounded line can cross the batch's own allowance too;
+        // otherwise counting both conservative reservations exceeds the limit.
         let complete = batcher
-            .record(source_bytes)
+            .record_with_headroom(
+                source_bytes,
+                (self.input.max_record_bytes + 2).saturating_mul(PARSE_EXPANSION as u64)
+                    + PARSE_ROW_BYTES,
+            )
             .map_err(|error| self.input.explained(error, batcher.budget()))?;
         if complete {
             return self.process(false);

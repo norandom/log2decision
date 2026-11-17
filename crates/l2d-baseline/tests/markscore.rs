@@ -265,7 +265,7 @@ fn the_score_states_what_it_was_fitted_against() {
     );
     assert_eq!(fit.counts.marked + fit.counts.other, 169);
     let origin = fit.scorer.mark_set_origin().unwrap();
-    assert_eq!(origin.marks(), &attacks);
+    assert!(origin.marks().try_eq(&attacks).unwrap());
     assert!(origin.other().is_none());
     assert_eq!(origin.other_class(), OtherClass::Unmarked);
 
@@ -609,7 +609,7 @@ fn the_score_survives_save_and_load_with_its_mark_set_and_rules() {
     assert_eq!(loaded.revision(), fit.scorer.revision());
     assert_eq!(loaded.rules().content_sha256(), rules.content_sha256());
     let origin = loaded.mark_set_origin().unwrap();
-    assert_eq!(origin.marks(), &set);
+    assert!(origin.marks().try_eq(&set).unwrap());
     assert_eq!(
         origin.counts(),
         fit.scorer.mark_set_origin().unwrap().counts()

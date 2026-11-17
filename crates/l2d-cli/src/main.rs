@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Wait for a busy host/NPU, or refuse naming the operation that holds it
+    #[arg(long, global = true, value_parser = ["wait", "refuse"], default_value = "wait")]
+    busy: String,
+
     /// Largest number of rows read in one batch [default: 65536, less when memory is short]
     #[arg(
         long,
@@ -182,6 +186,11 @@ fn main() -> ExitCode {
             _ => return fail(&usage_error(&error), json_requested(&args)),
         },
     };
+    l2d_core::resource::set_busy_choice(if cli.busy == "refuse" {
+        l2d_core::resource::BusyChoice::Refuse
+    } else {
+        l2d_core::resource::BusyChoice::Wait
+    });
     let code = match dispatch(&cli.command, &cli.context()) {
         Ok(()) => ExitCode::from(l2d_core::EXIT_SUCCESS),
         Err(error) => fail(&error, cli.json),

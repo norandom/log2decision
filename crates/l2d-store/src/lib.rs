@@ -1037,6 +1037,11 @@ impl Store {
     /// as for an add); that is read inside the transaction, before anything is written.
     /// Nothing is written by beginning a fill.
     pub fn begin_fill(&mut self, origin: VectorOrigin<'_>) -> Result<Fill<'_>, StoreError> {
+        let admission = l2d_core::resource::ResourceGuard::enter(
+            "store fill transaction",
+            l2d_core::resource::busy_choice(),
+        )
+        .map_err(StoreError::Memory)?;
         self.require_origin(origin)?;
         self.connection
             .execute_batch("BEGIN")
@@ -1046,6 +1051,7 @@ impl Store {
             store: self,
             open: true,
             failed: false,
+            admission,
         };
         fill.store.require_same_file(&fill.store.connection)?;
         Ok(fill)
@@ -1208,6 +1214,7 @@ pub struct Fill<'s> {
     open: bool,
     /// Whether an add failed: the fill can then only be dropped.
     failed: bool,
+    admission: l2d_core::resource::ResourceGuard,
 }
 
 impl Fill<'_> {
@@ -1234,9 +1241,14 @@ impl Fill<'_> {
         if self.failed {
             return Err(self.after_failure());
         }
+        let accounting = self
+            .admission
+            .track("store fill add", budget.usage())
+            .map_err(StoreError::Memory)?;
         let result = self.store.add_rows(rows, budget);
-        self.failed = result.is_err();
-        result
+        let recorded = accounting.finish().map_err(StoreError::Memory);
+        self.failed = result.is_err() || recorded.is_err();
+        recorded.and(result)
     }
 
     /// Makes every add of the fill stored, in one step. When the commit fails, or an
