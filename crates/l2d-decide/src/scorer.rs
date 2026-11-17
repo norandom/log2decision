@@ -95,7 +95,11 @@ const BASELINE_EVIDENCE_ROW_BYTES: u64 = 2;
 /// of the bias and is flagged in the evidence column `no_features`.
 impl Scorer for BaselineScorer {
     fn kind(&self) -> ScorerKind {
-        ScorerKind::Baseline
+        if self.mark_set_origin().is_some() {
+            ScorerKind::MarkSet
+        } else {
+            ScorerKind::Baseline
+        }
     }
 
     fn revision(&self) -> &str {

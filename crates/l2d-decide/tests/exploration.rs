@@ -72,6 +72,11 @@ impl ExplorationEncoder for Vectors {
     }
     fn encode(&mut self, text: &str) -> Result<Option<Representation>, L2dError> {
         self.0 += 1;
+        if text == "failed" {
+            return Err(L2dError::Refused {
+                reason: "encoder runtime failed".into(),
+            });
+        }
         Ok(Some(Representation::Vector(match text {
             "zero" => vec![0., 0.],
             "nan" => vec![f32::NAN, 1.],
@@ -194,4 +199,21 @@ fn topk_ties_are_deterministic_filters_precede_ranking_and_batches_do_not_change
         serde_json::to_value(r.neighbours).unwrap(),
         serde_json::to_value(r2.neighbours).unwrap()
     );
+}
+
+#[test]
+fn encoder_failure_propagates_but_invalid_candidate_vector_is_reported_unsupported() {
+    let mut b = budget();
+    b.hold(1234);
+    let prior = b.held_bytes();
+    let failed = fixture("a", &[("seed", 0, 1), ("failed", 0, 1)]);
+    let error = explore(&failed, None, &settings(), &mut Vectors(0), &mut b).unwrap_err();
+    assert!(error.to_string().contains("encoder runtime failed"));
+    assert_eq!(b.held_bytes(), prior);
+    let invalid = fixture("a", &[("seed", 0, 1), ("zero", 0, 1), ("related", 0, 1)]);
+    let report = explore(&invalid, None, &settings(), &mut Vectors(0), &mut b).unwrap();
+    assert_eq!(report.unsupported.len(), 1);
+    assert!(report.unsupported[0].reason.contains("zero vector"));
+    assert_eq!(report.neighbours.len(), 1);
+    assert_eq!(report.neighbours[0].row.text, "related");
 }

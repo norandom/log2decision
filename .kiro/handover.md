@@ -123,8 +123,23 @@ Report: `docs/2026-11-17-redaction-transfer-comparison.md`; evidence:
 finished policy comparison or operational targets. Temporal transfer is untested.
 Next: task 2.8, conservative support gating; never infer qualification from this
 exploratory result. Build target 19.313 GiB, D: free about 208 GiB after review.
-Remaining execution order: 2.8 →
-2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
+Task 2.8 is complete (reviewed commit `fe51fe3`): bounded MarkSet grouping,
+snapshot-bound group deselection and conservative local support. Distinct explicit
+labels supply support; unmarked background stays separate. Supported results retain
+the exact saved MarkSet ratio and compatible calibration. Endpoint evidence uses
+real group keys, with unknown keys explicit. Invalid representations are reported
+as unsupported; genuine encoder errors propagate and restore the budget hold.
+Independent re-review APPROVED after correcting that distinction. Verification:
+872 workspace tests passed, 0 failed, 55 ignored; fmt, Clippy, actual NPU/memory
+and CLI-help smoke passed. The reviewer replayed 17 tests and both previously
+failing adversarial cases. Evidence: `D:\BuildArtifacts\log2decision\task-2.8\remediation1\validation.md`;
+contract: `docs/qualification/mark-set-support-contract.md`.
+This is the library milestone, with CLI/policy integration still pending. Exact
+original equality is the only positive payload-match test; live-store consumers
+must enforce snapshot checks. MarkSet scorers now identify as `mark-set`; legacy
+baseline-tagged calibration must be recalibrated. Native-provider memory remains
+estimated, and no deployment qualification follows. Build cache: 21.204 GiB.
+Remaining execution order: 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone 1.28 is complete. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be
 recorded before final evaluation; no universal thresholds were selected.

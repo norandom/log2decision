@@ -180,3 +180,5 @@ Rules of the house:
 Discovery workflow: [command guide and artifact contracts](docs/qualification/pattern-refinement-contract.md).
 
 Vector exploration: [NPU and character-trigram command guide, measured usefulness and limits](docs/qualification/vector-exploration-contract.md).
+
+MarkSet support: [grouping, close-enough evidence and calibration contracts](docs/qualification/mark-set-support-contract.md) (library; CLI integration follows).
