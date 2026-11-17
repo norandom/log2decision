@@ -525,11 +525,7 @@ impl Grouping {
         Ok(())
     }
 }
-#[derive(Debug, Default, Serialize)]
-pub struct LabelEvidence {
-    pub count: usize,
-    pub mean_distance: Option<f64>,
-}
+pub use crate::neighbour_evidence::LabelEvidence;
 #[derive(Debug, Serialize)]
 pub struct CloseEnough {
     pub plan: l2d_core::BatchPlan,

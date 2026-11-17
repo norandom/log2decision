@@ -163,6 +163,71 @@ fn rank(
 }
 
 impl Store {
+    /// A connection-local generation for a multi-search read. Compare before and
+    /// after the operation on THIS Store; any other connection's committed write
+    /// invalidates it, including label/vector changes and changes later reverted.
+    /// Local writes require `&mut Store` and cannot overlap a shared borrow.
+    /// This is a consistency guard, not a persisted dataset identity.
+    pub fn read_generation(&self) -> Result<u64, StoreError> {
+        self.require_same_file(&self.connection)?;
+        self.connection
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .map_err(|e| self.failure(e))
+    }
+
+    /// Validate a store for original-record vector evidence without changing the
+    /// general squared-L2 search contract (which permits zero vectors). Streams
+    /// one vector at a time under the search budget; never loads the corpus.
+    /// Legacy unknown flags, partial/empty records and zero vectors are unsupported.
+    pub fn require_original_vectors_with(
+        &self,
+        origin: VectorOrigin<'_>,
+        budget: &mut MemoryBudget,
+    ) -> Result<BatchPlan, StoreError> {
+        self.require_origin(origin)?;
+        let unsupported = |detail: String| StoreError::InvalidQuery { detail };
+        if self.format < 2 {
+            return Err(unsupported(
+                "unsupported original-record profile: legacy store has unknown record flags".into(),
+            ));
+        }
+        let filter = Filter::default();
+        let compiled = Compiled::new(&filter)?;
+        let bytes = 8 * u64::from(self.identity().dimension) + 4096;
+        self.search(&compiled, bytes, ", original-vector validation scratch", budget, |budget, _| {
+            let count = self.len()?;
+            let diagnostics = count.saturating_mul(256);
+            budget.require_whole(diagnostics, "original-vector validation batch diagnostics").map_err(StoreError::Memory)?;
+            budget.hold(budget.held_bytes().saturating_add(diagnostics));
+            let mut plan = budget.plan(count, 1).map_err(StoreError::Memory)?;
+            let mut next = 0;
+            let mut statement = self.connection.prepare(
+                "SELECT vector,truncated,text_longer_than_input,empty FROM logs ORDER BY seq"
+            ).map_err(|e| self.failure(e))?;
+            let mut rows = statement.query([]).map_err(|e| self.failure(e))?;
+            let mut values = Vec::with_capacity(usize::from(self.identity().dimension));
+            let mut done = 0;
+            while let Some(row) = rows.next().map_err(|e| self.failure(e))? {
+                if done == next {
+                    next += budget.next_batch_rows(&mut plan, done).map_err(StoreError::Memory)?;
+                }
+                for column in 1..=3 {
+                    if row.get::<_, Option<bool>>(column).map_err(|e| self.failure(e))? != Some(false) {
+                        return Err(unsupported(format!("unsupported original-record profile at stored row {done}: partial, empty or unknown record flags")));
+                    }
+                }
+                let blob = row.get_ref(0).map_err(|e| self.failure(e))?.as_blob().map_err(|e| self.failure(e.into()))?;
+                values.clear();
+                decode(blob, usize::from(self.identity().dimension), &mut values).map_err(|e| self.failure(e))?;
+                if values.iter().all(|&x| x == 0.) || values.iter().any(|x| !x.is_finite()) {
+                    return Err(unsupported(format!("unsupported zero/nonfinite vector at stored row {done}")));
+                }
+                done += 1;
+            }
+            Ok(plan)
+        })
+    }
+
     /// [`Store::nearest_with`] under a budget observed now with the default settings,
     /// in which nothing is held: for callers that hold nothing that matters.
     pub fn nearest(
