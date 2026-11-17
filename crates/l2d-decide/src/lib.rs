@@ -12,6 +12,7 @@ pub mod exploration;
 pub mod fill;
 pub mod neighbour_evidence;
 pub mod outlier;
+pub mod policy;
 pub mod scorer;
 pub mod triage;
 
