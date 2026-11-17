@@ -54,6 +54,68 @@ use ort::value::TensorRef;
 
 const TAG: &str = "npu_hierarchical_gate";
 
+/// Scientific one-pass export for frozen fold profiles, not a production adapter.
+#[test]
+#[ignore = "task 2.18 paired development measurement; explicit fixture required"]
+fn transfer218_export() {
+    use std::io::Write;
+    let _resources =
+        npu_support::resources::Measurement::start("2.18 frozen fold NPU export", true)
+            .with_process_memory(npu_support::process_memory);
+    let directory = PathBuf::from(std::env::var_os("L2D_HG_FIXTURE").expect("L2D_HG_FIXTURE"));
+    // Reject unsupported originals before the legacy fixture's historical truncation.
+    let raw = std::fs::read_to_string(directory.join("texts.jsonl")).unwrap();
+    for line in raw.lines() {
+        let text: String = serde_json::from_str(line).unwrap();
+        assert!(
+            !text.is_empty() && text.len() <= 1024,
+            "unsupported original supplied"
+        );
+    }
+    drop(raw);
+    let fixture = fixture().expect("required fixture");
+    npu_support::resources::reserve(128 * 1024 * 1024, "bounded one-pass export scratch");
+    let mut hierarchy = Hierarchy::open(&fixture, false);
+    let mut output =
+        std::io::BufWriter::new(std::fs::File::create(directory.join("npu-raw.f32")).unwrap());
+    let mut seconds = Seconds::default();
+    for (chunk_index, chunk) in fixture.texts.chunks(64).enumerate() {
+        let (mut vectors, mut patches) = (Vec::new(), Vec::new());
+        hierarchy.encode(&refs(chunk), &mut vectors, &mut patches, &mut seconds);
+        assert_eq!(vectors.len(), 128 * chunk.len());
+        assert!(vectors.iter().all(|v| v.is_finite()));
+        if chunk_index == 0 {
+            for (index, text) in chunk.iter().enumerate() {
+                let (mut alone, mut alone_patches) = (Vec::new(), Vec::new());
+                hierarchy.encode(
+                    &[text.as_slice()],
+                    &mut alone,
+                    &mut alone_patches,
+                    &mut seconds,
+                );
+                assert_eq!(
+                    alone,
+                    vectors[index * 128..(index + 1) * 128],
+                    "batch row differs from individual"
+                );
+            }
+            println!(
+                "2.18 first {} rows bit-identical batched versus individual",
+                chunk.len()
+            );
+        }
+        for value in vectors {
+            output.write_all(&value.to_le_bytes()).unwrap();
+        }
+    }
+    output.flush().unwrap();
+    println!(
+        "2.18 EXPORT {} vectors; graph/host seconds {}; bounded64-row scientific batches, not production throughput",
+        fixture.texts.len(),
+        seconds.total()
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // The fixture
 // ---------------------------------------------------------------------------------------
