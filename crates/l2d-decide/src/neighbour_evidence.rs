@@ -1,12 +1,12 @@
 //! Descriptive figures for actual neighbours; no neighbour classifier.
-use serde::Serialize;
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelEvidence {
     pub count: usize,
     /// Absent for an empty label. The enclosing evidence names the metric.
     pub mean_distance: Option<f64>,
 }
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeighbourEvidence {
     pub bad: LabelEvidence,
     pub good: LabelEvidence,

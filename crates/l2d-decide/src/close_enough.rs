@@ -9,7 +9,8 @@ use l2d_core::patterns::PatternStore;
 use l2d_core::selections::Member;
 use l2d_core::{InputSummary, L2dError, Label, LogsFrame, MarkSet, MemoryBudget};
 use l2d_store::{Filter, Store};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 const FIXED: u64 = 4 * 1024 * 1024;
 fn refused(reason: impl Into<String>) -> L2dError {
@@ -18,14 +19,14 @@ fn refused(reason: impl Into<String>) -> L2dError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provenance {
     Marked,
     ReviewedOpposite,
     AssumedBackground,
     Excluded,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Evidence {
     pub member: Member,
     pub text: String,
@@ -38,7 +39,7 @@ pub struct Evidence {
     /// Nonidentical texts have unknown payload support, not a negative anomaly label.
     pub exact_original_match: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UnsupportedRepresentation {
     pub member: Member,
     pub reason: String,
@@ -61,6 +62,7 @@ pub struct MarkHistory {
     other: Option<MarkSet>,
     snapshot: Option<String>,
     retained: u64,
+    metadata_revision: String,
 }
 fn mark_bytes(m: &MarkSet) -> u64 {
     FIXED
@@ -146,12 +148,22 @@ impl MarkHistory {
             }
         }
         rows.sort_by(|a, b| a.member.cmp(&b.member));
+        let mut hash = Sha256::new();
+        for row in &rows {
+            // Length framing and explicit None prevent ambiguous concatenation.
+            let bytes = serde_json::to_vec(&(&row.member, &row.text, &row.group, row.occurrences))
+                .map_err(|e| refused(e.to_string()))?;
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        let metadata_revision = format!("{:x}", hash.finalize());
         Ok(Self {
             rows,
             marks: marks.clone(),
             other: other.cloned(),
             snapshot,
             retained,
+            metadata_revision,
         })
     }
     /// Read real stored groups. Re-encode originals through the chosen exploration
@@ -164,6 +176,7 @@ impl MarkHistory {
     ) -> Result<Self, L2dError> {
         let prior = budget.held_bytes();
         let result = (|| {
+            let generation = store.read_generation()?;
             marks.require_store(store, budget)?;
             if let Some(o) = other {
                 o.require_store(store, budget)?;
@@ -206,7 +219,7 @@ impl MarkHistory {
                 });
             }
             drop(frame);
-            if before != store.pattern_snapshot(budget)? {
+            if before != store.pattern_snapshot(budget)? || generation != store.read_generation()? {
                 return Err(refused("store changed while loading MarkSet history"));
             }
             marks.require_store(store, budget)?;
@@ -257,6 +270,17 @@ impl MarkHistory {
     pub fn retained_bytes(&self) -> u64 {
         self.retained
     }
+    /// Captured original identities, text, endpoint metadata and counts.
+    pub fn metadata_revision(&self) -> &str {
+        &self.metadata_revision
+    }
+    /// Input history is an immutable frame verified against InputSummary at capture.
+    pub fn require_input_snapshot(&self) -> Result<(), L2dError> {
+        if self.snapshot.is_some() {
+            return Err(refused("store history requires a live store source"));
+        }
+        Ok(())
+    }
     pub fn excluded_members(&self) -> usize {
         self.rows
             .iter()
@@ -277,7 +301,7 @@ impl MarkHistory {
             .saturating_add(encoder.scratch_bytes())
             .saturating_add(FIXED)
     }
-    fn require_scorer(&self, scorer: &BaselineScorer) -> Result<(), L2dError> {
+    pub(crate) fn require_scorer(&self, scorer: &BaselineScorer) -> Result<(), L2dError> {
         let origin = scorer
             .mark_set_origin()
             .ok_or_else(|| refused("close-enough requires an actual MarkSet scorer"))?;
@@ -294,16 +318,53 @@ impl MarkHistory {
     }
     /// Check the source immediately before consuming a batch for a mutable store.
     pub fn require_store(&self, store: &Store, budget: &mut MemoryBudget) -> Result<(), L2dError> {
+        let generation = store.read_generation()?;
         self.marks.require_store(store, budget)?;
         if self.snapshot.as_deref() != Some(store.pattern_snapshot(budget)?.as_str()) {
             return Err(refused(
                 "store occurrence snapshot changed; rebuild support history",
             ));
         }
-        Ok(())
+        let prior = budget.held_bytes();
+        let result = (|| {
+            budget.require_whole(self.retained, "verify immutable history endpoint metadata")?;
+            let frame = store.text_search_with(&Filter::default(), usize::MAX, budget)?;
+            let check = || -> Result<bool, l2d_core::polars::prelude::PolarsError> {
+                let ids = frame.column("id")?.str()?;
+                let texts = frame.column("text")?.str()?;
+                let groups = frame.column("group")?.str()?;
+                let counts = frame.column("occurrences")?.u32()?;
+                Ok(frame.height() == self.rows.len()
+                    && (0..frame.height()).all(|i| {
+                        let Some(id) = ids.get(i) else {
+                            return false;
+                        };
+                        self.rows
+                            .binary_search_by(|r| match &r.member {
+                                Member::StoreId(saved) => saved.as_str().cmp(id),
+                                _ => std::cmp::Ordering::Less,
+                            })
+                            .ok()
+                            .is_some_and(|j| {
+                                let row = &self.rows[j];
+                                texts.get(i) == Some(row.text.as_str())
+                                    && groups.get(i) == row.group.as_deref()
+                                    && counts.get(i).map(u64::from) == Some(row.occurrences)
+                            })
+                    }))
+            };
+            if !check().map_err(|e| refused(e.to_string()))?
+                || generation != store.read_generation()?
+            {
+                return Err(refused("store metadata changed; rebuild support history"));
+            }
+            Ok(())
+        })();
+        budget.hold(prior);
+        result
     }
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReachSettings {
     pub radius: f64,
     /// Retain at most this many globally distinct labelled originals, and separately
@@ -331,7 +392,7 @@ impl ReachSettings {
         Ok(())
     }
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MarkGroup {
     pub representative: Evidence,
     pub size: usize,
@@ -340,7 +401,7 @@ pub struct MarkGroup {
     pub distance_range: [f64; 2],
     members: Vec<Member>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Grouping {
     pub plan: l2d_core::BatchPlan,
     pub method: String,
@@ -526,12 +587,13 @@ impl Grouping {
     }
 }
 pub use crate::neighbour_evidence::LabelEvidence;
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CloseEnough {
     pub plan: l2d_core::BatchPlan,
     pub support_basis: String,
     pub source: l2d_core::MarkedSource,
     pub source_snapshot: Option<String>,
+    pub evidence_revision: String,
     pub settings: ReachSettings,
     pub close_enough: bool,
     pub ratio: Option<f32>,
@@ -557,6 +619,72 @@ pub struct CloseEnough {
 pub struct Calibration<'a> {
     pub calibrator: &'a ConformalCalibrator,
     pub error_rate: f32,
+}
+
+impl CloseEnough {
+    /// Owned evidence stays live after retrieval; the history index, encoder and
+    /// scorer scratch do not. Include spare vector capacity and allocator overhead.
+    fn retained_bytes(&self) -> u64 {
+        let member_bytes = |member: &Member| match member {
+            Member::StoreId(id) => id.capacity(),
+            Member::Position(_) => 0,
+        };
+        let source = match &self.source {
+            l2d_core::MarkedSource::Store(s) => s.name.capacity() + s.content_sha256.capacity(),
+            l2d_core::MarkedSource::Input(s) => {
+                s.path.capacity()
+                    + s.content_sha256.capacity()
+                    + s.archive_entries.as_ref().map_or(0, |entries| {
+                        entries.capacity() * size_of::<String>()
+                            + entries.iter().map(String::capacity).sum::<usize>()
+                    })
+            }
+        };
+        let calibration = self.calibrated.as_ref().map_or(0, |c| {
+            [&c.good_stratum, &c.bad_stratum]
+                .into_iter()
+                .map(|s| match s {
+                    crate::Stratum::Pooled => 0,
+                    crate::Stratum::Group(g) => g.capacity(),
+                })
+                .sum::<usize>()
+        });
+        let headers = std::mem::size_of_val(self)
+            + self.plan.changes.capacity() * size_of::<l2d_core::BatchChange>()
+            + self.neighbours.capacity() * size_of::<Evidence>()
+            + self.unsupported_details.capacity() * size_of::<UnsupportedRepresentation>();
+        let descriptions = [
+            &self.support_basis,
+            &self.evidence_revision,
+            &self.settings.expected_profile,
+            &self.scorer,
+            &self.scorer_revision,
+            &self.method,
+            &self.profile,
+            &self.qualification_note,
+        ]
+        .into_iter()
+        .map(String::capacity)
+        .sum::<usize>()
+            + self.reason.as_ref().map_or(0, String::capacity)
+            + self.source_snapshot.as_ref().map_or(0, String::capacity);
+        let neighbours = self
+            .neighbours
+            .iter()
+            .map(|h| {
+                member_bytes(&h.member)
+                    + h.text.capacity()
+                    + h.group.as_ref().map_or(0, String::capacity)
+            })
+            .sum::<usize>();
+        let unsupported = self
+            .unsupported_details
+            .iter()
+            .map(|row| member_bytes(&row.member) + row.reason.capacity())
+            .sum::<usize>();
+        ((headers + descriptions + source + calibration + neighbours + unsupported) as u64)
+            .saturating_mul(2)
+    }
 }
 /// `group` is a real endpoint/host key from the history's parser, never a pattern ID.
 /// Store callers call `history.require_store` before consuming a batch of decisions.
@@ -607,7 +735,7 @@ pub fn close_enough(
         let mut out=CloseEnough {
             plan,
             support_basis:"Counts/means describe returned nearest distinct originals within radius: up to top_k labelled and separately top_k assumed background; only explicit labels count toward minimum support.".into(),
-            source:history.marks.source().clone(),source_snapshot:history.snapshot.clone(),settings:settings.clone(),
+            source:history.marks.source().clone(),source_snapshot:history.snapshot.clone(),evidence_revision:history.metadata_revision.clone(),settings:settings.clone(),
             close_enough:false,ratio:None,scorer:"mark-set".into(),scorer_revision:scorer.revision().into(),
             method:encoder.method().into(),profile:encoder.profile().into(),reason:None,neighbours:vec![],
             bad:LabelEvidence::default(),good:LabelEvidence::default(),assumed_background:0,
@@ -737,6 +865,12 @@ pub fn close_enough(
         Ok(out)
     })();
     let result = result.and_then(|value| {
+        // The retrieval closure dropped its scratch. Reserve only this result
+        // beside the caller's incoming hold, preserving earlier batch outputs.
+        budget.hold(prior);
+        let retained = value.retained_bytes();
+        budget.require_whole(retained, "retained MarkSet proximity evidence")?;
+        budget.hold(prior.saturating_add(retained));
         guard.finish()?;
         Ok(value)
     });

@@ -55,7 +55,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 1.28, 1.9, 2.7_
   - _Requirements: 18.1 to 18.6_
 
-- [ ] 2.20 Explicit Venn triage policy and evidence preservation
+- [x] 2.20 Explicit Venn triage policy and evidence preservation
   - Version thresholds, evidence eligibility, support, queue rules and review allocation. Preserve both baseline and vector evidence rather than dropping secondary evidence. Add mark-set scorer identity/calibration compatibility checks.
   - Implement unsupported/disagreement/uncertain review reasons, corroborated high-score investigate and corroborated low-score low priority; reserve review/audit allocations and retain deferred members. Diagnostic scores for unsupported cases are separate from actionable ratios.
   - Done when every routing-table branch, missing calibration, incompatible profile and conflicting label has an explanatory fixture result; replay is deterministic and limits cover persistence and queues.
