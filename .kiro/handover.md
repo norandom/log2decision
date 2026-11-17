@@ -2,6 +2,12 @@
 
 ## Current roadmap update — 2026-11-17
 
+Latest owner decision (2026-11-17): exploratory comparison first for the next
+score-transfer gate; no deployment qualification claim. Keep the final qualification
+holdout untouched. Operational review capacity, missed-case targets and final
+reserved/audit allocations remain unset; report exploratory evidence on development
+partitions without inventing pass/fail thresholds. Do not ask this choice again.
+
 The owner accepted the recommended pattern-discovery/Venn workflow and requested
 integration into Kiro. Requirements 17–20, design and the active roadmap in
 tasks.md now contain it; amendment-2026-11-17-pattern-discovery-and-triage.md
