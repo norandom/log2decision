@@ -58,7 +58,7 @@ affected tests, native SQLite heap regression, fmt, Clippy and CLI help passed o
 the corrected source. Evidence: `D:\BuildArtifacts\log2decision\task-1.26\`.
 FTS is store-only and intrinsically insensitive; unquoted prefix expansion
 refuses because its native allocation cannot be bounded by expression length.
-Selection membership overflow refuses explicitly. Next: task 2.19.
+Selection membership overflow refuses explicitly. Next: task 2.18 (exploratory comparison).
 
 Task 1.27 is complete (reviewed commit `b62236d`): bounded pattern catalogue,
 disk membership, deterministic source-bound revisions, representative/variable/
@@ -91,7 +91,22 @@ Evidence: `D:\BuildArtifacts\log2decision\task-1.28\validation.md`; command guid
 `docs/qualification/pattern-refinement-contract.md`. Refinement explicitly refuses
 oversized whole-membership snapshots. Query background is other selected members.
 Next task 2.19 adds vector exploration, keeping retrieval distinct from qualification.
-Remaining execution order: 2.19 → 2.18 → 2.8 →
+Task 2.19 is complete (reviewed commit `65d2b15`): `discover explore` adds
+bounded direct exemplar retrieval through the pinned stable 2.17 two-graph NPU
+profile or explicitly named character-trigram/Jaccard arithmetic. Outside-query
+expansion requires a second saved artifact; suggestions remain unlabelled and
+source-bound. Complete originals above 1,024 UTF-8 bytes are unsupported, not cut.
+Independent review APPROVED; 858 workspace tests passed (0 failed, 52 ignored),
+fmt/Clippy and actual NPU/CLI smoke passed. Reviewer replayed 10 tests and exactly
+reproduced the NPU neighbours. Frozen synthetic fixture: 3/3 missed relevant
+examples recovered, expansion precision 3/4 with a misleading successful login.
+All eight candidates were inside the radius; top-k, not radius, supplied selectivity.
+No deployment/classification qualification follows. Native provider memory remains
+an estimate; source/pattern diversity is not endpoint independence. Guide and limits:
+`docs/qualification/vector-exploration-contract.md`. Evidence:
+`D:\BuildArtifacts\log2decision\task-2.19\validation.md`. Build cache: 18.18 GiB.
+Next: the owner-selected exploratory score-transfer comparison in task 2.18.
+Remaining execution order: 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
 First usable discovery milestone 1.28 is complete. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be

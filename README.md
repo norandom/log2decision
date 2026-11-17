@@ -177,3 +177,5 @@ Rules of the house:
 - On the development host, agents use PowerShell: no Git Bash, no `wsl`.
 
 Discovery workflow: [command guide and artifact contracts](docs/qualification/pattern-refinement-contract.md).
+
+Vector exploration: [NPU and character-trigram command guide, measured usefulness and limits](docs/qualification/vector-exploration-contract.md).

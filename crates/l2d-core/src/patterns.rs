@@ -360,7 +360,8 @@ fn protected(text: &str) -> Vec<String> {
     }
     result
 }
-fn grams(text: &str) -> BTreeSet<[char; 3]> {
+/// Exact Unicode character trigrams shared by lexical discovery and exploration.
+pub fn character_trigrams(text: &str) -> BTreeSet<[char; 3]> {
     let chars: Vec<_> = text.chars().collect();
     chars.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
 }
@@ -407,8 +408,8 @@ fn similarity(engine: PatternEngine, a: &[String], b: &[String]) -> u16 {
             if aa == bb {
                 return 1000;
             }
-            let aa = grams(&aa);
-            let bb = grams(&bb);
+            let aa = character_trigrams(&aa);
+            let bb = character_trigrams(&bb);
             let union = aa.union(&bb).count();
             (aa.intersection(&bb).count() * 1000)
                 .checked_div(union)

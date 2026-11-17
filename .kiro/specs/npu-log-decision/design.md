@@ -1585,3 +1585,25 @@ file/archive plans and observed store frame batches; FTS cursors are named as
 having no frame batches. Existing archive APIs delegate through observer wrappers.
 See `docs/qualification/pattern-refinement-contract.md` for usage and limits.
 Vector retrieval and its usefulness measurements remain task 2.19.
+## Task 2.19 as built — 2026-11-17
+
+`discover explore` operates on original saved rows around one explicit exemplar,
+with within/across/all-pattern filters before bounded top-k/radius retrieval.
+Expansion requires a second source-bound artifact and never assigns review labels.
+Reports pin source/refinement/profile identity, direct distances, returned boundary,
+invalid/unsupported records and distinct-text support before top-k. Group basis is
+source/refinement/pattern identity, explicitly not endpoint/host independence.
+
+The verified 2.17 f0-s0-mask hierarchical adapter pins both graphs, lookup tables,
+layout, runtime and driver; existing placement and execution checks remain. It uses
+the 8-bit entropy cuts, host patch pooling and stride-1 line graph. This is separate
+from the older single-graph encoder package. Original UTF-8 above 1,024 bytes is
+unsupported, never truncated. One original per fixed-shape image is bounded and
+makes no throughput claim. The alternative is exact Unicode trigram/Jaccard on
+original text, not a CPU encoder fallback. Provider memory remains an estimate.
+
+Frozen engineering retrieval recovered 3/3 missed relevant examples with expansion
+precision 3/4, but every candidate satisfied the chosen radius. No generalization
+or classification claim follows. See `docs/qualification/vector-exploration-contract.md`.
+The owner selected exploratory transfer comparison next; final deployment
+qualification remains gated on independent evidence and operational targets.

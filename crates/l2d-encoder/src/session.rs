@@ -1170,7 +1170,7 @@ fn preconditions(
 }
 
 /// A path in the plain drive form the provider was proven with (no `\\?\` prefix).
-fn plain(path: &Path) -> Result<PathBuf, EncoderError> {
+pub(crate) fn plain(path: &Path) -> Result<PathBuf, EncoderError> {
     let resolved = path
         .canonicalize()
         .map_err(|error| failed(&format!("resolving {}", path.display()), error))?;
@@ -1187,7 +1187,7 @@ static RUNTIME: Mutex<Option<(PathBuf, Environment)>> = Mutex::new(None);
 
 /// Loads ONNX Runtime from `dll`, once per process, and returns its environment with
 /// the seconds the load took now.
-fn runtime(dll: &Path) -> Result<(Environment, f64), EncoderError> {
+pub(crate) fn runtime(dll: &Path) -> Result<(Environment, f64), EncoderError> {
     let mut loaded = RUNTIME.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((from, environment)) = &*loaded {
         return if from == dll {

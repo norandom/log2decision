@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 l2d-core.workspace = true
+l2d-encoder.workspace = true
 l2d-store.workspace = true
 l2d-baseline.workspace = true
 l2d-decide.workspace = true

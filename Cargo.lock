@@ -1091,6 +1091,7 @@ dependencies = [
  "l2d-baseline",
  "l2d-core",
  "l2d-decide",
+ "l2d-encoder",
  "l2d-eval",
  "l2d-store",
  "serde",
