@@ -745,3 +745,252 @@ fn selections_keep_literal_glob_regex_and_trigram_fts_distinct() {
         .unwrap();
     assert!(loaded.require_store(&store, &mut b).is_err());
 }
+
+#[test]
+fn pattern_store_counts_and_revisions_track_real_occurrences() {
+    use l2d_core::patterns::{PatternCatalogue, PatternSettings, PatternStore};
+    use l2d_core::selections::{
+        ReviewAction, ReviewDecision, ReviewState, SearchQuery, SearchSettings, SelectionSet,
+    };
+    let scratch = Scratch::new("patterns");
+    let logs = LogsFrame::from_records(&[l2d_core::LogRecord {
+        text: "login failed user=alice".into(),
+        label: Label::Unknown,
+        group: None,
+        first_position: 1,
+        occurrences: 3,
+    }])
+    .unwrap();
+    let mut store = store_named(&scratch, "patterns", &logs);
+    let id = identity();
+    let origin = VectorOrigin::without_release(&id);
+    let other = rows_frame(
+        &logs,
+        "other-source",
+        &[1., 0., 0., 0.],
+        DIM,
+        &[LogFlags::default()],
+    )
+    .unwrap();
+    store.add_with(&other, origin, &mut budget()).unwrap();
+    let mut b = budget();
+    let mut selection = SelectionSet::search_store(
+        "all",
+        SearchQuery::literal("login"),
+        SearchSettings { max_members: 10 },
+        &store,
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(selection.members().len(), 2);
+    let decisions: Vec<_> = selection
+        .members()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| ReviewDecision {
+            member: m.clone(),
+            state: if i == 0 {
+                ReviewState::Good
+            } else {
+                ReviewState::Bad
+            },
+        })
+        .collect();
+    let preview = selection.preview_review(&decisions, &b).unwrap();
+    selection
+        .review_store(
+            preview,
+            ReviewAction {
+                analyst: "test".into(),
+                action: "explicit differing reviews".into(),
+            },
+            &store,
+            &mut b,
+        )
+        .unwrap();
+    let settings = PatternSettings {
+        max_patterns: 8,
+        ..Default::default()
+    };
+    let first = PatternCatalogue::build_store(
+        &selection,
+        &store,
+        &settings,
+        &scratch.root.join("first"),
+        &mut b,
+    )
+    .unwrap();
+    let counts = &first.patterns[0].counts;
+    assert_eq!(
+        (
+            counts.members,
+            counts.occurrences,
+            counts.distinct_texts,
+            counts.reviewed_texts,
+            counts.conflicting_texts
+        ),
+        (2, 6, 1, 1, 1)
+    );
+    let snapshot = store.pattern_snapshot(&mut b).unwrap();
+    store.add_with(&other, origin, &mut b).unwrap();
+    assert_ne!(snapshot, store.pattern_snapshot(&mut b).unwrap());
+    let second = PatternCatalogue::build_store(
+        &selection,
+        &store,
+        &settings,
+        &scratch.root.join("second"),
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(second.patterns[0].counts.occurrences, 9);
+    assert_eq!(second.patterns[0].counts.distinct_texts, 1);
+    assert_ne!(first.revision, second.revision);
+}
+
+#[test]
+fn pattern_store_refuses_count_snapshot_change_without_id_change() {
+    use l2d_core::patterns::{PatternCatalogue, PatternSettings, PatternStore};
+    use l2d_core::selections::{SearchQuery, SearchSettings, SelectionSet};
+    struct Changes<'a> {
+        store: &'a Store,
+        read: std::cell::Cell<bool>,
+    }
+    impl MarkStore for Changes<'_> {
+        fn store_name(&self) -> &str {
+            self.store.store_name()
+        }
+        fn content_sha256(&self, b: &mut MemoryBudget) -> Result<String, L2dError> {
+            self.store.content_sha256(b)
+        }
+        fn phrase_ids(
+            &self,
+            p: &str,
+            n: u64,
+            b: &mut MemoryBudget,
+            f: &mut dyn FnMut(&str),
+        ) -> Result<(), L2dError> {
+            self.store.phrase_ids(p, n, b, f)
+        }
+        fn text_batches(
+            &self,
+            x: u64,
+            y: u64,
+            b: &mut MemoryBudget,
+            f: &mut dyn FnMut(&DataFrame) -> Result<u64, L2dError>,
+        ) -> Result<(), L2dError> {
+            self.store.text_batches(x, y, b, f)
+        }
+    }
+    impl PatternStore for Changes<'_> {
+        fn pattern_snapshot(&self, b: &mut MemoryBudget) -> Result<String, L2dError> {
+            let mut digest = self.store.pattern_snapshot(b)?;
+            if self.read.get() {
+                digest.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+            }
+            Ok(digest)
+        }
+        fn pattern_batches(
+            &self,
+            x: u64,
+            y: u64,
+            b: &mut MemoryBudget,
+            f: &mut dyn FnMut(&DataFrame) -> Result<u64, L2dError>,
+        ) -> Result<(), L2dError> {
+            self.store.pattern_batches(x, y, b, f)?;
+            self.read.set(true);
+            Ok(())
+        }
+    }
+    let scratch = Scratch::new("pattern-mutation");
+    let (logs, _) = fixture();
+    let store = store_named(&scratch, "patterns", &logs);
+    let mut b = budget();
+    let s = SelectionSet::search_store(
+        "all",
+        SearchQuery::regex(".*"),
+        SearchSettings { max_members: 1000 },
+        &store,
+        &mut b,
+    )
+    .unwrap();
+    let changed = Changes {
+        store: &store,
+        read: std::cell::Cell::new(false),
+    };
+    let dest = scratch.root.join("failed");
+    let before = b.held_bytes();
+    let error =
+        PatternCatalogue::build_store(&s, &changed, &PatternSettings::default(), &dest, &mut b)
+            .unwrap_err();
+    assert!(error.to_string().contains("snapshot changed"));
+    assert!(!dest.exists());
+    assert_eq!(before, b.held_bytes());
+}
+
+#[test]
+fn duplicate_store_texts_reuse_assignment_after_catalogue_overflow() {
+    use l2d_core::patterns::{PatternCatalogue, PatternSettings};
+    use l2d_core::selections::{SearchQuery, SearchSettings, SelectionSet};
+    let scratch = Scratch::new("patterns-overflow");
+    let logs = LogsFrame::from_records(
+        &[
+            "cache shard blue lookup complete",
+            "cache shard green lookup complete",
+            "cache shard red lookup complete",
+            "unrelated rare event",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| l2d_core::LogRecord {
+            text: t.to_string(),
+            label: Label::Unknown,
+            group: None,
+            first_position: i as u64 + 1,
+            occurrences: 1,
+        })
+        .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut store = store_named(&scratch, "patterns", &logs);
+    let id = identity();
+    let origin = VectorOrigin::without_release(&id);
+    for source in ["b", "c", "d"] {
+        let rows = rows_frame(&logs, source, &[1.; 16], DIM, &[LogFlags::default(); 4]).unwrap();
+        store.add_with(&rows, origin, &mut budget()).unwrap();
+    }
+    let mut b = budget();
+    let selection = SelectionSet::search_store(
+        "all",
+        SearchQuery::regex(".*"),
+        SearchSettings { max_members: 100 },
+        &store,
+        &mut b,
+    )
+    .unwrap();
+    let c = PatternCatalogue::build_store(
+        &selection,
+        &store,
+        &PatternSettings {
+            max_patterns: 1,
+            ..Default::default()
+        },
+        &scratch.root.join("cat"),
+        &mut b,
+    )
+    .unwrap();
+    let mut assignments = std::collections::BTreeMap::new();
+    c.visit_members(&scratch.root.join("cat"), &mut b, |m| {
+        if let Some(prior) = assignments.insert(m.text, m.pattern) {
+            assert_eq!(prior, m.pattern);
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(assignments.len(), 4);
+    assert_eq!(c.selected_members, 16);
+    assert_eq!(c.patterns[0].counts.members + c.ungrouped.members, 16);
+    assert_eq!(
+        c.patterns[0].counts.distinct_texts + c.ungrouped.distinct_texts,
+        4
+    );
+}
