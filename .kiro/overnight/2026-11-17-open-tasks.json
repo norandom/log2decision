@@ -1,0 +1,173 @@
+{
+  "status": "owner-approved",
+  "prepared_at": "2026-11-17T21:21:57.7851938+01:00",
+  "spec": "npu-log-decision",
+  "spec_approved": true,
+  "source_commit": "f758ea314ced15058a6c5f2c96bf9d258abe7ad6",
+  "tasks_sha256": "48387cb1342687dadb179ebbf8e9384ed4695f3d9dbd7301b0b2260d48c6a9a2",
+  "completed_task_count": 45,
+  "open_task_count": 18,
+  "tasks": [
+    {
+      "id": "2.20",
+      "title": "Explicit Venn triage policy and evidence preservation",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 58,
+      "explicit_dependencies": [
+        "2.8",
+        "2.11",
+        "1.13"
+      ],
+      "overnight_category": "primary-in-progress"
+    },
+    {
+      "id": "2.22",
+      "title": "End-to-end triage qualification",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 66,
+      "explicit_dependencies": [
+        "2.18",
+        "2.20",
+        "2.9"
+      ],
+      "overnight_category": "qualification-gated"
+    },
+    {
+      "id": "2.21",
+      "title": "Recorded outcomes and explicit update cycle",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 74,
+      "explicit_dependencies": "2.22",
+      "overnight_category": "qualification-dependent"
+    },
+    {
+      "id": "2.9",
+      "title": "Wire NPU & Encoder CLI commands",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 425,
+      "explicit_dependencies": "2.20",
+      "overnight_category": "primary-dependent"
+    },
+    {
+      "id": "2.10",
+      "title": "Fitted linear head on vectors (deferred on 2026-11-15)",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 436,
+      "explicit_dependencies": [
+        "1.6",
+        "1.13",
+        "2.7",
+        "2.8"
+      ],
+      "overnight_category": "owner-deferred"
+    },
+    {
+      "id": "3.1",
+      "title": "Kernel MMD population shift test",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 509,
+      "explicit_dependencies": "1.1",
+      "overnight_category": "stretch-ready"
+    },
+    {
+      "id": "3.2",
+      "title": "Vector set abstraction and shared measures",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 517,
+      "explicit_dependencies": "1.6",
+      "overnight_category": "stretch-ready"
+    },
+    {
+      "id": "3.3",
+      "title": "Measure information loss and vector shortening",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 525,
+      "explicit_dependencies": null,
+      "overnight_category": "stretch-dependent"
+    },
+    {
+      "id": "3.4",
+      "title": "Measure clustering capability and within-group separability",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 530,
+      "explicit_dependencies": "3.2",
+      "overnight_category": "stretch-dependent"
+    },
+    {
+      "id": "3.5",
+      "title": "Report vector properties and write 2D projection",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 537,
+      "explicit_dependencies": "3.2",
+      "overnight_category": "stretch-dependent"
+    },
+    {
+      "id": "3.6",
+      "title": "Compare two vector sets side by side",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 545,
+      "explicit_dependencies": null,
+      "overnight_category": "stretch-dependent"
+    },
+    {
+      "id": "3.7",
+      "title": "Grouped evaluation harness with quality and cost metrics",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 550,
+      "explicit_dependencies": [
+        "1.10",
+        "2.8",
+        "2.10"
+      ],
+      "overnight_category": "blocked-deferred-dependency"
+    },
+    {
+      "id": "3.8",
+      "title": "Write evaluation reports and comparison",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 561,
+      "explicit_dependencies": null,
+      "overnight_category": "blocked-evaluation-chain"
+    },
+    {
+      "id": "3.9",
+      "title": "Wire Assessment, Shift, and Evaluation CLI commands",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 567,
+      "explicit_dependencies": null,
+      "overnight_category": "blocked-evaluation-chain"
+    },
+    {
+      "id": "4.1",
+      "title": "End-to-end integration tests on the fixture",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 578,
+      "explicit_dependencies": null,
+      "overnight_category": "stale-wording-and-integration-dependent"
+    },
+    {
+      "id": "4.2",
+      "title": "Hardware repeatability tests on reference AMD NPU",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 586,
+      "explicit_dependencies": null,
+      "overnight_category": "stale-wording-hardware-plan-needed"
+    },
+    {
+      "id": "4.3",
+      "title": "Full evaluation on HTTP CSIC 2010 and cross-endpoint generalization check",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 593,
+      "explicit_dependencies": null,
+      "overnight_category": "blocked-evaluation-chain"
+    },
+    {
+      "id": "4.4",
+      "title": "(Optional / Follow-up) Trainable model definition and Burn training module",
+      "source": ".kiro/specs/npu-log-decision/tasks.md",
+      "line": 600,
+      "explicit_dependencies": null,
+      "overnight_category": "optional-excluded"
+    }
+  ]
+}
