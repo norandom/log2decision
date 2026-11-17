@@ -1092,6 +1092,7 @@ dependencies = [
  "l2d-core",
  "l2d-decide",
  "l2d-eval",
+ "l2d-store",
  "serde",
  "serde_json",
  "sha2",

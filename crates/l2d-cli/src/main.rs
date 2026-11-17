@@ -105,6 +105,9 @@ enum Command {
     Ingest(cmd::ingest::IngestArgs),
     /// Search a file or archive and optionally save a labelled mark set
     Mark(cmd::mark::MarkArgs),
+    /// Search unlabelled selections, refine patterns, preview queries and explicitly review
+    #[command(subcommand)]
+    Discover(cmd::discover::DiscoverCommand),
     /// Fit or apply the baseline scorer
     #[command(subcommand)]
     Baseline(cmd::baseline::BaselineCommand),
@@ -136,6 +139,7 @@ fn dispatch(command: &Command, context: &cmd::common::Context) -> Result<(), L2d
     match command {
         Command::Ingest(args) => cmd::ingest::run(context, args),
         Command::Mark(args) => cmd::mark::run(context, args),
+        Command::Discover(args) => cmd::discover::run(context, args),
         Command::Baseline(sub) => cmd::baseline::run(context, sub),
         Command::Encoder(sub) => cmd::encoder::run(sub),
         Command::Store(sub) => cmd::store::run(sub),

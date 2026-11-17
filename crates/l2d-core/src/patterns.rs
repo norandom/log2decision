@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+pub mod refinement;
 
 /// Store adapter with original multiplicities. Its snapshot includes counts and
 /// text identity; all methods restore the incoming budget hold on errors too.
@@ -520,6 +521,26 @@ impl PatternCatalogue {
         destination: &Path,
         budget: &mut MemoryBudget,
     ) -> Result<Self, L2dError> {
+        Self::build_archive_reported(
+            selection,
+            path,
+            options,
+            settings,
+            destination,
+            budget,
+            &mut |_| Ok(()),
+        )
+    }
+    /// The unchanged catalogue builder with an observer for the actual archive plan.
+    pub fn build_archive_reported(
+        selection: &SelectionSet,
+        path: &Path,
+        options: &crate::ZipInputSettings,
+        settings: &PatternSettings,
+        destination: &Path,
+        budget: &mut MemoryBudget,
+        report: &mut dyn FnMut(&crate::BatchPlan) -> Result<(), L2dError>,
+    ) -> Result<Self, L2dError> {
         let guard =
             ResourceGuard::tracked("pattern archive catalogue", busy_choice(), budget.usage())?;
         let before = budget.held_bytes();
@@ -539,6 +560,9 @@ impl PatternCatalogue {
                 }
                 for batch in input.batches(budget) {
                     spool.frame(&batch?)?;
+                }
+                if let Some(plan) = input.batch_plan() {
+                    report(plan)?;
                 }
                 // Final counts are in emitted-row order, including late duplicate occurrences.
                 spool.order.seek(SeekFrom::Start(0)).map_err(fail)?;

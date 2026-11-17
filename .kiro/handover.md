@@ -52,7 +52,7 @@ affected tests, native SQLite heap regression, fmt, Clippy and CLI help passed o
 the corrected source. Evidence: `D:\BuildArtifacts\log2decision\task-1.26\`.
 FTS is store-only and intrinsically insensitive; unquoted prefix expansion
 refuses because its native allocation cannot be bounded by expression length.
-Selection membership overflow refuses explicitly. Next: task 1.28.
+Selection membership overflow refuses explicitly. Next: task 2.19.
 
 Task 1.27 is complete (reviewed commit `b62236d`): bounded pattern catalogue,
 disk membership, deterministic source-bound revisions, representative/variable/
@@ -73,9 +73,21 @@ Build storage now follows `AGENTS.md`: one reused project target, no debug symbo
 or incremental compilation, 30 GiB target/50 GiB free preflight limits, serialized
 heavy jobs. The old project debug cache was cleaned (27.7 GiB); release evidence
 was retained. The owner resolved the shared cargo-target cleanup separately.
-Remaining execution order: 1.28 → 2.19 → 2.18 → 2.8 →
+Task 1.28 is complete (reviewed commit `6f03c0b`): the owner-selected
+`l2d discover` group implements search, pattern inspection, split/merge, priority,
+query preview/save, explicit partial review and receipt-bundled format-3 export.
+Independent review APPROVED; source and binary hashes matched. Full workspace
+before final metadata reporting: 851 passed, 0 failed, 51 ignored. Final reporting
+changes passed 17 affected tests, fmt, Clippy and actual human/JSON CLI smoke;
+reviewer replayed 18 tests. No full-suite-after-reporting claim. Native heap growth
+536,225 B; refused load 1,045 B; counted peak 79,560,704 B under 128 MiB.
+Evidence: `D:\BuildArtifacts\log2decision\task-1.28\validation.md`; command guide:
+`docs/qualification/pattern-refinement-contract.md`. Refinement explicitly refuses
+oversized whole-membership snapshots. Query background is other selected members.
+Next task 2.19 adds vector exploration, keeping retrieval distinct from qualification.
+Remaining execution order: 2.19 → 2.18 → 2.8 →
 2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
-First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
+First usable discovery milestone 1.28 is complete. Complete qualified triage: 2.22.
 Review-budget values, reserved/audit allocations and missed-case targets must be
 recorded before final evaluation; no universal thresholds were selected.
 

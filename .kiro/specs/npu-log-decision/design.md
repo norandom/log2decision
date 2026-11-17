@@ -1565,3 +1565,23 @@ is engineering evidence, not human-labelled deployment qualification. See
 `docs/qualification/pattern-engine-qualification.md` and the catalogue contract
 for variant limits, measurements, hashes and replay commands. Refinement and the
 owner-selected `l2d discover ...` command group remain task 1.28.
+## Task 1.28 as built — 2026-11-17
+
+`l2d discover` implements search, patterns/details, split/merge, priority,
+preview/save-query, review and export. Immutable refinement snapshots preserve
+exact rows, counts, parent/action lineage and source identity. Generated queries
+escape literal tokens and use wildcard slots only for masks or observed variables;
+variable token counts require an explicit regex. Exact preview differences use
+other selected members (including ungrouped records) as the stated background.
+Review acceptance hashes bind target, state, analyst/action and both revisions;
+partial reviews preserve prior decisions elsewhere. Exports atomically publish
+format-3 MarkSets with detailed reviewed SelectionSet and refinement receipts.
+Source-byte or store occurrence-snapshot changes refuse new actions.
+
+Refinement is an explicitly bounded whole-membership operation with no disk
+execution form; admission refuses before loading when it cannot fit. CLI output
+copies remain charged across publication. Common memory reports expose actual
+file/archive plans and observed store frame batches; FTS cursors are named as
+having no frame batches. Existing archive APIs delegate through observer wrappers.
+See `docs/qualification/pattern-refinement-contract.md` for usage and limits.
+Vector retrieval and its usefulness measurements remain task 2.19.

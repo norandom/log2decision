@@ -413,6 +413,26 @@ impl SelectionSet {
         options: &ZipInputSettings,
         budget: &mut MemoryBudget,
     ) -> Result<(Self, ArchiveSummary), L2dError> {
+        Self::search_archive_reported(
+            name,
+            query,
+            settings,
+            path,
+            options,
+            budget,
+            &mut |_| Ok(()),
+        )
+    }
+    /// The unchanged archive search with a bounded caller-owned batch-plan observer.
+    pub fn search_archive_reported(
+        name: &str,
+        query: SearchQuery,
+        settings: SearchSettings,
+        path: &Path,
+        options: &ZipInputSettings,
+        budget: &mut MemoryBudget,
+        report: &mut dyn FnMut(&crate::BatchPlan) -> Result<(), L2dError>,
+    ) -> Result<(Self, ArchiveSummary), L2dError> {
         let guard =
             ResourceGuard::tracked("selection archive search", busy_choice(), budget.usage())?;
         if matches!(query, SearchQuery::Fts5Trigram { .. }) {
@@ -441,6 +461,9 @@ impl SelectionSet {
             // Constant reservation avoids ZipBatches' hold_beside one-batch lag.
             for batch in input.batches(budget) {
                 set.take(&batch?, &matcher)?;
+            }
+            if let Some(plan) = input.batch_plan() {
+                report(plan)?;
             }
             let summary = input.finish();
             let mut file = fs::File::open(path).map_err(failed)?;
@@ -699,7 +722,7 @@ impl SelectionSet {
         checked?;
         self.apply_review(preview, action, budget)
     }
-    fn apply_review(
+    pub(crate) fn apply_review(
         &mut self,
         preview: ReviewPreview,
         action: ReviewAction,

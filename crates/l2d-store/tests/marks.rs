@@ -994,3 +994,98 @@ fn duplicate_store_texts_reuse_assignment_after_catalogue_overflow() {
         4
     );
 }
+
+#[test]
+fn refined_store_snapshot_binds_occurrences_and_conflicting_text_reviews() {
+    use l2d_core::patterns::{PatternCatalogue, PatternSettings, refinement::PatternRefinement};
+    use l2d_core::selections::{
+        ReviewAction, ReviewDecision, ReviewState, SearchQuery, SearchSettings, SelectionSet,
+    };
+    let scratch = Scratch::new("refinement-counts");
+    let (logs, _) = fixture();
+    let mut store = store_named(&scratch, "refine", &logs);
+    let mut b = budget();
+    let mut selection = SelectionSet::search_store(
+        "all",
+        SearchQuery::glob("*"),
+        SearchSettings { max_members: 1000 },
+        &store,
+        &mut b,
+    )
+    .unwrap();
+    let decisions: Vec<_> = selection
+        .members()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| ReviewDecision {
+            member: m.clone(),
+            state: if i % 3 == 0 {
+                ReviewState::Conflict
+            } else if i % 3 == 1 {
+                ReviewState::Good
+            } else {
+                ReviewState::Unresolved
+            },
+        })
+        .collect();
+    let preview = selection.preview_review(&decisions, &b).unwrap();
+    selection
+        .review_store(
+            preview,
+            ReviewAction {
+                analyst: "fixture".into(),
+                action: "explicit mixed review".into(),
+            },
+            &store,
+            &mut b,
+        )
+        .unwrap();
+    let c = PatternCatalogue::build_store(
+        &selection,
+        &store,
+        &PatternSettings::default(),
+        &scratch.root.join("catalogue"),
+        &mut b,
+    )
+    .unwrap();
+    let r = PatternRefinement::from_catalogue(&c, &scratch.root.join("catalogue"), &mut b).unwrap();
+    r.require_current_store(&store, &mut b).unwrap();
+    r.require_selection(&selection, &b).unwrap();
+    let ids: Vec<_> = r.groups.iter().map(|p| p.id).collect();
+    let merged = r.merge(&ids, &b).unwrap();
+    assert_eq!(
+        merged
+            .rows
+            .iter()
+            .filter(|r| r.review == Some(ReviewState::Conflict))
+            .count(),
+        decisions
+            .iter()
+            .filter(|r| r.state == ReviewState::Conflict)
+            .count()
+    );
+    assert_eq!(
+        merged.groups[0].counts.conflicting_texts,
+        r.groups
+            .iter()
+            .map(|p| p.counts.conflicting_texts)
+            .sum::<u64>()
+    );
+    let before = store.content_sha256(&mut b).unwrap();
+    store
+        .add_with(
+            &rows(&logs),
+            VectorOrigin::without_release(&identity()),
+            &mut b,
+        )
+        .unwrap();
+    assert_eq!(
+        before,
+        store.content_sha256(&mut b).unwrap(),
+        "duplicate input preserves store ID hash"
+    );
+    assert!(
+        r.require_current_store(&store, &mut b).is_err(),
+        "occurrence changes must invalidate refinement snapshot"
+    );
+}

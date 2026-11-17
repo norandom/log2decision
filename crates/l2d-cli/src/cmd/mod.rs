@@ -8,6 +8,8 @@ pub mod baseline;
 pub mod baseline_archive;
 pub mod calibrate;
 pub mod common;
+pub mod discover;
+mod discover_store;
 pub mod encoder;
 pub mod eval;
 pub mod ingest;
