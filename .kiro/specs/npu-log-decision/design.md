@@ -1061,8 +1061,11 @@ Added on 2026-11-15 (owner approval of `amendment-2026-11-15-analyst-flow.md`, a
 - As built in task 1.23, the report: `l2d_eval::markscore::held_out_report(&MarkFit, &HeldOutSettings { folds: 5, margin: 0.05 }, &mut MemoryBudget) -> Option<HeldOutReport>` (`None` when no fitted log has a group key). A log's group fold is `split::hash_fold` of its group key (first 8 bytes of SHA-256, little-endian, modulo the folds; `Folds::hashed`, the rule of the science gate's inner folds, not the `balanced` rule of the gate's outer folds), its text part the same of its text. Fold f fits again with the score's settings and rules on the logs of other group folds and other text parts; it scores the logs of group fold f (groups it never saw) and the logs of other group folds with text part f (groups it saw, logs it did not), so one model judges both sides. Each side is pooled over the folds as one ranking; the warning is set when fitted-group ROC AUC less held-out ROC AUC exceeds the margin. Every scored text is checked against the fold model's fitted texts. Reported per fold and pooled; no CLI yet (task 2.9).
 
 **Grouping and "close enough" (`l2d-decide`; task 2.8)**
+Updated 2026-11-17: exploration and its CLI are delivered first by 2.19; 2.8 reuses that layer for the production support gate after 2.18. The decision-to-investigate previously described below as later work is now specified by Requirement 20 and tasks 2.20/2.22. See the integrated extension at the end of this document.
 - Grouping of a mark set: by the encoder's vectors on the NPU, or by character n-gram similarity when no NPU is available (method named). Each group has its size, a representative and the spread of distances.
 - Close enough (16.10, 16.11): the nearest marked and unmarked logs within reach, minimum support of 6.3. Not close enough: stated, no ratio. Close enough: the mark-set score's ratio, with the evidence of 6.2, 6.7 and 14.13 and the label set of Requirement 11 when calibrated.
+
+**Task 1.23 memory follow-up (2026-11-17):** fitting preflights the redacted-length bound without allocating replacement strings, including simultaneously live and growing replacement buffers. The held-out report checks a conservative workspace bound before copying input texts or group keys, keeps fold/index/result/metric storage reserved throughout, checks each live model and its scoring scratch beside that reservation, and restores the caller's incoming hold on all return paths. Tight budgets refuse before these copies; successful report values and split semantics remain unchanged. Conservative accounting may refuse a report whose actual heap would fit.
 #### LinearHead and outlier ranking
 
 | Field | Detail |
@@ -1363,4 +1366,83 @@ What follows for the design. The criteria are Requirement 15 since 2026-11-14 (r
 1. Runtime spike: load AMD's DLL from Rust, register the Vitis AI provider, run the spike's 8-bit model, read placement. Fix the `ort` feature level and the DLL list. If this fails, stop and return to design.
 2. `rusqlite` with bundled SQLite builds on Windows (done in task 1.8).
 3. `l2d-core` and `l2d-baseline` (no hardware dependency) can proceed in parallel with 1 and 2.
-4. The analyst flow (Requirement 16): mark sets (1.21), redaction (1.22) and the mark-set score (1.23) need neither the NPU nor the encoder and come first; gate 2.18 measures whether redaction makes scores agnostic; then grouping and "close enough" (2.8) and the commands (2.9).
+4. Current analyst flow (Requirements 16–20, owner alignment 2026-11-17): verify the 1.23 wrap-up; 1.25 → 1.24 → unlabelled selection/pattern discovery 1.26–1.28 → NPU exploration 2.19 → transfer qualification 2.18 → close-enough 2.8 → outliers 2.11 → policy 2.20 → integration 2.9 → end-to-end qualification 2.22 → feedback 2.21. Earlier completed-task descriptions remain historical. Vector exploration precedes qualification; the production gate follows it.
+
+## Pattern discovery and Venn triage — integrated 2026-11-17
+
+The owner accepted lexical patterns first, vector expansion second; exploration
+may use assumed background, but qualification requires reviewed good/bad labels.
+Investigate/review/low-priority are workflow outcomes. Venn refers to typed vector
+decisions with evidence and abstention, implemented locally in Rust. No generic
+text head, vector classifier revival, GUI, team routing or automatic retraining
+is introduced. Requirements 17–20 and the active roadmap in tasks.md govern this
+extension; the dated amendment retains rationale and examples.
+
+### Boundary commitments and artifact contracts
+
+| Boundary | Contract | Requirements | Tasks |
+| --- | --- | --- | --- |
+| SelectionSet (core) | Unlabelled source snapshot, query mode/flags, scope, completeness, exact member identities; explicit conversion to existing MarkSet | 17.1, 17.2, 17.6, 19.7 | 1.26 |
+| PatternCatalogue (core) | Algorithm/mask/parameter revision, template and real representative, variable/boundary examples, disk membership, occurrence/distinct/reviewed counts, ungrouped remainder | 17.3, 17.7 | 1.27 |
+| PatternRefinement (core + CLI) | Revision lineage, split/merge membership, selection priority independent of label, query preview and explicit label export | 17.4 to 17.6 | 1.28 |
+| VectorExploration (decide/store) | Exemplar and scope, profile identity, cosine distance, support and expansion provenance; no implicit labels | 18.1 to 18.6 | 2.19 |
+| QualificationReport (eval) | Frozen artifact IDs, split manifest, independent label provenance, record-review budget, targets, metrics/coverage and explicit incomplete status | 19.1 to 19.7 | 2.18, 2.22 |
+| TriagePolicy (decide) | Score/evidence/calibration identities, eligible history, thresholds, reasons, queues and reserved/audit/deferred allocations | 20.1 to 20.5, 20.7 | 2.8, 2.20, 2.9 |
+| OutcomeRecord (core/decide) | Observed label distinct from suggested queue, correction lineage and explicit update/requalification revisions | 20.6, 19.7 | 2.21 |
+
+Persist manifests atomically after streamed membership/output parts. Charge
+catalogues, memberships, vector buffers, label histories, queues and save buffers
+to MemoryBudget; spill or refuse explicitly under Requirements 12 and 15.
+Source identity includes archive-entry selection or store snapshot identity.
+Input/profile mismatch refuses reuse; no new artifact changes existing MarkSet
+format implicitly. Revision hashes include input, algorithm, masks and settings.
+
+### Pattern and vector processing
+
+Evaluate bounded Drain-style mining against character n-gram grouping before
+choosing an engine. Preserve meaningful punctuation and outcome/negation tokens;
+discovery masks are independent of confirmed score redactions. Freeze canonical
+input order and deterministic tie-breaking. A catalogue limit creates explicit
+ungrouped overflow or refusal, never silently removed records. Generated regexes
+escape literals and preview exact differences from saved membership.
+
+NPU encoding operates on original records under a pinned encoder/codec/runtime/
+normalization/preprocessing profile. Template text is not a substitute for member
+vectors. CPU/store arithmetic may perform cosine retrieval; this is not a claim
+that clustering itself runs on the NPU. Use bounded top-k/radius neighbourhoods
+around exemplars instead of an all-pairs matrix. Compare within/across-pattern
+retrieval and explicitly scoped expansion. Invalid/zero vectors are unsupported;
+duplicates do not inflate independent support. Report chaining separately from
+direct reach. The named n-gram route remains distinct from CPU encoder fallback.
+
+### Policy and qualification
+
+Keep baseline score, vector evidence and conformal label sets as separate typed
+signals. Extend the existing primary-only evidence handling for policy output:
+persist both score and vector evidence with their revisions. Filters precede
+top-k. Reviewed labels and assumed-background evidence remain distinguishable.
+Calibration must match mark-set scorer identity; absent/invalid calibration is
+explicit and cannot support a calibrated claim.
+
+Policy precedence: invalid/insufficient/out-of-reach → review unsupported with
+no actionable ratio (16.10); conflicting supported evidence → review disagreement;
+supported high score with bad corroboration → investigate; supported low score
+with good corroboration → low priority; otherwise → review uncertain. Thresholds,
+corroboration, reach and support are versioned development-selected parameters.
+Review budgets reserve a positive allocation for unknown/conflicting cases and
+an audit allocation for low-priority cases; allocations sum to the budget and
+insufficient budgets refuse configuration. Deferred records stay visible.
+
+Freeze training-only masks/redactions, scorer, catalogue, evidence and policy
+before final holdout. Evaluate unseen groups and later time where available;
+exclude duplicate leakage and disclose missing time/labels. Query matches alone
+cannot establish independent truth. Qualification includes unsupported positives
+and compares equal record-review budgets. If 2.18 results guide policy selection,
+2.22 requires a separate untouched report partition. A small AUC gap alone does
+not establish useful absolute quality. No deployment success is claimed without
+recorded targets and evidence. The close-enough gate's endpoint bias is measured,
+not hidden by reporting quality only among supported cases.
+
+Observed outcomes produce a new evidence revision; queue suggestions never become
+training labels automatically. Explicit refit/recalibration invalidates prior
+qualification for changed artifacts and triggers renewed evaluation.

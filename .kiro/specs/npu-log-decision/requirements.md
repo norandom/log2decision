@@ -27,9 +27,11 @@ features on HTTP CSIC 2010.
 - **In scope**:
   - Reading text logs and labelled log datasets from local files.
   - Reading log records from zip archives in batches, without extracting them.
-  - A fitted linear head on the encoder's vectors as a further scorer, and a ranking of logs unlike anything stored.
+  - A ranking of logs unlike anything stored; the fitted vector classifier remains deferred after gate 2.17.
   - A baseline bad/good ratio from character-level features, fitted deterministically.
   - A score built from the analyst's marks, with redaction of host- and endpoint-specific fragments (Requirement 16).
+  - Unlabelled search selections, iterative string-pattern discovery, vector expansion, and explicit review labels (Requirements 17 and 18).
+  - Qualification on unseen groups and later logs where available, and Venn-style investigate/review/low-priority queues with recorded outcomes (Requirements 19 and 20).
   - Agnostic threat scoring barrier: isolating routing context (URLs, endpoints, hosts) from payload anomaly signals so threat scores derive from general syntactic anomalies and attack patterns rather than hardcoded training-set site topography.
   - Pre-validating neural encoder architecture quality offline via `uv` on held-out grouped splits before NPU deployment.
   - Packaging the encoder as an identified artifact (`model.int8.onnx`, `table.bin`, `encoder.json`) and running it on the NPU via ONNX Runtime.
@@ -44,6 +46,7 @@ features on HTTP CSIC 2010.
   - Evaluation on the AIT Log Data Set V2 (step 2) and on the thesis Sysmon
     data.
   - Live or streaming ingestion, alerting, and any graphical interface.
+  - Automatic incident-type or team routing; automatic retraining from suggested decisions.
   - A bad/good share per source or time window. Only the per-log ratio is
     required here.
   - Blocking, deleting or otherwise acting on logs. The tool ranks; the analyst
@@ -285,3 +288,54 @@ Added on 2026-11-15 (owner approval of `amendment-2026-11-15-analyst-flow.md`, a
 10. When a new log is triaged against a mark set, the Log Triage Tool shall decide whether it is close enough to the marked logs, from the nearest marked and unmarked logs within reach with the minimum support of Requirement 6.3; for a log that is not close enough, it shall state that and not give the mark set's ratio.
 11. When a log is close enough, the Log Triage Tool shall give the score's ratio with the evidence of Requirements 6.2, 6.7 and 14.13, and the label set of Requirement 11 where the score is calibrated.
 12. The Log Triage Tool shall keep marking, grouping, redaction and fitting within the memory limit of Requirement 12, and under Requirement 15.
+
+### Requirement 17: Search selections and readable pattern discovery
+**Objective:** As an analyst, I want to turn a broad search into inspectable patterns before writing a precise regex or assigning labels.
+
+Owner accepted the recommended workflow on 2026-11-17. These criteria extend Requirement 16; existing labelled mark sets remain supported. CLI and saved artifacts are in scope, not a GUI.
+
+#### Acceptance Criteria
+1. When the analyst searches by literal substring, content glob or regex, the Log Triage Tool shall save an unlabelled selection with query mode, case setting, source identity, scope, member identities and completeness counts.
+2. When content glob search is used, the Log Triage Tool shall match the whole record with `*` for zero or more characters and `?` for one character, support escaped literals, and distinguish content matching from archive-entry filtering and full-text token search; search shall default to case-sensitive with an explicit insensitive option.
+3. When a selection is grouped by recurring text structure, the Log Triage Tool shall show each pattern's representative, variable examples, occurrence count, distinct-text count and reviewed count, and account separately for ungrouped records.
+4. When the analyst inspects, splits or merges patterns, the Log Triage Tool shall preserve exact membership and provenance in a new revision and expose exceptions and differing outcome tokens.
+5. When a query is proposed from a pattern, the Log Triage Tool shall preview its actual matches and misses against that pattern and a stated background sample before saving it; the displayed pattern shall not be described as an exact matcher unless verified.
+6. When the analyst promotes, hides or expands a selection, the Log Triage Tool shall leave its labels unchanged; an explicit batch-label action shall preview affected members and record the analyst's action.
+7. When limits prevent complete discovery, the Log Triage Tool shall report omitted or ungrouped records or refuse explicitly, keeping all discovery and persistence within Requirements 12 and 15.
+
+### Requirement 18: Vector-assisted exploration
+**Objective:** As an analyst, I want related examples within and across text patterns, including examples my original search missed.
+
+#### Acceptance Criteria
+1. When the analyst requests similar examples, the Log Triage Tool shall support exploration within a pattern and across patterns, recording exemplars, distances, method and profile identity.
+2. When exploration expands beyond the saved search, the Log Triage Tool shall require an explicit expansion scope and retain the origin of each newly suggested, unlabelled member.
+3. If vectors are incompatible or invalid, the Log Triage Tool shall report unsupported records or refuse the comparison; where the NPU is unavailable, the existing named character n-gram route shall remain available without silently executing the encoder on the CPU.
+4. When a group is presented, the Log Triage Tool shall show a real representative, distance spread and boundary members, and distinguish proximity to an exemplar from connectivity through other members.
+5. When support is counted, the Log Triage Tool shall distinguish independent distinct-text evidence from repeated occurrences and report same-group and cross-group support.
+6. When exploration runs, the Log Triage Tool shall preserve source identities and remain within Requirements 12 and 15.
+
+### Requirement 19: Qualification for future logs
+**Objective:** As an analyst, I want evidence that a score derived from reviewed material transfers to future cases rather than reproducing the seed query or known hosts.
+
+#### Acceptance Criteria
+1. When a score is fitted against unmarked background under 16.6, the Log Triage Tool shall state that the comparison class is assumed; a qualification report shall require independently reviewed good and bad evaluation examples, including material beyond the seed search.
+2. When final qualification starts, the Log Triage Tool shall record frozen training, redaction, pattern, scorer, evidence-store and policy revisions and a split manifest; final holdout material shall not be used to fit or select these artifacts.
+3. When qualifying a score, the Log Triage Tool shall report unseen-group performance and later-time performance where suitable timestamps exist, disclose duplicate separation and exclusions, and state temporal generalization as untested when unavailable.
+4. When reporting qualification, the Log Triage Tool shall include pooled and per-fold ROC AUC, precision-recall AUC where defined, precision/recall at a stated fixed record-review budget, coverage, abstention and missed relevant cases including unsupported positives; undefined metrics shall state why.
+5. When comparing workflows, the Log Triage Tool shall use the same splits and review budget for score alone, pattern-assisted review and score with vector evidence, with differences and uncertainty reported.
+6. If qualification targets or independent evaluation labels are missing, the Log Triage Tool shall report results as exploratory or qualification incomplete, not qualified; the review budget and acceptable missed-case rate shall be recorded before final evaluation.
+7. When discovery or fitting uses labels, the Log Triage Tool shall retain unresolved and conflicting cases separately and exclude them from supervised labels until explicitly resolved.
+
+### Requirement 20: Venn-style triage and feedback
+**Objective:** As an analyst, I want an explained investigation queue combining the learned score and historical evidence, with unfamiliar or conflicting cases kept visible.
+
+Venn means Vector Decision Models, not set diagrams. Good/bad remain score labels; investigate/review/low-priority are workflow outcomes, not interchangeable labels.
+
+#### Acceptance Criteria
+1. When a future log is triaged, the Log Triage Tool shall apply a versioned policy that routes it to investigate, review or low priority and records score provenance, evidence identities, support, distances, applicable calibration and reasons.
+2. If evidence is invalid, insufficient or out of reach, the Log Triage Tool shall route the log to review as unsupported and withhold the actionable mark-set ratio under 16.10; if score and supported evidence disagree, it shall route the log to review as disagreement.
+3. When supported evidence corroborates a high score under the configured policy, the Log Triage Tool shall route the log to investigate; when it corroborates a low score, it shall route it to low priority; all other cases shall enter review as uncertain.
+4. When allocating a finite review budget, the Log Triage Tool shall reserve a configured positive share for unsupported/conflicting cases and an audit sample of low-priority cases, reporting allocations and deferred counts without discarding records.
+5. When evidence is retrieved, the Log Triage Tool shall apply eligibility filters before selecting neighbours, identify assumed-background evidence separately from reviewed outcomes, and avoid presenting distance, novelty or a neighbour vote as calibrated badness.
+6. When an analyst records an outcome, the Log Triage Tool shall distinguish the observed good/bad label from the suggested queue and create a new evidence revision; refitting or recalibration shall require an explicit operation and renewed validation.
+7. When a run is replayed with the same inputs and artifact revisions, the Log Triage Tool shall reproduce its memberships and queues, or identify incompatible revisions; processing shall remain within Requirements 12 and 15.

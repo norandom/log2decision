@@ -1,10 +1,37 @@
 # Handover: npu-log-decision
 
-Written 2026-11-15, end of session. Branch `main`, pushed (this file's commit
-follows `f931482`). Remote: https://github.com/norandom/log2decision
+## Current roadmap update — 2026-11-17
+
+The owner accepted the recommended pattern-discovery/Venn workflow and requested
+integration into Kiro. Requirements 17–20, design and the active roadmap in
+tasks.md now contain it; amendment-2026-11-17-pattern-discovery-and-triage.md
+records the rationale. Scope: lexical patterns first, NPU vector expansion next,
+independently qualified reusable score, then investigate/review/low-priority
+queues with reserved review for unknown/conflicting cases and explicit feedback.
+Assumed background remains available for exploration; qualification requires
+reviewed good/bad evaluation examples. Venn means Vector Decision Models.
+
+Task 1.23 wrap-up completed on 2026-11-17 as merge `883ce5e`. Fresh independent
+review found and then approved fixes for redaction expansion before a budget check
+and held-out reporting copies before refusal. Verification: 788 passed, 0 failed,
+49 ignored; fmt, Clippy and CLI help passed. Logs are in
+`D:\BuildArtifacts\log2decision\fix-1.23-memory\`. Both old task worktrees were
+verified clean/merged and removed. Next: task 1.25. The accepted roadmap is saved
+with the specification; no later implementation task has been marked complete.
+
+Execution order: 1.25 → 1.24 → 1.26 → 1.27 → 1.28 → 2.19 → 2.18 → 2.8 →
+2.11 → 2.20 → 2.9 → 2.22 → 2.21. This supersedes sequencing below.
+First usable discovery milestone: 1.28. Complete qualified triage: 2.22.
+Review-budget values, reserved/audit allocations and missed-case targets must be
+recorded before final evaluation; no universal thresholds were selected.
+
+## Previous handover — retained historical record
+
+Written 2026-11-16, end of session. Branch `main`, pushed (this file's commit
+follows the merge of task 1.23). Remote: https://github.com/norandom/log2decision
 
 This file describes the state as it is now. It replaces the handover of
-2026-11-14.
+2026-11-15.
 
 ## Where things stand
 
@@ -12,19 +39,20 @@ The spec `npu-log-decision` is in implementation
 (`.kiro/specs/npu-log-decision/`). Each finished task was implemented by one
 agent, checked by an independent reviewer, then committed and pushed.
 
-Tests on `main` (last run after the 2.17 merge, `28c69b3`; only documents have
-changed since): 711 passing, 0 failing, 47 ignored, in 69 test binaries.
-`cargo fmt` and `clippy` are clean.
+Tests for the merged 1.23 source (fresh validation 2026-11-17): 788 passed,
+0 failed, 49 ignored. `cargo fmt` and
+`clippy -D warnings` are clean.
 
 What works from the command line: a file or a zip archive of logs is read,
 scored, calibrated and triaged with the baseline scorer; `baseline score` on an
-archive writes Parquet parts with a manifest. The encoder runs on the NPU as a
-tested session, and logs can be encoded into the store (2.7, library code); no
-command uses the encoder yet.
+archive writes Parquet parts with a manifest; `ingest` reads two archive
+entries at once by default. What works as library code, not yet as commands:
+the store and its search, mark sets (1.21), redaction (1.22), a score fitted
+from a mark set with the held-out-group report (1.23), and encoding logs into
+the store on the NPU (2.7).
 
-**Update 2026-11-16: tasks 1.19, 1.21 and 1.22 finished, reviewed (APPROVED)
-and merged. Next is 1.23 (see "Then, in order"); read the `- 1.22, review`
-note in tasks.md first, it carries two points into 1.23.**
+**No agent is running. No worktree is open. Next is task 1.25, the `l2d mark`
+command (owner decision of 2026-11-16), then 1.24, then gate 2.18.**
 
 ### Finished tasks
 
@@ -62,97 +90,56 @@ note in tasks.md first, it carries two points into 1.23.**
 | 2.7 | Encode logs and store the vectors, one transaction, release recorded | `7e1bc77` |
 | 1.20 | `l2d ingest` deduplicates on disk only when needed; partition room by distinct keys | `15ee402` |
 | 2.17 | Gate: stable entropy-patch encoder; vectors do not classify on unseen endpoints; owner decision | `28c69b3`, `8fded88` |
-| 1.19 | Archive entries read at once: `ingest` 2 by default (faster), `baseline score` 1 (not faster) | merge of `6088015` (2026-11-16) |
-| 1.21 | Mark sets on a file, archive or store; store logs by `log_id`, store hash over sorted ids (owner decision 2026-11-16) | merge of `a53708e` (2026-11-16) |
-| 1.22 | Redaction: proposals with counts, confirmed rules before hashing; on CSIC host and five endpoint paths proposed | merge of `cfd2ade` (2026-11-16) |
+| 1.19 | Archive entries read at once: `ingest` 2 by default (faster), `baseline score` 1 (not faster) | `170e013` (merge of `6088015`) |
+| 1.21 | Mark sets on a file, archive or store | `4f7deeb` (merge of `a53708e`) |
+| 1.22 | Redaction: proposals with counts, confirmed rules before hashing | `ac3580f` (merge of `cfd2ade`) |
+| 1.23 | A score fitted from a mark set; held-out-group report | merge of `747c3a5` |
 
-Spec changes on 2026-11-15:
-- **Requirement 16**, the analyst flow (amendment
-  `amendment-2026-11-15-analyst-flow.md`, approved and merged, `f931482`):
-  - 6.1 and 6.6 changed; 14.1 to 14.9 (linear head) deferred;
-  - design section "MarkSet, Redaction and the mark-set score";
-  - tasks 1.21 to 1.23 and gate 2.18 added; 2.8 re-scoped; 2.10 deferred; 2.9
-    extended.
-- **Requirement 15** (resource management on a busy machine): wording approved
-  by the owner as written.
+Review rounds on 2026-11-16: 1.19 approved in round 1; 1.21 in round 2; 1.22
+in round 1; 1.23 in round 3 (rounds 1 and 2 rejected memory held outside the
+budget). The reviews' figures are in the `- <task>, review` notes of tasks.md.
 
-## Open at the end of the session
+Spec changes on 2026-11-16 (owner decisions, in tasks.md):
+- **Task 1.24** added: guards for a busy machine (15.6 to 15.10: one
+  resource-hungry operation per host, one encoder session on the NPU across
+  processes, wait or refuse, record at the end), reader robustness tests from
+  1.19, 128 reader pieces measured against 64, store mark sets on disk, a real
+  concurrent-writer test for store marking. Runs before gate 2.18 (confirmed
+  at the end of the session).
+- **Task 1.25** added: `l2d mark` on a file or an archive (phrase or regex,
+  prints the matches with positions, saves the mark set), pulled forward from
+  2.9 so a new dataset can be searched from the command line. Runs next,
+  before 1.24.
 
-### Task 1.19, parallel archive entries: DONE 2026-11-16 (record below kept for history)
+## Next, in order (one heavy job at a time)
 
-Finished from `fa48bc1`, reviewed independently (APPROVED), merged into
-`main`. The failing CLI test was a test limit, not the accounting; the
-on-disk tests now take their limit from the readers' measured need. Measured
-(512 MB, all entries, ranges): `ingest` 74–81 s at 1, 50–71 s at 2;
-`baseline score` 434–482 s at 1, 376–458 s at 2, 451–469 s at 4 (not
-consistently faster, more memory). Decision by the task's rule: `ingest`
-defaults to 2 when the readers fit, `baseline score` to 1. Details in the
-`- 1.19:` notes of tasks.md. On 2026-11-16 the left-over build folders listed
-under "Things that will bite" were removed with `cargo clean` (about 49 GiB) because
-the all-entries `ingest` was refused for disk space (88.3 GiB asked, 84.3 GiB
-free).
+1. **1.25** `l2d mark` on a file or an archive. Needs neither the NPU nor the
+   store. Read the `- 1.21:` notes (positions, entry patterns,
+   `require_input(summary, archive_entries)`) and the `- 1.19:` notes
+   (entries-at-once default of `ingest`).
+2. **1.24** hardening (see above). The measurement of 128 reader pieces runs
+   alone, in release, two rounds, on `russellmitchell.zip`; D: needs 88 to 99
+   GiB free for all-entries runs.
+3. **Gate 2.18:** does redaction make scores agnostic? On the 2.17 folds (five
+   by endpoint), CSIC attacks found by regular expressions standing in for an
+   analyst's marks, the mark-set score with and without the proposed rules;
+   held-out against fitted ROC AUC with spreads. Run alone. The 1.23 CSIC run
+   (a `drop table` mark set) gave 1.0000 on both sides with and without rules:
+   that regex marks its own payload, so it says nothing about agnosticism; the
+   gate needs mark sets whose texts carry endpoint fragments.
+4. **2.8** grouping of a mark set and "close enough" (Venn's
+   `nearest_outcome`), **2.11** outlier ranking, **2.9** the remaining commands.
+5. Milestones 3 and 4.
 
-Record as of 2026-11-15:
-
-- **State:** the implementer was stopped by the owner's end of session while
-  it measured. Its work is committed as `fa48bc1` ("wip") on local branch
-  `worktree-agent-a0eff62fb80c1b7d1` in the worktree
-  `.claude/worktrees/agent-a0eff62fb80c1b7d1` (not pushed, base `8fded88`).
-  Not reviewed. The checks were not run on this state. Its last test log
-  (`task-1.19\green-cli.txt`) has one failing CLI test.
-- **Files:** new `crates/l2d-core/src/zip_input/parallel.rs`,
-  `crates/l2d-core/tests/zip_parallel.rs`; changed `zip_input.rs`,
-  `zip_directory.rs`, `l2d-cli/src/cmd/{common,ingest,baseline_archive}.rs`,
-  `l2d-cli/tests/archive_parts.rs`. No `- 1.19:` notes in tasks.md yet.
-- **Measurements so far** (`D:\BuildArtifacts\log2decision\task-1.19\ait-measurement.log`,
-  `russellmitchell.zip`, `*.log` entries, 512 MB, release, single runs per
-  setting):
-
-  | Command | Entries at once | Wall time | Peak working set |
-  | --- | --- | --- | --- |
-  | `ingest` | 1 | 32.9–34.3 s | 350–355 MiB |
-  | `ingest` | 2 | 27.9–30.6 s | 356–398 MiB |
-  | `ingest` | 4 | 27.4–31.8 s | 362–416 MiB |
-  | `baseline score` | 1 | 171–195 s | 323 MiB |
-  | `baseline score` | 2 | 187–190 s | 351–363 MiB |
-  | `baseline score` | 4 | 188 s | 410 MiB |
-
-  Counts are identical in every run (22,880,272 records, 5,642,082 distinct),
-  and so are the `rows_sha256` of `baseline score`. This is a reading of
-  unfinished runs, not a result. `ingest` gains about 10 to 20 %, `baseline
-  score` none. The all-entries series was not run.
-- **Next:** resume the implementer in that worktree, or start a new one from
-  `fa48bc1`. It must:
-  - fix the failing CLI test and finish the measurement (all entries, two
-    rounds), then run the checks and write the notes;
-  - apply the task's rule: keep the change only where it is faster within the
-    same memory limit; for `baseline score` the reading so far says it is not.
-
-  Then the independent review, the merge with `git merge --no-ff --no-commit
-  worktree-agent-a0eff62fb80c1b7d1` (tasks.md notes: keep both sides), checks,
-  tick, README row, push, and removing the worktree.
-
-### Then, in order (one heavy job at a time)
-
-1. 1.23 the score fitted from a mark set with the held-out-group report
-   (1.21 mark sets and 1.22 redaction done 2026-11-16). These need neither
-   the NPU nor the encoder. For 1.22 read the `- 1.21:` notes: a mark set of
-   an archive must be checked with the entry patterns it was made with
-   (`require_input(summary, archive_entries)`), and a store mark set's ids are
-   held in memory, refused rather than spilled.
-   Then 1.24 (added 2026-11-16 by the owner): guards for a busy machine
-   (15.6 to 15.10), reader robustness tests, 128 reader pieces measured,
-   store mark sets on disk, a real concurrent-writer test.
-2. Gate 2.18: does redaction make scores agnostic? On the 2.17 folds, run
-   alone.
-3. 2.8 (re-scoped: grouping of a mark set and "close enough"), 2.11 outlier
-   ranking, 2.9 command wiring.
-4. Milestones 3 and 4.
+Distance to the owner's goals, as stated on 2026-11-16: a score fitted from
+marks that reports its own agnosticism exists as library code (1.23); evidence
+that redaction makes it agnostic is gate 2.18; Venn's "close enough" is 2.8;
+the decision to investigate (where score and decision model meet) is not a
+task yet.
 
 ## Decisions waiting for the owner
 
-None. 2.17, the analyst-flow amendment and Requirement 15 were decided on
-2026-11-15.
+None.
 
 ## Decisions in force
 
@@ -254,19 +241,53 @@ From 2026-11-15:
   - without an NPU, grouping is by character n-gram similarity.
 - **Requirement 15 wording approved as written.**
 
+From 2026-11-16:
+
+- **Reading archive entries at once (1.19):** kept only where faster within the
+  same limit. `ingest` reads 2 at once by default when the readers fit an
+  eighth of what the limit leaves; `baseline score` reads 1 by default;
+  `--entries-at-once` 1 to 8 on both. Each reader holds a fixed 19 MiB (64
+  pieces of 256 KiB).
+- **Marking a store (1.21):** a stored log is named by its `log_id`; the
+  store's content hash is a SHA-256 over its `log_id`s in sorted order,
+  streamed; a mark set records its kind of source (input or store) and refuses
+  the other; phrase through the store's text index, regex through a batched
+  read; a trait in `l2d-core` implemented by `l2d-store`. A mark set of an
+  archive is checked with its entry patterns; a store is hashed again after
+  marking. `regex` is a direct dependency of `l2d-core` (it was already
+  linked).
+- **Redaction (1.22):** proposals in two passes (a bounded counter, then an
+  exact count), refused when what the counter dropped could hide a qualifying
+  fragment; literal rules bounded by tokens (`/tienda1/` but not `/tienda10/`);
+  placeholder SUB (0x1A); the routing option `strip` is itself a rule; rules
+  saved in the mark-set file (format 2).
+- **Mark-set score (1.23):** de-selected logs are kept out of fitting and out
+  of the proposals (neither side); texts that become equal after redaction stay
+  rows of their own (redaction inside the hashing); `baseline.json` format 3
+  with copies of the mark sets, revision over the rules' digest and the copies;
+  the scorer column says `mark-set`; the held-out report folds by a hash of the
+  group key (`Folds::hashed`, the science gate's rule). A fit from an archive
+  keeps room for two batches' copies, because the reader sizes one batch ahead;
+  each batch is checked against the figure it was sized with.
+- **Order:** 1.25 (`l2d mark`), then 1.24, then gate 2.18.
+
 ### Follow-ups, not yet tasks
 
+- Calibration (`ScorerKind` in `l2d-decide`) has no mark-set kind; a mark-set
+  score is calibrated as a plain baseline scorer. Needed before 2.8 gives
+  label sets for a mark-set score (16.11).
 - `statvfs` free-disk query on systems other than Windows.
 - A measured disk check at the freeze (replaces the 6-byte estimate; would also
   tighten the `keys.bin` bound, about three quarters of the limit under the
-  default limit).
+  default limit). AIT all-entries asks 88 to 99 GiB and writes about 1.2 GB.
 - `"incomplete": true` in the JSON of `triage` and `baseline score` on plain
   inputs.
 - `ingest` reads its frames back from disk although only their number is
   needed.
-- The mid-batch freeze for lack of memory has no test (with readers: in 1.24).
-- The hungry-operation gate and an NPU lock in `l2d-core` (requirement 15.6
-  to 15.10): now task 1.24.
+- Closed on 2026-11-17: the held-out report now preflights its copies and retained
+  workspace, with dedicated allocator regression tests (merge `883ce5e`).
+- A refused archive read in a mark-set fit pushes one stray `BatchRoom` while
+  building its message (harmless).
 - The session's placement rule against the provider's duplicated dequantize
   node: stated, not changed.
 - The 8-bit cut of 2.17 holds only while the byte graph stays bit-identical on
@@ -286,25 +307,33 @@ before starting it.
 
 ## How the work is run
 
-Autonomous mode, review required:
+Autonomous mode, review required (`.claude/skills/kiro-impl/`):
 
-1. One heavy task at a time on this machine. Dispatch an implementer agent with
-   the task text, the spec sections, the implementation notes and the host
-   rules. Tests first.
+1. One heavy task at a time on this machine. Dispatch an implementer agent in
+   its own worktree with the task text, the spec sections, the implementation
+   notes and the host rules. Tests first. Its report must end with the exact
+   `## Status Report` block; ask for it again if missing.
 2. Dispatch an independent reviewer (`.claude/skills/kiro-review/SKILL.md`).
    Give it the code and the implementer's claims to verify, not the conclusion.
-   On a rejection, send the findings back, then re-review. At most two
-   remediation rounds.
-3. Re-run the checks yourself, mark the task `[x]`, bring stale design text in
-   line, update the README status table.
-4. Commit only that task's files as `feat(npu-log-decision): ...`, then push
-   (the owner asked for a push after each approved task). Commit messages end
-   with the `Co-Authored-By` line.
+   On a rejection, send the findings back to the same implementer, then
+   re-review with the same reviewer. At most two remediation rounds; after a
+   third rejection, a debug agent (`kiro-debug`).
+3. Commit the reviewed work on the task branch, merge into `main` with
+   `git merge --no-ff --no-commit <branch>` (`tasks.md` may conflict in the
+   notes; keep both sides), re-run the checks there, mark the task `[x]`, add a
+   `- <task>, review` note, update the README status table and this file, then
+   commit and push (the owner asked for a push after each approved task).
+   Commit messages end with the `Co-Authored-By` line.
+4. Remove the worktree and delete its branch. Agent worktrees are locked by the
+   harness: check that the branch is in `main` (`git merge-base
+   --is-ancestor`) and the worktree is clean, then `git worktree unlock` before
+   `git worktree remove`.
 
-A task in a worktree commits on a local branch there. Merge it with
-`git merge --no-ff --no-commit <branch>`; `tasks.md` usually conflicts in the
-notes section, resolved by keeping both sides. Run the checks in the main
-checkout, commit, push, then remove the worktree and delete its branch.
+Put into every brief: never stop processes you did not start (stop your own
+run by its process tree, never all `cargo`/`rustc` on the host); for anything
+that reads in batches and keeps something per row, charge everything held,
+including the first batch and the one-batch lag of `ZipBatches::hold_beside`,
+with a counting-allocator memory test over archive and store and a red run.
 
 Checks, from the repository root, with a target folder under
 `D:\BuildArtifacts\log2decision\`:
@@ -314,6 +343,8 @@ cargo fmt --all -- --check
 cargo test --workspace -j 4
 cargo clippy --workspace --all-targets -j 4 -- -D warnings
 ```
+
+The workspace tests take about 10 minutes in debug on this laptop.
 
 Hardware tests are ignored by default and run on request, in release, one job
 on the NPU at a time, with a reduced `PATH` to show that no Python is involved:
@@ -325,7 +356,9 @@ cargo test --release -j 4 -p l2d-encoder --test npu_rows -- --ignored --nocaptur
 ```
 
 Others: `npu_gate`, `npu_throughput`, `npu_quality`, `npu_session`,
-`npu_embedding_export` (2.15), `npu_hierarchical_gate` (2.16, 2.17).
+`npu_embedding_export` (2.15), `npu_hierarchical_gate` (2.16, 2.17). The CSIC
+tests of 1.22 and 1.23 (`redact_csic`, `markscore_csic`) are ignored and run in
+release with `L2D_CSIC_CSV=data\csic-2010\csic_database.csv`.
 
 With the owner: answer the question asked first and briefly, say plainly
 whether anything needs attention, and bring open decisions as a menu (choices
@@ -354,25 +387,26 @@ with a recommendation first).
 - **Hierarchical encoder (2.16):** 12 to 32 components for 95 %; classification
   on unseen endpoints unsettled.
 - **Stability gate (2.17)**, `docs/2026-11-15-entropy-encoder-stability-gate.md`:
-  - **Randomness ruled out:** bit for bit in and across processes, in float, 8
-    bits and on the NPU; training again with the same seed gives identical
-    weights.
-  - **Cuts stable:** with the 8-bit byte graph's cut as the one cut, cuts are
-    identical from 8 bits to the NPU for 25,680 of 25,680 lines, cosine at
-    least 0.99992.
-  - **Five folds by endpoint × three seeds:** the masked-byte encoder's linear
-    head reaches 0.786 seen and 0.722 ± 0.070 unseen. The baseline reaches
-    0.961 and 0.923 ± 0.097, and wins every fold.
-  - **Why it falls short:** the vectors hold little linearly usable label
-    signal; they fall back to 3 to 4 components for 95 % and mostly hold the
-    endpoint's template.
-  - **Attack pairs on held-out endpoints:** 0.865, with the contrastive control
-    better at 0.915.
-  - **Centring on the endpoint's mean does not close the gap** (0.69 to 0.71).
-- **AIT `russellmitchell.zip` (7.1 GB), 512 MB:** `ingest` of all entries (30.9
-  million lines, 8.3 million distinct) on disk in 58 s, peak 374 MiB;
-  `baseline score` of all entries in about 8 minutes, peak 359 MiB, 273 MiB of
-  parts. Single runs.
+  randomness ruled out; cuts stable from 8 bits to the NPU; on five folds by
+  endpoint × three seeds the masked-byte encoder's linear head reaches 0.786
+  seen and 0.722 ± 0.070 unseen, the baseline 0.961 and 0.923 ± 0.097 and wins
+  every fold; the vectors mostly hold the endpoint's template.
+- **AIT `russellmitchell.zip` (7.1 GB), 512 MB, ranges over 2–3 rounds (1.19):**
+  - `ingest`, `*.log` entries (22.9 million lines, 5.6 million distinct, in
+    memory): 33–34 s one entry at a time, 28 s two at once, peaks under 420 MiB;
+  - `ingest`, all entries (30.9 million lines, 8.3 million distinct, on disk):
+    74–81 s one at a time, 50–71 s two at once;
+  - `baseline score`, all entries: 434–482 s one at a time, 376–458 s two at
+    once, 451–469 s four at once (not consistently faster);
+  - counts and `rows_sha256` identical in every run.
+- **Redaction on CSIC (1.22):** a `drop table` mark set (168 marked, 25,440
+  unmarked) gives 56 proposals; the host `localhost:8080` and all five endpoint
+  paths are proposed with exact counts, no payload token; six rules change
+  25,596 of 25,608 logs; the routing rule equals `strip` on all logs.
+- **Mark-set score (1.23):** the held-out report warns on a planted
+  endpoint-specific score (0.53 held out against 0.996 fitted) and not on an
+  agnostic one (1.0 against 1.0); on CSIC the score gives ratios and survives
+  save and load (revisions `43977c27...` plain, `aa217bf8...` with rules).
 - **Store:** CSIC's 25,608 logs added in about 3.5 s into a 46 MiB file;
   nearest-vector search about 36 ms; store format 2 records vector origin and
   runtime release.
@@ -382,22 +416,23 @@ with a recommendation first).
 - **The host kills processes at 92 % of physical memory** (29.6 GiB). Exit code
   -536870911 (0xE0000001) means killed for memory. A died process is never a
   mystery: say which jobs ran together and how much each held. Cures:
-  batching, one heavy job at a time. "Commit memory" was never a measured
-  cause; do not repeat it.
+  batching, one heavy job at a time.
 - **One heavy job at a time:** one training, one measurement, one large build,
   one job on the NPU. Builds use `-j 4`.
-- **Spike scripts must stream.** `tools/science/hg17.py` (2.17) still holds the
-  vectors (about 13 MB), `PatchBytes` (about 3 MB) and the baseline's feature
-  rows whole: bounded, stated needs. The 2.16 arrays of 1.3 to 1.9 GB are gone.
-  `tools/science/memguard.py` runs a step under an OS-enforced memory limit and
-  records its peak.
+- **Never stop other processes.** On 2026-11-16 an implementer stopped every
+  cargo/rustc process on the host to end its own run. Stop only your own
+  process tree.
+- **Spike scripts must stream.** `tools/science/hg17.py` (2.17) holds bounded,
+  stated amounts only. `tools/science/memguard.py` runs a step under an
+  OS-enforced memory limit and records its peak.
 - **Shared build folder.** `CARGO_TARGET_DIR` is `D:\BuildArtifacts\cargo-target`
   for every Rust project on this machine. Worktrees, reviewers and scratch
   copies build with their own target under `D:\BuildArtifacts\log2decision\`.
-- **Left-over build folders,** safe to remove when nothing runs:
-  none at the moment under `D:\BuildArtifacts\log2decision\` (all finished
-  tasks' build folders, up to 1.21, were cleaned on 2026-11-16). Keep the `task-*` and `review-*` log folders as evidence.
-  The disk check of an all-entries AIT run asks about 88 to 99 GiB free on D:.
+  Each task target is 4 to 20 GiB; clean them with `cargo clean --target-dir`
+  once the task is merged.
+- **Disk.** The disk check of an all-entries AIT run asks 88 to 99 GiB free on
+  D:; on 2026-11-15 a run was refused at 84.3 GiB free. Recheck free space before
+  each measurement; build targets and other host jobs change it.
 - **Debug builds are slow where it matters.** Run evaluations and large archive
   cases in release.
 - **Timings on this host vary** (laptop power management; the owner sometimes
@@ -417,8 +452,12 @@ with a recommendation first).
   make a session NPU only; the compiled-model cache trusts its key alone.
 - **What reviews reject.** Figures and causes stated but not measured;
   comparisons across different heads or splits (2.17 round 1); code that
-  accepts input it cannot handle. Every task that touched memory was rejected
-  at least once on a case the implementer had not measured.
+  accepts input it cannot handle; and above all memory held outside the
+  budget. Every task that touched memory was rejected at least once on it: on
+  2026-11-16, 1.21 (a regex compiled before the archive's directory was
+  charged; a save that built the whole file) and 1.23 twice (no room for the
+  first batch's copies; then the reader's one-batch lag). Tests that cannot show
+  a fault in the heap show it through a refusal point or a per-batch check.
 - **Host rules.** PowerShell only, no Git Bash, no `wsl`; containers through
   `docker` and `docker compose`. Models in `./models` (never C:), datasets in
   `./data/<dataset>/`, documents in `./docs/` with a date prefix and a README
@@ -433,6 +472,7 @@ with a recommendation first).
 
 - **AIT Log Data Set V2:** all eight testbeds, 121.7 GB, in `data/ait-lds-v2/`,
   verified against their MD5 sums, read in place.
+- **CSIC 2010:** `data/csic-2010/csic_database.csv`.
 - **Science gate:** runs and models in
   `D:\BuildArtifacts\log2decision\science-2.1\runs\`; the published model in
   `models/science-2.1/` (the weakest of three seeds).
@@ -440,10 +480,11 @@ with a recommendation first).
   `task-2.17\` (with the review's figures and the option 2(a) result in
   `task-2.17\review\`); 2.17 model weights in `models/task-2.17/`.
 - **Task 1.19 measurements:** `D:\BuildArtifacts\log2decision\task-1.19\`
-  (review logs in `review-1.19\`).
+  (`ait-measurement.log`, `runs\`, `scripts\measure-ait.ps1`, `run-all.ps1`).
 - **Baseline gate reports:** `reports/2026-11-13-csic-2010-baseline.{json,md,run.json}`.
-- **Evidence of the tasks:** the `task-*` and `review-*` folders under
-  `D:\BuildArtifacts\log2decision\`.
+- **Evidence of the tasks:** the `task-*` and `review-*` log folders under
+  `D:\BuildArtifacts\log2decision\` (red and green runs, check outputs, CSIC
+  runs). Build target folders of finished tasks were removed.
 - **AMD packages on the owner's machine:**
   `C:\Users\mariu\Downloads\RyzenAI_Deployment.1.9.0.nupkg` and
   `C:\Users\mariu\Downloads\ryzen_ai_nuget_1.8.0 (1).zip`.
@@ -452,8 +493,7 @@ with a recommendation first).
 
 - Session memory for agents: `mmhmem` project `log2decision` holds a checkpoint
   of the same state.
-- Research documents: `docs/`, indexed in `README.md`. New on 2026-11-15: the
-  entropy-patch encoder stability gate (2.17).
+- Research documents: `docs/`, indexed in `README.md`.
 - Amendment records in `.kiro/specs/npu-log-decision/`:
   `amendment-2026-11-12-zip-batch.md`,
   `amendment-2026-11-12-vector-decision-heads.md`,

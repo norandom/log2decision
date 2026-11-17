@@ -1,5 +1,18 @@
 # Brief: npu-log-decision
 
+### Current direction — owner alignment, 2026-11-17
+
+Generalization to new future logs is central. The accepted workflow is broad
+unlabelled search → readable string-pattern discovery/refinement → NPU vector
+expansion within/across patterns → explicit good/bad review → confirmed redaction
+and reusable score → Venn evidence-based investigate/review/low-priority queues.
+Unmarked background can support exploratory fits; qualification needs independent
+reviewed examples and unseen-group/later-time evidence where available. Unknown
+or conflicting cases have reserved review capacity; updates follow explicit
+recorded outcomes, not automatically generated labels. The baseline classifies;
+the encoder supports search/grouping. See requirements 17–20 and the active
+roadmap in tasks.md. This direction supersedes earlier conflicting proposals.
+
 Input and decision record for this spec, moved here from `requirements.md` when the requirements were generated on 2026-11-11. Later sections supersede earlier ones where they conflict; "Direction after the benchmark" is the current direction.
 
 ### Who has the problem

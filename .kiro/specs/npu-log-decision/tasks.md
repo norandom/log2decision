@@ -1,5 +1,79 @@
 # Implementation Plan: npu-log-decision
 
+## Active roadmap — owner alignment, 2026-11-17
+
+This order supersedes earlier sequencing notes; completed task records remain historical evidence. Task 1.23 wrap-up was verified and merged as `883ce5e` on 2026-11-17, including two memory fixes found by fresh independent review. The source passed 788 workspace tests (0 failed, 49 ignored), 27 targeted tests, fmt, Clippy with warnings denied and CLI help. Both old task worktrees were verified and removed. Next is 1.25; no future task is completed by the spec update.
+
+1.23 follow-up evidence: `D:\BuildArtifacts\log2decision\fix-1.23-memory\`. RED showed redaction allocating 16,778,330 bytes and reporting 4,870,235/5,117,269 bytes with only 65,536 bytes available. Nonallocating redaction bounds and report-workspace preflight now refuse at about 550 bytes; successful reports retain the same results and restore the caller's hold. Independent re-review: APPROVED. Conservative estimates can refuse workloads whose actual heap would fit. This closes the earlier held-out-copy follow-up.
+
+| Stage | Tasks in execution order | Exit |
+| --- | --- | --- |
+| Foundation | 1.25 → 1.24 | Usable marking CLI and bounded resource management |
+| Pattern discovery | 1.26 → 1.27 → 1.28 | Broad searches become inspectable templates and explicit labels; first useful workflow milestone |
+| NPU exploration | 2.19 | Related examples within/across patterns with provenance and measured retrieval quality |
+| Transfer qualification | 2.18 | Frozen score assessed on independent unseen-group/later-time material; targets recorded, limitations explicit |
+| Venn triage | 2.8 → 2.11 → 2.20 → 2.9 → 2.22 | Explained queues compared with score alone at equal review budget |
+| Feedback | 2.21 | Observed outcomes versioned; explicit, revalidated updates |
+
+Validation accompanies every task. Milestones 3 and 4 remain planned after this workflow; 2.10 remains deferred. A fixed count of records reviewed is the first evaluation budget; its value, positive reserved review share, audit allocation and acceptable missed-case rate must be specified in the qualification manifest before the final holdout is examined. No numerical release threshold is implied by this roadmap.
+
+### New work packages from the accepted pattern-discovery amendment
+
+- [ ] 1.26 Unlabelled selections and explicit search semantics
+  - Add versioned SelectionSet records separate from MarkSet; literal substring, whole-record content glob, regex and FTS are distinct modes. Keep archive-entry filtering separate. Persist query flags, input hash, exact members and completeness; explicit review exports compatible MarkSets.
+  - Done when file/archive/store fixtures prove mode differences, escaping, case handling, round-trip identity checks and that no search assigns labels; memory refusals precede allocation.
+  - _Boundary: SelectionSet, Search, MarkSet bridge_
+  - _Depends: 1.21, 1.25, 1.24_
+  - _Requirements: 17.1, 17.2, 17.6, 17.7, 19.7_
+
+- [ ] 1.27 Pattern extraction qualification and bounded catalogue
+  - Compare Drain-style template mining with n-gram grouping on reviewed same/different-pattern examples, including rare events, negation and success/failure variants. Record review usefulness, membership quality, memory and timing; choose the engine from these measurements, with no Python product dependency.
+  - Implement bounded catalogue, disk memberships, deterministic revisions, occurrence versus distinct/reviewed counts and explicit ungrouped overflow. Discovery masks are separate from confirmed fitting redactions.
+  - Done when every selected member is accounted for, a repeat yields the same catalogue, outcome collisions are exposed, and resource-limit cases refuse or retain an explicit ungrouped remainder.
+  - _Boundary: PatternCatalogue, MemoryBudget_
+  - _Depends: 1.26_
+  - _Requirements: 17.3, 17.7_
+
+- [ ] 1.28 Pattern refinement and first discovery CLI
+  - Deliver selection/search, pattern list/details, split/merge, query preview and explicit batch-labelling commands with human/JSON output. Command spelling is finalized in this task; do not defer this usable milestone to 2.9.
+  - Preserve revision lineage; preview regex matches/misses against membership and a stated background sample. Promotion/hiding changes priority only; reviewed labels require an explicit operation.
+  - Done when a broad fixture search becomes reviewed examples without a prewritten full regex, exceptions and counts survive split/merge, query differences are visible, and saved outputs replay exactly.
+  - _Boundary: PatternRefinement, Discovery CLI, MarkSet bridge_
+  - _Depends: 1.27_
+  - _Requirements: 17.4, 17.5, 17.6, 19.7_
+
+- [ ] 2.19 Vector exploration before score qualification
+  - Expose exploration through CLI human/JSON commands in this task so stage 3 is usable before final 2.9 integration.
+  - Encode original members under the pinned NPU profile; use bounded exemplar top-k/radius retrieval within and across patterns, with explicit outside-query expansion. Keep the named n-gram route available without CPU encoder fallback.
+  - Expose representative/boundary examples, distances, invalid vectors, independent support and same/cross-group counts; prevent occurrence duplication from manufacturing support. Compare retrieval on reviewed examples missed by the seed query.
+  - Done when fixture expansion preserves provenance and unlabelled state, incompatible profiles refuse, resource tests pass, and measured retrieval usefulness is recorded. No classification or deployment qualification claim follows from retrieval alone.
+  - _Boundary: VectorExploration, Store, EncoderSession_
+  - _Depends: 1.28, 1.9, 2.7_
+  - _Requirements: 18.1 to 18.6_
+
+- [ ] 2.20 Explicit Venn triage policy and evidence preservation
+  - Version thresholds, evidence eligibility, support, queue rules and review allocation. Preserve both baseline and vector evidence rather than dropping secondary evidence. Add mark-set scorer identity/calibration compatibility checks.
+  - Implement unsupported/disagreement/uncertain review reasons, corroborated high-score investigate and corroborated low-score low priority; reserve review/audit allocations and retain deferred members. Diagnostic scores for unsupported cases are separate from actionable ratios.
+  - Done when every routing-table branch, missing calibration, incompatible profile and conflicting label has an explanatory fixture result; replay is deterministic and limits cover persistence and queues.
+  - _Boundary: TriagePolicy, Evidence, Calibration provenance_
+  - _Depends: 2.8, 2.11, 1.13_
+  - _Requirements: 20.1 to 20.5, 20.7, 16.10, 16.11_
+
+- [ ] 2.22 End-to-end triage qualification
+  - Compare score alone, pattern-assisted review and score plus vector policy on the frozen split at equal record-review budgets. Include the gate's unsupported positives in missed-case counts and report reserved/audit allocations.
+  - Use an untouched final holdout: if 2.18 results were used to tune the policy, reserve a separate final report partition. Record group/time leakage checks, coverage, uncertainty and target attainment; missing targets/labels cannot produce a qualified result.
+  - Done when the report states whether the policy improves useful review under the declared targets, or reports failure/inconclusive evidence without a deployment claim.
+  - _Boundary: QualificationReport, TriagePolicy_
+  - _Depends: 2.18, 2.20, 2.9_
+  - _Requirements: 19.1 to 19.6, 20.4_
+
+- [ ] 2.21 Recorded outcomes and explicit update cycle
+  - Add CLI/API recording of observed outcomes separately from queue suggestions, revisioned evidence updates, explicit refit/recalibration and requalification records. Conflicting/unresolved outcomes stay outside supervised labels.
+  - Done when corrections preserve history, suggested queues never train the scorer automatically, and changed model/evidence/policy revisions cannot reuse stale qualification claims.
+  - _Boundary: OutcomeRecord, EvidenceRevision, Update lifecycle_
+  - _Depends: 2.22_
+  - _Requirements: 20.6, 20.7, 19.2, 19.7_
+
 ## Milestone 1: Working Baseline Triage & Core Infrastructure
 
 - [x] 1.1 Set up the Rust workspace and the shared core types
@@ -203,7 +277,7 @@
   - _Depends: 1.5, 1.21_
   - _Requirements: 16.4, 16.5, 16.12_
 
-- [ ] 1.23 A score fitted from a mark set, and the held-out-group report (runs after 1.22)
+- [x] 1.23 A score fitted from a mark set, and the held-out-group report (runs after 1.22)
   - `fit_from_marks`: the baseline scorer on the redacted texts of the mark set after de-selection, against the other label's mark set where given, otherwise against the unmarked logs of the same input, stated in the output; refused below the counts of 2.3; saved with the mark set, de-selections, rules and fitting-text hashes
   - Scoring applies the score's rules first
   - Held-out-group report (16.9): quality on groups held out of fitting beside quality on fitted groups, group key per kind of log (CSIC URL path, AIT host, settable), warning when held-out is lower by more than the margin (default 0.05 ROC AUC); folds by a hash of the group key
@@ -212,6 +286,16 @@
   - _Boundary: BaselineScorer, Evaluator_
   - _Depends: 1.7, 1.12, 1.22_
   - _Requirements: 16.6, 16.7, 16.8, 16.9, 6.1, 6.6_
+
+- [ ] 1.25 `l2d mark`: search and mark a file or an archive from the command line (runs after 1.23, before 1.24; owner decision of 2026-11-16)
+  - Pulled forward from 2.9 so that a new dataset can be searched from the command line before the store and the NPU are wired: `l2d mark --input <file|archive> (--phrase <text> | --regex <pattern>) [--label bad|good] [--name <name>] [--entry <pattern>...]`
+  - Prints the matching logs with their positions (entry path and line for an archive) and their count, in text and with `--json`; with `--name` saves the mark set as `marks/<name>.json` (1.21) in the project; refused when a mark set of that name was made on another input
+  - Under the memory limit of the global options, as `ingest` and `baseline score`; an archive read in batches with the entries-at-once default of `ingest`
+  - Tests first: phrase and regex on the fixture print the expected positions (the 1.21 figures); `--json` gives whole documents; a saved mark set loads and is refused against a changed input; a bad pattern is an analyst error (exit 2)
+  - Done when a phrase and a regex over the fixture and over a zip archive print the expected logs and save a mark set that 1.22 and 1.23 can use
+  - _Boundary: CLI (`l2d-cli`), MarkSet_
+  - _Depends: 1.21, 1.11, 1.19_
+  - _Requirements: 16.1, 10.5, 10.7, 12.9, 13.8_
 
 - [ ] 1.24 Hardening after the mark sets: guards for a busy machine, and what 1.19 and 1.21 left (runs after 1.23, before gate 2.18; owner decision of 2026-11-16)
   - Guards for a busy machine (15.6 to 15.10): before a resource-hungry operation starts (training, evaluation over folds, filling the store, scoring an archive, measuring throughput), observe the host's free memory, whether the NPU is in use and whether another resource-hungry operation of the tool runs; one such operation per host and one encoder session on the NPU across processes, waiting or refusing as the analyst chooses and naming the holder; at the end record the limit, the counted peak, whether it waited and whether anything went to disk. The lock lives in `l2d-core`
@@ -330,13 +414,17 @@
   - Agnostic barrier kept: neighbours that match only on a benign endpoint's template, without payload match, do not suppress the ratio (6.8)
   - Done when, on a test store, a mark set groups as expected, a planted near log is close enough with the expected evidence, and an isolated log is stated as not close enough
   - _Boundary: Grouping, CloseEnough, Scorer_
-  - _Depends: 1.9, 1.23, 2.7, 2.18_
+  - Reuse the exploration of 2.19; this task owns the production close-enough decision and mark-set bridge, not a second clustering engine. Measure endpoint-template bias and route unsupported cases to review; no unreviewed background is described as verified good evidence.
+  - _Depends: 1.9, 1.23, 2.7, 2.18, 2.19_
   - _Requirements: 16.2, 16.3, 16.10, 16.11, 6.2, 6.3, 6.7, 6.8, 14.13_
 - [ ] 2.9 Wire NPU & Encoder CLI commands
+  - Final integration also wires policy triage and score/redaction qualification artifacts after 2.20. Discovery commands are already delivered by 1.28; vector exploration by 2.19. Feedback commands belong to 2.21.
+  - _Depends: 2.20_
+  - _Requirements added: 18.1 to 18.6, 20.1 to 20.5, 20.7_
   - Wire CLI commands in `l2d-cli`: `l2d runtime check`, `l2d encoder info`, `l2d encoder encode`, `l2d store add`
   - Display truncation flags and placement evidence; no `--allow-cpu` flag (the encoder is NPU only, owner 2026-11-13)
   - After 2.11 (requirement 14): also `l2d outliers`; the outlier output calls its figure a distance. `l2d head fit` and `l2d head score` wait with the deferred 2.10
-  - After 1.21 to 1.23 and 2.8 (requirement 16): `l2d mark`, `l2d group`, `l2d redact`, `l2d score fit`, and triage against a mark set with the "close enough" decision
+  - After 1.21 to 1.23 and 2.8 (requirement 16): `l2d mark` against a store (on a file or archive it is task 1.25), `l2d group`, `l2d redact`, `l2d score fit`, and triage against a mark set with the "close enough" decision
   - Done when CLI commands execute against fixture and print run records in human and JSON format
   - _Requirements: 1.5, 3.2, 4.3, 4.4, 4.5, 10.5, 10.7, 14.11, 16.1 to 16.11_
 
@@ -397,11 +485,15 @@
   - _Requirements: none of its own; it guards requirements 4, 14 and 15_
 
 - [ ] 2.18 Gate: does redaction make scores agnostic? (runs after 1.23, before 2.8)
+  - Extended on 2026-11-17: runs after 2.19 and retains the redaction comparison below as one diagnostic. Use independently reviewed good/bad evaluation examples beyond the seed query, frozen development artifacts, unseen-group splits and later-time splits where available; report temporal evidence as untested otherwise. Keep duplicate leakage out of report partitions.
+  - Record review budget and missed-case targets before examining final holdout; report ROC/PR metrics, budget precision/recall, coverage and unsupported positives. Assumed background fits are exploratory until independently qualified; a regex's own matches are not independent truth.
+  - Task 2.22 qualifies the finished triage policy on an untouched final report split; 2.18 must not claim that policy is already qualified.
+  - _Requirements added: 19.1 to 19.7_
   - A measurement, run alone under Requirement 15. On the folds of 2.17 (five by endpoint), with CSIC attacks found by regular expressions standing in for an analyst's marks: the mark-set score with and without the proposed redactions, and the encoder's vectors of the stable layout with and without redaction before encoding; ROC AUC on held-out against fitted endpoints, means with their spread
   - Check the margin of 16.9 (0.05) against the measured gaps
   - A dated document in `docs/`, indexed in the README: conclusion first, a recommendation for the owner
   - Done when the figures state with their spread whether redaction closes the gap between fitted and held-out endpoints
-  - _Depends: 1.23, 2.17_
+  - _Depends: 1.23, 2.17, 2.19_
   - _Requirements: none of its own; it guards requirement 16_
 
 ---
@@ -977,3 +1069,4 @@
 - 1.23, review round 2, the bound for batch k + 2 as it is sized. Notation: `base` = what the budget left when the fit began (the caller's holding is outside it; everything the reader holds is inside, so a batch sized with figure B has at most `base - B` of room); `H_k` = what the fit holds after copying batch k (mark sets, rules, pattern, copies); `B_k` = the figure given after batch k (`B_0` before the first); `c` = the most copies per byte of room a batch can bring. (a) A batch sized in `room` holds at most `room / PARSE_EXPANSION` bytes of text and `room / PARSE_ROW_BYTES` rows, plus the one record that crosses the limit (`Batcher::record` stops at the record whose estimate reaches what is left); frames from disk deduplication are cut with the same two bounds and no crossing record. A copy takes the text (twice for a pattern group key), 160 bytes, and the host for a host group key, which is at most the longest entry path (`ZipInput::longest_entry_path`, new in `l2d-core`); so `c = text_copies / 6 + (160 + G) / 500` and a batch's copies are at most `c x room + one record` (`text_copies x max_record_bytes + 160 + G`). (b) When batch k + 2 is copied the fit holds `H_(k+2) = H_k + copies(k+1) + copies(k+2)`, and the reader sized batch k + 2 with `B_k`; memory stays within the limit when `H_(k+2) <= B_k`, that is when `R_k = B_k - H_k >= copies(k+1) + copies(k+2)`. (c) Batch k + 1 was sized with `B_(k-1)`: `copies(k+1) <= c x (base - B_(k-1)) + one record`. Batch k + 2 is sized with `B_k = H_k + R_k`: `copies(k+2) <= c x (base - H_k - R_k) + one record`. (d) Solving `R_k = c (base - B_(k-1)) + c (base - H_k - R_k)` gives `R_k = c x ((base - B_(k-1)) + (base - H_k)) / (1 + c)`, plus two records. For k = 0 both batches 1 and 2 are sized with `B_0`: `R_0 = 2c (base - H_0 - R_0)`, so `R_0 = 2c / (1 + 2c) x (base - H_0)`, plus two records. (e) The figure never shrinks (`B_k = max(B_(k-1), H_k + R_k)`): a batch handed out after one without new texts was sized with a later, larger figure, so it has no more room than the bound assumed. (f) The fit checks it: after each log of batch j it compares what it holds with the figure batch j was sized with (`B_(j-2)`, `B_0` for j = 1, 2) and refuses with both figures ("the room it kept for the copies of a batch was too small") when it is above; `MarkFit::archive_batches` reports, per batch, the rows copied, that figure (`reserved`) and what the fit held after it (`held_after`). Chosen within the task's boundary (no change to `ZipBatches::hold_beside`, whose contract 1.21's `mark_archive` relies on); the only `l2d-core` change is the read-only `ZipInput::longest_entry_path`. The store keeps the one-batch rule. In the code: `markscore.rs` `Room` (the derivation is its documentation), `Collector::beside`, `Collector::reserved`, `BatchRoom`, and `LogSink::archive_opened` in `redact.rs`.
 - 1.23, review round 2, tests. `crates/l2d-baseline/tests/markscore_memory.rs` gained two tests (4 in all). `the_copies_of_every_archive_batch_fit_the_room_kept_when_it_was_sized`: an archive of 120,000 short distinct lines in one entry under a host of 195 characters (each copy then comes close to what the reader charges a row), 100,000 marked, at usable 24, 32, 48, 64, 96 and 128 MiB with automatic batches; every run is within the heap limit, none is refused by the fit's check, every completed run has `held_after <= reserved` for every batch, 128 MiB completes, and a rung completes after at least three batches cut by their size (96 MiB: 5 batches of 48,949, 24,474, ... rows). `an_archive_read_in_many_batches_reports_each_batch_within_its_room`: the 12,000-log archive at 64 MiB with batches of 2,048 rows completes in 6 batches, each within its figure, the rows add up to 12,000, and batches 1 and 2 have the same figure (the lag). Red against the round-1 reservation (`red-archive-lag-round3.txt`, with the check and the report added and the reservation unchanged): at 24 MiB the fit refused itself in batch 2 ("holds 8.4 MiB (8776562 bytes) after taking 3098 logs of batch 2 of the archive, more than the 8.4 MiB (8776257 bytes) it held beside the archive when the reader sized that batch"), so the test failed. The heap did not show it (0.35 x usable): the reader's charges are cautious, so the check is what detects it. That red has two causes in this shape: the lag, and the host, which round 1 did not count. A run with the host counted and room for one batch only (`red-archive-lag-only-round3.txt`, the formula changed for that run and restored) did not fail: the bound `c` adds the text and the row terms, which no real row reaches at once, so on this data one batch's room covered two batches' copies; the lag is closed by the derivation above, not shown alone by a test. Green: `green-markscore-memory-round3.txt` (4 passed; the 12,000-log archive is now refused before the first batch up to 8 MiB and while reading at 16 MiB, and completes at 64 MiB; heap 0.03 to 0.76 x usable over all rungs; the store rungs 0.32 to 0.76, higher than round 2 because the room no longer takes the largest batch growth seen, which the store, without a lag, does not need).
 - 1.23, review round 2, checks (`D:\BuildArtifacts\log2decision\task-1.23\`, suffix `-round3`): `cargo fmt --all -- --check` clean (`fmt-final-round3.txt`); `cargo clippy --workspace --all-targets -- -D warnings` clean (`clippy-final-round3.txt`); targeted (`green-targeted-round3.txt`): `l2d-baseline` `markscore` 15, `markscore_memory` 4, `redact` 15, `redact_memory` 1, `l2d-eval` `markscore` 5, `l2d-core` `marks` 13 and `marks_memory` 3 (`l2d-core` gained `ZipInput::longest_entry_path`), all passed; `cargo test --workspace -j 4` exit 0 in 593 s (`test-workspace-final-round3.txt`): 81 result lines, 785 passed, 0 failed, 49 ignored (round 1: 783/0/49 in 81; +2 `markscore_memory`). No dependency changed. The CSIC release test was not re-run: the archive reservation and the new check are not on the file path it takes.
+- 1.23, review (independent): round 1 REJECTED (a fit from an archive or a store copied its rows with no room reserved: none for the first archive batch, `per_row` 0 for the store; no memory test); round 2 REJECTED (the archive room ignored the one-batch lag of `ZipBatches::hold_beside`); round 3 APPROVED. Re-run by the reviewer in round 3: baseline `markscore` 15, `markscore_memory` 4, `redact` 15, `redact_memory` 1, `scorer_memory` 2; eval `markscore` 5; core `marks` 13, `marks_memory` 3; CSIC in release with revisions `43977c27...` (plain) and `aa217bf8...` (with rules) unchanged, ROC AUC 1.0000 on both sides. The derivation of the two-batch room was checked against the sizing order of `ZipBatches::process` and `Batcher::record`. Suggestion done before the merge: the comment of `the_copies_of_every_archive_batch_fit_the_room_kept_when_it_was_sized` no longer claims that room for one batch is caught. FYI: a refused archive read pushes one stray `BatchRoom` when it builds its message (harmless). The implementer once stopped every cargo/rustc process on the host in round 0 to end its own run; later rounds stopped only their own process trees.
