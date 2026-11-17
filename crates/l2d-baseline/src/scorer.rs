@@ -103,6 +103,18 @@
 //!   as `{"value": 1.0, "bits": "3ff0000000000000"}`; `bits` is the exact bit pattern in
 //!   hexadecimal and is what is read back, `value` is for the reader.
 //!
+//! - For a scorer with redaction rules or fitted from a mark set (task 1.23,
+//!   [`crate::markscore`]), `baseline.json` has format 3 and two more entries:
+//!   `redactions` (the rules in order, their `RedactionRules::content_sha256` and the
+//!   number of pattern rules) and, for a score fitted from a mark set, `mark_set` (its
+//!   name and label, the number of de-selected logs, what it was fitted against, the
+//!   counts of the fit, and the name and SHA-256 of each copy). The copies are
+//!   `mark-set.json` and, when the score was fitted against a mark set of the other
+//!   label, `other-mark-set.json`: the mark-set files as `MarkSet::save` writes them,
+//!   with the de-selections and the rules. A load checks every SHA-256, that the mark
+//!   set carries the rules of `redactions`, and the revision with them; a reader of
+//!   format 2 refuses format 3 instead of scoring without the rules.
+//!
 //! The directory is written under a temporary name beside its final place and renamed
 //! when complete, so a scorer directory is either complete or absent.
 //!
@@ -139,7 +151,9 @@
 //! hash file. Format 2 (task 1.11 on) is format 1 plus the optional entry. Both load;
 //! a scorer of format 1 has [`BaselineScorer::has_fitted_text_hashes`] false and
 //! [`BaselineScorer::was_fitted_on_text`] `None`, and calibration falls back to the
-//! whole-input check for it. Everything is written as format 2. A scorer without
+//! whole-input check for it. A plain scorer is written as format 2, one with redaction
+//! rules or marks as format 3 (format 2 plus `redactions` and `mark_set`, see "Saved
+//! form"); all three load. A scorer without
 //! hashes that is saved again stays without them (format 2 without the entry).
 //!
 //! On a save over a directory of the same revision the hashes are merged like the
@@ -167,8 +181,8 @@
 //! as partial. Saving the refitted scorer under a new name gives a complete set.
 //!
 //! **What the check per log does and does not catch.** The text is hashed as the
-//! adapter read it, before any routing rule, so the hash is the same under keep, strip
-//! and isolate. A text that differs in one byte (a trailing space, another case,
+//! adapter read it, before any routing rule and before any redaction rule, so the hash
+//! is the same under keep, strip and isolate, and with or without rules. A text that differs in one byte (a trailing space, another case,
 //! another encoding of the same request) is another text, by design. Under strip a
 //! calibration log with the same payload on another path is not left out, although the
 //! model sees the two alike. A text that occurred with both labels is unlabelled, is
@@ -195,6 +209,23 @@
 //! bias                          f64 bit pattern
 //! ```
 //!
+//! A scorer with redaction rules or fitted from a mark set (task 1.23) adds, after the
+//! bias:
+//!
+//! ```text
+//! "l2d-baseline-rules/1\n"      21 bytes
+//! rules                         RedactionRules::content_sha256, 64 hexadecimal characters
+//! marks                         u8: 0 none; 1, then the SHA-256 of mark-set.json (64
+//!                               characters) and u8: 0 against the unmarked logs, or 1
+//!                               and the SHA-256 of other-mark-set.json
+//! ```
+//!
+//! A plain scorer adds nothing, so its revision is what it was before task 1.23. The
+//! rules change what the model computes and the marks (with their de-selections) are
+//! what it was fitted on, so the same weights with other rules or marks are another
+//! revision; a directory of one revision therefore always holds the same rules and mark
+//! sets, and saving over it only merges the fitting inputs and text hashes, as before.
+//!
 //! That is every setting that can change the model, and the model. The fit report and
 //! the fitting inputs are not part of the revision. [`BaselineScorer::load`] computes the
 //! revision again from the files and refuses a directory whose stored revision or
@@ -213,16 +244,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use l2d_core::input::content_sha256;
+use l2d_core::marks::{LOAD_FACTOR, MarkSet, REGEX_HELD_BYTES};
 use l2d_core::polars::prelude::{Column, DataFrame};
 use l2d_core::types::short_revision;
 use l2d_core::{
     InputSummary, L2dError, Label, LogsFrame, MemoryBudget, MemorySettings, ProjectPaths,
+    RedactionKind, RedactionRule,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::hashing::{CharHasher, HashingSettings, RoutingMode};
 use crate::logreg::{LogReg, LogRegError, LogRegSettings, SparseMatrix, Termination};
+use crate::markscore::{MarkFitCounts, MarkSetOrigin};
+use crate::redact::RedactionRules;
 
 /// Fewest labelled rows a fit accepts (requirement 2.3).
 pub const MIN_LABELLED: u64 = 10;
@@ -265,7 +300,11 @@ pub const DEFAULT_TOLERANCE: f64 = 1e-3;
 pub const SCORER_KIND: &str = "baseline";
 /// Scores frame column: the log text (String).
 pub const SCORES_TEXT: &str = "text";
-/// Scores frame column: the scorer kind (String), always [`SCORER_KIND`].
+/// Value of the `scorer` column for a score fitted from a mark set (requirement 6.6:
+/// `a score fitted from a mark set` is named as such; task 1.23).
+pub const MARK_SET_SCORER_KIND: &str = "mark-set";
+/// Scores frame column: the scorer kind (String): [`SCORER_KIND`], or
+/// [`MARK_SET_SCORER_KIND`] for a score fitted from a mark set.
 pub const SCORES_SCORER: &str = "scorer";
 /// Scores frame column: the bad/good ratio (Float32), never null for this scorer.
 pub const SCORES_RATIO: &str = "ratio";
@@ -301,6 +340,17 @@ const REVISION_DOMAIN: &[u8] = b"l2d-baseline-scorer/1\n";
 const FORMAT: u32 = 2;
 /// The format of tasks 1.7 to 1.10, which is still read: no `fitted_texts`.
 const FORMAT_WITHOUT_TEXT_HASHES: u32 = 1;
+/// The format of a scorer with redaction rules or fitted from a mark set (task 1.23):
+/// format 2 and the entries `redactions` and `mark_set`. A reader of format 2 refuses
+/// it instead of scoring without its rules.
+const FORMAT_WITH_RULES: u32 = 3;
+/// First bytes of the part of the revision that a scorer with rules or marks adds.
+const REVISION_RULES_DOMAIN: &[u8] = b"l2d-baseline-rules/1\n";
+/// Name of the copy of the mark set a score was fitted from.
+pub const MARK_SET_FILE: &str = "mark-set.json";
+/// Name of the copy of the mark set of the other label, when the score was fitted
+/// against one.
+pub const OTHER_MARK_SET_FILE: &str = "other-mark-set.json";
 
 const ENTRY_BYTES: u64 = 12;
 const SOLVER_VECTORS: u64 = 48;
@@ -564,6 +614,11 @@ pub struct BaselineScorer {
     /// `None` for a scorer saved before task 1.11 (module documentation, "Fitted
     /// texts").
     fitted_texts: Option<FittedTexts>,
+    /// Applied to every text before it is hashed, at fitting and at scoring (task
+    /// 1.23); none for a plain scorer.
+    rules: RedactionRules,
+    /// The mark sets a score was fitted from (task 1.23); `None` for a plain scorer.
+    origin: Option<Box<MarkSetOrigin>>,
 }
 
 /// The labelled rows of a logs frame in frame order: the text, and whether it is bad.
@@ -628,8 +683,9 @@ impl FitEstimate {
             .saturating_add(rows.saturating_mul(TEXT_HASH_BYTES as u64))
     }
 
-    /// Estimates the fit of the `rows` labelled rows of `logs` from a sample of them.
-    fn sample(logs: &LogsFrame, hasher: &CharHasher, rows: usize) -> Self {
+    /// Estimates the fit of the `rows` labelled rows of `logs` from a sample of them,
+    /// hashed after `rules`.
+    fn sample(logs: &LogsFrame, hasher: &CharHasher, rules: &RedactionRules, rows: usize) -> Self {
         let settings = hasher.settings();
         let sample = rows.min(ESTIMATE_SAMPLE_ROWS);
         let mut text_bytes: u64 = 0;
@@ -649,7 +705,7 @@ impl FitEstimate {
             ));
             // Sample row `taken` is the labelled row `taken * rows / sample`.
             if taken < sample && index == taken * rows / sample {
-                sample_entries += hasher.row(text).len() as u64;
+                sample_entries += hasher.row_redacted(text, rules).len() as u64;
                 sample_bytes += bytes;
                 taken += 1;
             }
@@ -704,9 +760,13 @@ impl RevisionHasher {
         self.0.update(bytes);
     }
 
-    /// Ends with the bias and returns the revision.
-    fn finish(mut self, bias: f64) -> String {
+    /// Ends with the bias, and the rules and marks of a scorer that has them
+    /// ([`rules_revision_bytes`]), and returns the revision.
+    fn finish(mut self, bias: f64, rules: Option<&[u8]>) -> String {
         self.0.update(bias.to_bits().to_le_bytes());
+        if let Some(rules) = rules {
+            self.0.update(rules);
+        }
         let mut revision: String = self
             .0
             .finalize()
@@ -738,13 +798,45 @@ fn weight_pieces<E>(
 }
 
 /// The revision of a model.
-fn revision_of(settings: &BaselineSettings, weights: &[f64], bias: f64) -> String {
+fn revision_of(
+    settings: &BaselineSettings,
+    weights: &[f64],
+    bias: f64,
+    rules: &RedactionRules,
+    origin: Option<&MarkSetOrigin>,
+) -> String {
     let mut hash = RevisionHasher::new(settings, weights.len() as u64);
     let _ = weight_pieces(weights, |bytes| {
         hash.weight_bytes(bytes);
         Ok::<(), std::convert::Infallible>(())
     });
-    hash.finish(bias)
+    hash.finish(bias, rules_revision_bytes(rules, origin).as_deref())
+}
+
+/// What a scorer with redaction rules or marks adds to its revision (module
+/// documentation, "Revision"); `None` for a plain scorer, whose revision stays what it
+/// was before task 1.23.
+fn rules_revision_bytes(rules: &RedactionRules, origin: Option<&MarkSetOrigin>) -> Option<Vec<u8>> {
+    if rules.is_empty() && origin.is_none() {
+        return None;
+    }
+    let mut bytes = REVISION_RULES_DOMAIN.to_vec();
+    bytes.extend_from_slice(rules.content_sha256().as_bytes());
+    match origin {
+        None => bytes.push(0),
+        Some(origin) => {
+            bytes.push(1);
+            bytes.extend_from_slice(origin.marks_sha256().as_bytes());
+            match origin.other_sha256() {
+                None => bytes.push(0),
+                Some(other) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(other.as_bytes());
+                }
+            }
+        }
+    }
+    Some(bytes)
 }
 fn routing_code(routing: RoutingMode) -> u8 {
     match routing {
@@ -919,6 +1011,69 @@ struct Manifest {
     /// Absent in format 1 and for a scorer that does not know its fitted texts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fitted_texts: Option<FittedTextsFile>,
+    /// Format 3: the redaction rules the scorer applies first (task 1.23).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redactions: Option<RedactionsFile>,
+    /// Format 3: the mark sets a score was fitted from (task 1.23).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mark_set: Option<MarkSetFile>,
+}
+
+/// The entry `redactions` of `baseline.json`.
+#[derive(Debug, Serialize, Deserialize)]
+struct RedactionsFile {
+    /// `RedactionRules::content_sha256` of the rules.
+    sha256: String,
+    /// How many of the rules are patterns: each is counted as `REGEX_HELD_BYTES` by
+    /// [`BaselineScorer::load_bytes`].
+    pattern_rules: u64,
+    rules: Vec<RedactionRule>,
+}
+
+/// The entry `mark_set` of `baseline.json`: what the copies of the mark sets are, and
+/// what the fit took of the logs. The copies are the mark-set files as
+/// `MarkSet::save` writes them.
+#[derive(Debug, Serialize, Deserialize)]
+struct MarkSetFile {
+    name: String,
+    label: Label,
+    /// Always [`MARK_SET_FILE`]; any other name is refused, never opened.
+    file: String,
+    /// SHA-256 of that file.
+    sha256: String,
+    /// The marked logs the analyst de-selected (16.3), kept out of fitting.
+    deselected: u64,
+    other: OtherFile,
+    /// What the fit took and left out of the logs it read.
+    counts: MarkFitCounts,
+}
+
+/// What a score was fitted against (16.6).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum OtherFile {
+    /// The logs of the same input or store that the mark set does not mark.
+    Unmarked,
+    /// The analyst's marks of the other label.
+    MarkSet {
+        name: String,
+        /// Always [`OTHER_MARK_SET_FILE`].
+        file: String,
+        sha256: String,
+    },
+}
+
+/// The few entries of `baseline.json` [`BaselineScorer::load_bytes`] reads; the rest is
+/// passed over.
+#[derive(Debug, Deserialize)]
+struct LoadPeek {
+    #[serde(default)]
+    redactions: Option<PatternPeek>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatternPeek {
+    pattern_rules: u64,
 }
 
 /// The entry `fitted_texts` of `baseline.json`.
@@ -1031,6 +1186,27 @@ impl BaselineScorer {
         settings: &BaselineSettings,
         budget: &MemoryBudget,
     ) -> Result<Self, FitError> {
+        Self::fit_redacted_with(logs, inputs, settings, &RedactionRules::none(), budget)
+    }
+
+    /// Fits a scorer as [`BaselineScorer::fit_with`] does, with `rules` applied to every
+    /// text before it is hashed (requirement 16.6, task 1.23). The scorer keeps the rules
+    /// and applies them first to every text it scores (16.7); they are part of its
+    /// revision and saved with it. The rows stay the texts of `logs` as they were read:
+    /// texts that are equal after redaction are fitted as rows of their own, and the
+    /// hashes of the fitted texts are those of the texts as read. With no rules this is
+    /// [`BaselineScorer::fit_with`], bit for bit and with the same revision.
+    ///
+    /// The memory estimate adds the rules ([`RedactionRules::held_bytes`]) and, with
+    /// rules, both replacement buffers (including growth capacity). The longest text
+    /// is bounded without applying any rule, before allocating or hashing a row.
+    pub fn fit_redacted_with(
+        logs: &LogsFrame,
+        inputs: &[InputSummary],
+        settings: &BaselineSettings,
+        rules: &RedactionRules,
+        budget: &MemoryBudget,
+    ) -> Result<Self, FitError> {
         let hasher = settings
             .hasher()
             .map_err(|detail| FitError::InvalidSettings { detail })?;
@@ -1047,18 +1223,39 @@ impl BaselineScorer {
         // the texts). A fit that cannot have even that is refused here, with nothing
         // allocated (requirement 12.5). The sample below hashes one row at a time, so
         // it stays within the hashing term that was just asked for.
+        // Bound every intermediate without running replacements. Applying rules just
+        // to measure their output could allocate gigabytes before this first check.
+        // Three copies cover the previous buffer and the growing replacement (2x).
         let longest_text = labelled_rows(logs)
-            .map(|(text, _)| text.len() as u64)
+            .map(|(text, _)| {
+                if rules.is_empty() {
+                    text.len() as u64
+                } else {
+                    rules.redacted_bound(text.len() as u64)
+                }
+            })
             .max()
             .unwrap_or(0);
+        let beside = if rules.is_empty() {
+            0
+        } else {
+            rules
+                .held_bytes()
+                .saturating_add(longest_text.saturating_mul(3))
+        };
         budget
             .require_whole(
-                FitEstimate::bytes_for(0, rows as u64, &hasher, longest_text),
+                FitEstimate::bytes_for(0, rows as u64, &hasher, longest_text)
+                    .saturating_add(beside),
                 OPERATION,
             )
             .map_err(FitError::Memory)?;
 
-        let mut estimate = FitEstimate::sample(logs, &hasher, rows);
+        let mut estimate = FitEstimate::sample(logs, &hasher, rules, rows);
+        estimate.longest_text = estimate.longest_text.max(longest_text);
+        estimate.bytes =
+            FitEstimate::bytes_for(estimate.entries, rows as u64, &hasher, longest_text)
+                .saturating_add(beside);
         budget
             .require_whole(estimate.bytes, OPERATION)
             .map_err(FitError::Memory)?;
@@ -1069,16 +1266,18 @@ impl BaselineScorer {
         let mut text_hashes = Vec::with_capacity(rows);
         let mut no_feature_rows = 0;
         for (index, (text, bad)) in labelled_rows(logs).enumerate() {
+            // The hash is of the text as read; the row is of the text after the rules.
             text_hashes.push(text_hash(text));
-            let row = hasher.row(text);
+            let row = hasher.row_redacted(text, rules);
             if (matrix.stored() + row.len()) as u64 > estimate.entries {
                 // The sample was not typical. Count the rest exactly and ask again.
                 let rest: usize = labelled_rows(logs)
                     .skip(index + 1)
-                    .map(|(text, _)| hasher.row(text).len())
+                    .map(|(text, _)| hasher.row_redacted(text, rules).len())
                     .sum();
                 let needed = (matrix.stored() + row.len() + rest) as u64;
-                let regrown = estimate.regrown(needed, rows as u64, &hasher);
+                let mut regrown = estimate.regrown(needed, rows as u64, &hasher);
+                regrown.bytes = regrown.bytes.saturating_add(beside);
                 budget
                     .require_whole(regrown.bytes, OPERATION)
                     .map_err(FitError::Memory)?;
@@ -1110,7 +1309,7 @@ impl BaselineScorer {
             stored_entries,
             estimated_bytes: estimate.bytes,
         };
-        let revision = revision_of(settings, model.weights(), model.bias());
+        let revision = revision_of(settings, model.weights(), model.bias(), rules, None);
         Ok(Self {
             settings: *settings,
             hasher,
@@ -1119,7 +1318,47 @@ impl BaselineScorer {
             report,
             fitting_inputs: inputs.iter().map(FittingInput::from).collect(),
             fitted_texts: Some(FittedTexts::from_hashes(text_hashes, true)),
+            rules: rules.clone(),
+            origin: None,
         })
+    }
+
+    /// The scorer as a score fitted from the mark sets of `origin` (task 1.23): the
+    /// origin is kept, saved and part of the revision, which is computed again.
+    pub(crate) fn with_origin(mut self, origin: MarkSetOrigin) -> Self {
+        self.revision = revision_of(
+            &self.settings,
+            self.model.weights(),
+            self.model.bias(),
+            &self.rules,
+            Some(&origin),
+        );
+        self.origin = Some(Box::new(origin));
+        self
+    }
+
+    /// Which scorer this is, as the scores frame names it (requirement 6.6):
+    /// [`MARK_SET_SCORER_KIND`] for a score fitted from a mark set, else [`SCORER_KIND`].
+    /// The kind in `baseline.json` stays [`SCORER_KIND`]: the model is the baseline's.
+    pub fn scorer_kind(&self) -> &'static str {
+        if self.origin.is_some() {
+            MARK_SET_SCORER_KIND
+        } else {
+            SCORER_KIND
+        }
+    }
+
+    /// The redaction rules the scorer applies to every text before it hashes it, at
+    /// fitting and at scoring (requirement 16.7); none for a plain scorer.
+    pub fn rules(&self) -> &RedactionRules {
+        &self.rules
+    }
+
+    /// The mark sets the score was fitted from, with what the fit took of the logs;
+    /// `None` for a scorer fitted on a labelled dataset (requirement 6.6: the scorer is
+    /// then "a score fitted from a mark set").
+    pub fn mark_set_origin(&self) -> Option<&MarkSetOrigin> {
+        self.origin.as_deref()
     }
 
     /// The settings the scorer was fitted with.
@@ -1214,6 +1453,8 @@ impl BaselineScorer {
             + texts
             + inputs
             + self.revision.len()) as u64
+            + self.rules.held_bytes()
+            + self.origin.as_ref().map_or(0, |origin| origin.held_bytes())
     }
 
     /// The memory [`BaselineScorer::load`] of `dir` takes at its peak, in bytes, from
@@ -1223,14 +1464,34 @@ impl BaselineScorer {
     /// parsed from it), and [`LOAD_FIXED_BYTES`] for the piece being read and the
     /// rest. 0 when no file is there; the load itself reports that.
     /// `tests/scorer_memory.rs` holds the heap of a load to this figure.
+    ///
+    /// A score with redaction rules or marks (format 3, task 1.23) adds the copies of
+    /// its mark sets, `LOAD_FACTOR` times each (as `MarkSet::load` counts a mark-set
+    /// file), and `REGEX_HELD_BYTES` for every rule that is a pattern. That count is the
+    /// one figure read from `baseline.json` here (its `redactions.pattern_rules`, checked
+    /// against the rules on load); a file that cannot be read adds nothing, and the load
+    /// refuses it.
     pub fn load_bytes(dir: &Path) -> u64 {
         let size = |file: &str| fs::metadata(dir.join(file)).map_or(0, |found| found.len());
+        let copies = size(MARK_SET_FILE)
+            .saturating_add(size(OTHER_MARK_SET_FILE))
+            .saturating_mul(LOAD_FACTOR);
         let files = size(WEIGHTS_FILE)
             .saturating_add(size(FITTED_TEXTS_FILE))
-            .saturating_add(size(MANIFEST_FILE).saturating_mul(8));
+            .saturating_add(size(MANIFEST_FILE).saturating_mul(8))
+            .saturating_add(copies);
+        let patterns = fs::read(dir.join(MANIFEST_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<LoadPeek>(&bytes).ok())
+            .and_then(|peek| peek.redactions)
+            .map_or(0, |redactions| {
+                redactions.pattern_rules.saturating_mul(REGEX_HELD_BYTES)
+            });
         match files {
             0 => 0,
-            files => files.saturating_add(LOAD_FIXED_BYTES),
+            files => files
+                .saturating_add(patterns)
+                .saturating_add(LOAD_FIXED_BYTES),
         }
     }
 
@@ -1249,15 +1510,28 @@ impl BaselineScorer {
     /// text (40 bytes per n-gram, `ngram_max` n-grams per byte). Texts are scored one
     /// after another, so the longest text of a set decides (task 1.10, for the memory
     /// budget of triage).
+    ///
+    /// With redaction rules the text is hashed after them: the figure is that of the
+    /// longest the text can be after the rules ([`RedactionRules::redacted_bound`]; a
+    /// placeholder longer than what it replaces makes the text longer), and the redacted
+    /// buffers (previous output plus growth capacity of the next output) are added.
     pub fn scoring_bytes(&self, longest_text_bytes: u64) -> u64 {
-        longest_text_bytes
+        let (hashed, copy) = if self.rules.is_empty() {
+            (longest_text_bytes, 0)
+        } else {
+            let redacted = self.rules.redacted_bound(longest_text_bytes);
+            (redacted, redacted.saturating_mul(3))
+        };
+        hashed
             .saturating_mul(u64::from(self.settings.ngram_max))
             .saturating_mul(HASHING_BYTES_PER_NGRAM)
+            .saturating_add(copy)
     }
 
     /// The ratio of `text` and whether the text has no features.
     fn score_one(&self, text: &str) -> (f32, bool) {
-        let row = self.hasher.row(text);
+        // The score's rules first (16.7), the same as at fitting.
+        let row = self.hasher.row_redacted(text, &self.rules);
         let probability = self
             .model
             .probability_sparse(&row)
@@ -1272,7 +1546,7 @@ impl BaselineScorer {
     }
 
     /// The scores frame of the rows of `logs`, in the same row order. Labels play no
-    /// part. Columns: `text` String, `scorer` String ([`SCORER_KIND`]), `ratio` Float32
+    /// part. Columns: `text` String, `scorer` String ([`BaselineScorer::scorer_kind`]), `ratio` Float32
     /// (never null), `abstained` Boolean (always `false`), `no_features` Boolean.
     pub fn score(&self, logs: &LogsFrame) -> Result<DataFrame, L2dError> {
         let text = logs.frame().column(LogsFrame::TEXT).expect(CHECKED).clone();
@@ -1302,7 +1576,7 @@ impl BaselineScorer {
         }
         DataFrame::new(vec![
             text.with_name(SCORES_TEXT.into()),
-            Column::new(SCORES_SCORER.into(), vec![SCORER_KIND; rows]),
+            Column::new(SCORES_SCORER.into(), vec![self.scorer_kind(); rows]),
             Column::new(SCORES_RATIO.into(), ratios),
             Column::new(SCORES_ABSTAINED.into(), vec![false; rows]),
             Column::new(SCORES_NO_FEATURES.into(), no_features),
@@ -1311,8 +1585,13 @@ impl BaselineScorer {
     }
 
     fn manifest(&self) -> Manifest {
+        let with_rules = !self.rules.is_empty() || self.origin.is_some();
         Manifest {
-            format: FORMAT,
+            format: if with_rules {
+                FORMAT_WITH_RULES
+            } else {
+                FORMAT
+            },
             kind: SCORER_KIND.into(),
             revision: self.revision.clone(),
             tool_version: env!("CARGO_PKG_VERSION").into(),
@@ -1343,6 +1622,33 @@ impl BaselineScorer {
             },
             fitting_inputs: self.fitting_inputs.clone(),
             fitted_texts: self.fitted_texts.as_ref().map(FittedTexts::file),
+            redactions: with_rules.then(|| RedactionsFile {
+                sha256: self.rules.content_sha256(),
+                pattern_rules: self
+                    .rules
+                    .rules()
+                    .iter()
+                    .filter(|rule| rule.kind == RedactionKind::Pattern)
+                    .count() as u64,
+                rules: self.rules.rules().to_vec(),
+            }),
+            mark_set: self.origin.as_ref().map(|origin| MarkSetFile {
+                name: origin.marks().name().to_string(),
+                label: origin.marks().label(),
+                file: MARK_SET_FILE.into(),
+                sha256: origin.marks_sha256().to_string(),
+                deselected: (origin.marks().deselected().len()
+                    + origin.marks().deselected_ids().len()) as u64,
+                other: match origin.other() {
+                    None => OtherFile::Unmarked,
+                    Some(other) => OtherFile::MarkSet {
+                        name: other.name().to_string(),
+                        file: OTHER_MARK_SET_FILE.into(),
+                        sha256: origin.other_sha256().unwrap_or_default().to_string(),
+                    },
+                },
+                counts: *origin.counts(),
+            }),
         }
     }
 
@@ -1472,6 +1778,12 @@ impl BaselineScorer {
 
     fn write_files(&self, dir: &Path) -> Result<(), L2dError> {
         write_weights(&dir.join(WEIGHTS_FILE), self.model.weights())?;
+        if let Some(origin) = &self.origin {
+            write_file(&dir.join(MARK_SET_FILE), origin.marks_file())?;
+            if let Some(other) = origin.other_file() {
+                write_file(&dir.join(OTHER_MARK_SET_FILE), other)?;
+            }
+        }
         if let Some(texts) = &self.fitted_texts {
             write_file(&dir.join(FITTED_TEXTS_FILE), &texts.bytes)?;
         }
@@ -1520,15 +1832,32 @@ impl BaselineScorer {
         let manifest: Manifest = serde_json::from_slice(&manifest).map_err(|error| {
             not_a_scorer(dir, format!("{MANIFEST_FILE} is not readable: {error}"))
         })?;
-        let known_format =
-            manifest.format == FORMAT || manifest.format == FORMAT_WITHOUT_TEXT_HASHES;
+        let known_format = manifest.format == FORMAT
+            || manifest.format == FORMAT_WITHOUT_TEXT_HASHES
+            || manifest.format == FORMAT_WITH_RULES;
         if !known_format || manifest.kind != SCORER_KIND {
             return Err(not_a_scorer(
                 dir,
                 format!(
                     "{MANIFEST_FILE} has format {} and kind '{}', expected format \
-                     {FORMAT_WITHOUT_TEXT_HASHES} or {FORMAT} and kind '{SCORER_KIND}'",
+                     {FORMAT_WITHOUT_TEXT_HASHES}, {FORMAT} or {FORMAT_WITH_RULES} and kind \
+                     '{SCORER_KIND}'",
                     manifest.format, manifest.kind
+                ),
+            ));
+        }
+        let has_rules = manifest.redactions.is_some() || manifest.mark_set.is_some();
+        if (manifest.format == FORMAT_WITH_RULES) != has_rules
+            || (manifest.mark_set.is_some() && manifest.redactions.is_none())
+        {
+            return Err(not_a_scorer(
+                dir,
+                format!(
+                    "{MANIFEST_FILE} has format {} but {} the entries redactions and \
+                     mark_set; only format {FORMAT_WITH_RULES} has them, and with mark_set it \
+                     has redactions",
+                    manifest.format,
+                    if has_rules { "has" } else { "lacks" }
                 ),
             ));
         }
@@ -1619,7 +1948,11 @@ impl BaselineScorer {
         // they pass: the load never holds them twice (module documentation, "Memory").
         let mut hash = RevisionHasher::new(&settings, u64::from(hasher.dimension()));
         let weights = read_weights(dir, hasher.dimension() as usize, &mut hash)?;
-        let revision = hash.finish(bias);
+        let (rules, origin) = read_rules_and_marks(dir, &manifest)?;
+        let revision = hash.finish(
+            bias,
+            rules_revision_bytes(&rules, origin.as_ref()).as_deref(),
+        );
         if revision != manifest.revision {
             return Err(L2dError::Refused {
                 reason: format!(
@@ -1659,8 +1992,93 @@ impl BaselineScorer {
             report,
             fitting_inputs: manifest.fitting_inputs,
             fitted_texts,
+            rules,
+            origin: origin.map(Box::new),
         })
     }
+}
+
+/// Reads and verifies what a scorer of format 3 keeps beside its model: the redaction
+/// rules of `baseline.json` (their stated digest and count of patterns), and the copies
+/// of the mark sets (their stated SHA-256, their names and labels, and that the mark
+/// set carries the same rules). Nothing for a scorer of format 1 or 2.
+fn read_rules_and_marks(
+    dir: &Path,
+    manifest: &Manifest,
+) -> Result<(RedactionRules, Option<MarkSetOrigin>), L2dError> {
+    let Some(stated) = &manifest.redactions else {
+        return Ok((RedactionRules::none(), None));
+    };
+    let unusable = |entry: &str, why: String| {
+        not_a_scorer(
+            dir,
+            format!("the entry {entry} of {MANIFEST_FILE} is not usable: {why}"),
+        )
+    };
+    let rules = RedactionRules::loaded(stated.rules.clone())
+        .map_err(|error| unusable("redactions", error.to_string()))?;
+    if rules.content_sha256() != stated.sha256 {
+        return Err(unusable(
+            "redactions",
+            "its rules do not have the SHA-256 it states".into(),
+        ));
+    }
+    let patterns = stated
+        .rules
+        .iter()
+        .filter(|rule| rule.kind == RedactionKind::Pattern)
+        .count() as u64;
+    if patterns != stated.pattern_rules {
+        return Err(unusable(
+            "redactions",
+            format!(
+                "it states {} pattern rules but holds {patterns}",
+                stated.pattern_rules
+            ),
+        ));
+    }
+    let Some(marks) = &manifest.mark_set else {
+        return Ok((rules, None));
+    };
+    // The names are compared, never used: only the files of this directory are opened.
+    let copy = |file: &str, expected: &str, name: &str, sha256: &str| {
+        if file != expected {
+            return Err(unusable(
+                "mark_set",
+                format!("it names a file other than {expected}"),
+            ));
+        }
+        let bytes = read_scorer_file(dir, expected)?;
+        if !content_sha256(&bytes).eq_ignore_ascii_case(sha256) {
+            return Err(unusable(
+                "mark_set",
+                format!("{expected} does not have the SHA-256 it states"),
+            ));
+        }
+        let set = MarkSet::from_file_bytes(&bytes, &dir.join(expected), name)?;
+        Ok((set, bytes))
+    };
+    let (set, set_bytes) = copy(&marks.file, MARK_SET_FILE, &marks.name, &marks.sha256)?;
+    if set.label() != marks.label {
+        return Err(unusable(
+            "mark_set",
+            "its label is not that of the mark set".into(),
+        ));
+    }
+    if set.redactions() != rules.rules() {
+        return Err(unusable(
+            "mark_set",
+            "the mark set does not carry the rules of the entry redactions".into(),
+        ));
+    }
+    let other = match &marks.other {
+        OtherFile::Unmarked => None,
+        OtherFile::MarkSet { name, file, sha256 } => {
+            Some(copy(file, OTHER_MARK_SET_FILE, name, sha256)?)
+        }
+    };
+    let origin = MarkSetOrigin::new(set, set_bytes, other, marks.counts);
+    Ok((rules, Some(origin)))
 }
 
 /// Reads and verifies the hash file `baseline.json` describes under `fitted_texts`.

@@ -9,12 +9,16 @@
 //!   fitting side the scorer did not see, and the figures on the held-out side
 //!   (requirements 9.2, 9.8, 11.8).
 //! - [`report`]: the evaluation as JSON and as a readable summary (requirement 9.6).
+//! - [`markscore`]: the held-out-group report of a score fitted from a mark set
+//!   (requirement 16.9): quality on groups held out of fitting beside quality on the
+//!   groups it was fitted on.
 //!
 //! The pieces are those task 3.7 generalizes: [`split`] and [`metrics`] know nothing
 //! about a scorer, and [`evaluate::summarize`] works on held-out ratios whatever
 //! produced them.
 
 pub mod evaluate;
+pub mod markscore;
 pub mod metrics;
 pub mod report;
 pub mod split;
