@@ -2,12 +2,16 @@
 mod clusters;
 mod loss;
 mod overlap;
+mod projection;
+mod properties;
 mod separability;
 
 pub use clusters::{ClusterReport, assess_clusters, assess_clusters_with};
 use l2d_core::{L2dError, Label};
 pub use loss::{LossReport, ShortenedResult, assess_loss, assess_loss_with};
 pub use overlap::{NeighbourOverlap, neighbour_overlap, neighbour_overlap_with};
+pub use projection::{project_to_csv, project_to_csv_with};
+pub use properties::{PropertiesReport, assess_properties, assess_properties_with};
 pub use separability::{Separability, separability, separability_with};
 
 /// One vector per original log. When comparing representations, callers must

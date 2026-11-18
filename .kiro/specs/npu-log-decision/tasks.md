@@ -535,7 +535,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 3.2_
   - _Requirements: 8.3, 8.4_
 
-- [ ] 3.5 Report vector properties and write 2D projection
+- [x] 3.5 Report vector properties and write 2D projection
   - Implement `assess_properties`: pairwise cosine distribution, norm quantiles, anisotropy, duplicate rate, dimension
   - Implement `project_to_csv`: 2D projection (t-SNE / PCA) written to CSV with coordinates, labels, and groups
   - Done when unit-norm random vectors report norms 1.0 and anisotropy near 0.0, and projection CSV outputs all sample rows
