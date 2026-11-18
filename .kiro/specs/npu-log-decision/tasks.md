@@ -543,7 +543,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 3.2_
   - _Requirements: 8.5, 8.6_
 
-- [ ] 3.6 Compare two vector sets side by side
+- [x] 3.6 Compare two vector sets side by side
   - Implement `compare` in `l2d-assess`: run loss, clustering, and properties on two vector sets from identical logs and format side by side
   - Done when comparing a vector set with a shortened version correctly shows both columns and reduced neighbor overlap
   - _Requirements: 8.7_
