@@ -139,7 +139,8 @@ fn hash_file(path: &Path) -> Result<String, L2dError> {
     }
     Ok(format!("{:x}", h.finalize()))
 }
-fn json_hash<T: Serialize>(value: &T) -> Result<String, L2dError> {
+/// SHA-256 of the streamed JSON representation, in serialization order.
+pub fn json_hash<T: Serialize>(value: &T) -> Result<String, L2dError> {
     struct Hash(Sha256);
     impl Write for Hash {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -499,6 +500,11 @@ impl PatternCatalogue {
             )?;
             budget.require_whole(reserve, "pattern catalogue and retained input")?;
             selection.require_input(summary, None)?;
+            if let MarkedSource::Input(source) = selection.source() {
+                source.require_interpretation(&crate::marks::InputInterpretation::file(
+                    logs, budget,
+                )?)?;
+            }
             if hash_file(&summary.source_path)? != summary.content_sha256 {
                 return Err(fail("input changed since selection"));
             }
@@ -556,7 +562,12 @@ impl PatternCatalogue {
                 match selection.source() {
                     MarkedSource::Input(s)
                         if s.content_sha256 == input.content_sha256()
-                            && s.archive_entries.as_ref() == Some(&options.entries) => {}
+                            && s.archive_entries.as_ref() == Some(&options.entries) =>
+                    {
+                        s.require_interpretation(&crate::marks::InputInterpretation::archive(
+                            options,
+                        ))?;
+                    }
                     _ => return Err(fail("selection archive source or scope differs")),
                 }
                 for batch in input.batches(budget) {

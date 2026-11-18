@@ -117,7 +117,9 @@ impl MarkHistory {
         snapshot: Option<String>,
         retained: u64,
     ) -> Result<Self, L2dError> {
-        if other.is_some_and(|o| o.label() == marks.label() || o.source() != marks.source()) {
+        if other
+            .is_some_and(|o| o.label() == marks.label() || !o.source().same_history(marks.source()))
+        {
             return Err(refused(
                 "opposite marks must have the other label and the same source",
             ));
@@ -238,9 +240,24 @@ impl MarkHistory {
         other: Option<&MarkSet>,
         budget: &mut MemoryBudget,
     ) -> Result<Self, L2dError> {
-        marks.require_input(summary, None)?;
-        if let Some(o) = other {
-            o.require_input(summary, None)?;
+        Self::from_input_selection(logs, summary, None, marks, other, budget)
+    }
+
+    /// Capture original rows from a freshly read file or an exact archive entry selection.
+    pub fn from_input_selection(
+        logs: &LogsFrame,
+        summary: &InputSummary,
+        archive: Option<&l2d_core::ZipInputSettings>,
+        marks: &MarkSet,
+        other: Option<&MarkSet>,
+        budget: &mut MemoryBudget,
+    ) -> Result<Self, L2dError> {
+        match archive {
+            Some(settings) => marks.require_archive(summary, settings)?,
+            None => marks.require_file(summary, logs, budget)?,
+        }
+        if other.is_some_and(|o| !o.source().same_history(marks.source())) {
+            return Err(refused("opposite marks must bind the same input history"));
         }
         let retained = (logs.frame().estimated_size() as u64)
             .saturating_mul(32)
@@ -266,6 +283,57 @@ impl MarkHistory {
             budget.hold(prior);
         }
         result
+    }
+    /// Supply real stored endpoint keys to a grouped score report. Duplicate originals
+    /// with conflicting or unknown keys have no unambiguous holdout group.
+    pub fn stored_groups(
+        &self,
+        logs: &LogsFrame,
+        budget: &mut MemoryBudget,
+    ) -> Result<LogsFrame, L2dError> {
+        use l2d_core::polars::prelude::{Column, IntoColumn, StringChunkedBuilder};
+        if self.snapshot.is_none() {
+            return Err(refused("stored group lookup requires a store history"));
+        }
+        let group_bytes = self.rows.iter().fold(0u64, |sum, r| {
+            sum.saturating_add(r.group.as_ref().map_or(0, |g| g.len() as u64))
+        });
+        let needed = (self.rows.len() as u64)
+            .saturating_mul(192)
+            .saturating_add(group_bytes.saturating_mul(4))
+            .saturating_add((logs.len() as u64).saturating_mul(128))
+            .saturating_add(65536);
+        budget.require_whole(needed, "stored group index and fitted group column")?;
+        let mut groups = BTreeMap::new();
+        for row in &self.rows {
+            let group = row.group.as_deref();
+            groups
+                .entry(row.text.as_str())
+                .and_modify(|known| {
+                    if *known != group {
+                        *known = None;
+                    }
+                })
+                .or_insert(group);
+        }
+        let mut frame = logs.frame().clone();
+        let texts = frame
+            .column(LogsFrame::TEXT)
+            .and_then(Column::str)
+            .map_err(|e| refused(e.to_string()))?;
+        let mut keys = StringChunkedBuilder::new(LogsFrame::GROUP.into(), logs.len());
+        for text in texts.into_no_null_iter() {
+            let key = groups
+                .get(text)
+                .ok_or_else(|| refused("fitted original missing from store history"))?;
+            keys.append_option(*key);
+        }
+        frame
+            .with_column(keys.finish().into_column())
+            .map_err(|e| refused(e.to_string()))?;
+        let enriched = LogsFrame::new(frame)?;
+        budget.hold(budget.held_bytes().saturating_add(needed));
+        Ok(enriched)
     }
     pub fn retained_bytes(&self) -> u64 {
         self.retained
@@ -395,8 +463,18 @@ impl ReachSettings {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MarkGroup {
     pub representative: Evidence,
+    #[serde(default)]
+    pub boundary: Option<Evidence>,
     pub size: usize,
     pub distinct_texts: usize,
+    /// Distinct originals by actual endpoint/host relation to the representative.
+    /// A text present in multiple groups may contribute in each applicable category.
+    #[serde(default)]
+    pub same_group_distinct_texts: usize,
+    #[serde(default)]
+    pub cross_group_distinct_texts: usize,
+    #[serde(default)]
+    pub unknown_group_distinct_texts: usize,
     pub occurrences: u64,
     pub distance_range: [f64; 2],
     members: Vec<Member>,
@@ -479,13 +557,19 @@ pub fn group_marks(
             };
             let mut group = MarkGroup {
                 representative: evidence(row, 0., &row.text),
+                boundary: Some(evidence(row, 0., &row.text)),
                 size: 0,
                 distinct_texts: 0,
+                same_group_distinct_texts: 0,
+                cross_group_distinct_texts: 0,
+                unknown_group_distinct_texts: 0,
                 occurrences: 0,
                 distance_range: [0., 0.],
                 members: vec![],
             };
             let mut texts = BTreeSet::new();
+            let (mut same, mut cross, mut unknown) =
+                (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
             for (j, candidate) in history.rows.iter().enumerate() {
                 if candidate.provenance != Provenance::Marked || assigned.contains(&j) {
                     continue;
@@ -513,11 +597,22 @@ pub fn group_marks(
                     group.members.push(candidate.member.clone());
                     group.size += 1;
                     group.occurrences = group.occurrences.saturating_add(candidate.occurrences);
-                    group.distance_range[1] = group.distance_range[1].max(d);
+                    if d > group.distance_range[1] {
+                        group.distance_range[1] = d;
+                        group.boundary = Some(evidence(candidate, d, &row.text));
+                    }
                     texts.insert(&candidate.text);
+                    match (&row.group, &candidate.group) {
+                        (Some(a), Some(b)) if a == b => same.insert(&candidate.text),
+                        (Some(_), Some(_)) => cross.insert(&candidate.text),
+                        _ => unknown.insert(&candidate.text),
+                    };
                 }
             }
             group.distinct_texts = texts.len();
+            group.same_group_distinct_texts = same.len();
+            group.cross_group_distinct_texts = cross.len();
+            group.unknown_group_distinct_texts = unknown.len();
             result.groups.push(group);
         }
         Ok(result)
@@ -532,6 +627,25 @@ pub fn group_marks(
     result
 }
 impl Grouping {
+    /// Stable preview identity excluding the host's adaptive memory telemetry.
+    pub fn revision(
+        &self,
+        history: &MarkHistory,
+        settings: &ReachSettings,
+    ) -> Result<String, L2dError> {
+        l2d_core::patterns::json_hash(&(
+            "l2d-mark-group-preview-v1",
+            &self.source,
+            history.metadata_revision(),
+            &self.marks_file,
+            &self.snapshot,
+            &self.method,
+            &self.profile,
+            settings,
+            &self.groups,
+            &self.unsupported_details,
+        ))
+    }
     /// Apply an untampered in-memory grouping against unchanged source/marks.
     pub fn deselect(
         &self,

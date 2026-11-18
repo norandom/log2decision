@@ -678,7 +678,7 @@ pub(crate) fn read_logs(
                 skipped: Vec::new(),
                 label_conflicts: 0,
             };
-            marks.require_input(&summary, Some(&settings.entries))?;
+            marks.require_archive(&summary, settings)?;
             sink.archive_opened(archive.longest_entry_path(), settings.max_record_bytes);
             let beside = held + sink.beside();
             archive.hold_beside(beside);
@@ -819,7 +819,7 @@ fn propose(
     settings.validate()?;
     let name = marks.name();
     match input {
-        RedactionInput::File { summary, .. } => marks.require_input(summary, None)?,
+        RedactionInput::File { summary, logs } => marks.require_file(summary, logs, budget)?,
         RedactionInput::Store(store) => marks.require_store(*store, budget)?,
         RedactionInput::Archive { .. } => {}
     }

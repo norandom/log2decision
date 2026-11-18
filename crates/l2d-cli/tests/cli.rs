@@ -28,14 +28,10 @@ const OPERATIONS: &[&[&str]] = &[
 /// The operations that no task has wired yet.
 const STUBS: &[&[&str]] = &[
     &["encoder", "train"],
-    &["encoder", "encode"],
-    &["encoder", "info"],
-    &["store", "add"],
     &["store", "search"],
     &["shift"],
     &["assess"],
     &["eval"],
-    &["runtime", "check"],
 ];
 
 fn l2d(args: &[&str]) -> Output {
@@ -203,8 +199,20 @@ fn batch_size_and_memory_limit_are_accepted_before_and_after_the_operation() {
         &["shift", "--batch-rows", "10000"][..],
         &["--memory-limit", "2GB", "shift"][..],
         &["shift", "--memory-limit", "536870912"][..],
-        &["--memory-limit=512MB", "--batch-rows=1024", "store", "add"][..],
-        &["store", "--batch-rows", "1", "add", "--memory-limit", "64k"][..],
+        &[
+            "--memory-limit=512MB",
+            "--batch-rows=1024",
+            "store",
+            "search",
+        ][..],
+        &[
+            "store",
+            "--batch-rows",
+            "1",
+            "search",
+            "--memory-limit",
+            "64k",
+        ][..],
         &[
             "--json",
             "--batch-rows",
@@ -283,4 +291,22 @@ fn missing_subcommand_exits_non_zero_and_shows_usage_on_stderr() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("Usage: l2d"));
+}
+
+#[test]
+fn runtime_check_names_the_missing_runtime_directory() {
+    let output = Command::new(env!("CARGO_BIN_EXE_l2d"))
+        .env("L2D_RUNTIME_DIR", "task29-missing-runtime")
+        .args(["--json", "runtime", "check"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("task29-missing-runtime"),
+        "{report}"
+    );
+    assert!(!output.status.success());
 }

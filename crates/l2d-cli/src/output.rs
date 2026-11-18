@@ -36,6 +36,79 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use l2d_core::L2dError;
 use serde::Serialize;
 
+pub(crate) fn report(
+    context: &crate::cmd::common::Context,
+    b: &l2d_core::MemoryBudget,
+    value: &serde_json::Value,
+) -> Result<(), L2dError> {
+    report_with_text_limit(context, b, value, crate::cmd::common::TEXT_CHARS)
+}
+pub(crate) fn report_with_text_limit(
+    context: &crate::cmd::common::Context,
+    b: &l2d_core::MemoryBudget,
+    value: &serde_json::Value,
+    log_text_limit: usize,
+) -> Result<(), L2dError> {
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    let memory = context.memory_report(b, Vec::new());
+    if context.json {
+        let fields = value
+            .as_object()
+            .ok_or_else(|| output_failed(io::Error::other("result must be an object")))?;
+        let mut json = JsonOut::begin(out).map_err(output_failed)?;
+        for (key, value) in fields {
+            json.field(key, value).map_err(output_failed)?;
+        }
+        if !fields.contains_key("memory") {
+            json.field("memory", &memory).map_err(output_failed)?;
+        }
+        return json.end().map_err(output_failed);
+    }
+    human(&mut out, value, 0, log_text_limit).map_err(output_failed)?;
+    if value.get("memory").is_none() {
+        writeln!(out, "memory:").map_err(output_failed)?;
+        let memory = serde_json::to_value(&memory).map_err(|e| output_failed(e.into()))?;
+        human(&mut out, &memory, 2, log_text_limit).map_err(output_failed)?;
+    }
+    writeln!(out).map_err(output_failed)?;
+    out.flush().map_err(output_failed)
+}
+fn human(
+    out: &mut impl Write,
+    value: &serde_json::Value,
+    indent: usize,
+    log_text_limit: usize,
+) -> io::Result<()> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, value) in fields {
+                write!(out, "{:indent$}{name}: ", "")?;
+                if value.is_array() || value.is_object() {
+                    writeln!(out)?;
+                }
+                if name == "text"
+                    && let Some(text) = value.as_str()
+                {
+                    writeln!(out, "{}", shown_text(text, text.len().min(log_text_limit)))?;
+                } else {
+                    human(out, value, indent + 2, log_text_limit)?;
+                }
+            }
+        }
+        serde_json::Value::Array(rows) => {
+            if rows.is_empty() {
+                writeln!(out, "{:indent$}(none)", "")?;
+            }
+            for row in rows {
+                writeln!(out, "{:indent$}-", "")?;
+                human(out, row, indent + 2, log_text_limit)?;
+            }
+        }
+        serde_json::Value::String(s) => writeln!(out, "{}", crate::output::shown_text(s, s.len()))?,
+        other => writeln!(out, "{other}")?,
+    }
+    Ok(())
+}
 /// The failure of writing a result to standard output (a closed pipe, a full disk).
 pub fn output_failed(error: io::Error) -> L2dError {
     L2dError::Runtime {

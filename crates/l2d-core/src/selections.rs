@@ -252,12 +252,17 @@ fn input_bytes(summary: &InputSummary, entries: Option<&[String]>) -> u64 {
         + summary.content_sha256.len() as u64
         + entries.map_or(0, |e| e.iter().map(|s| s.len() as u64 + 32).sum())
 }
-fn input_source(summary: &InputSummary, entries: Option<&[String]>) -> MarkedSource {
-    MarkedSource::Input(MarkedInput {
-        path: summary.source_path.to_string_lossy().into_owned(),
+fn input_source(
+    summary: &InputSummary,
+    logs: &LogsFrame,
+    budget: &MemoryBudget,
+) -> Result<MarkedSource, L2dError> {
+    Ok(MarkedSource::Input(MarkedInput {
+        path: MarkedInput::source_location(&summary.source_path)?,
         content_sha256: summary.content_sha256.clone(),
-        archive_entries: entries.map(<[String]>::to_vec),
-    })
+        archive_entries: None,
+        interpretation: Some(crate::marks::InputInterpretation::file(logs, budget)?),
+    }))
 }
 fn check_name(name: &str) -> Result<(), L2dError> {
     if name.is_empty()
@@ -397,8 +402,9 @@ impl SelectionSet {
                 "input frame does not cover the summary's distinct texts",
             ));
         }
+        let source = input_source(summary, logs, budget)?;
         let matcher = compile(&query, budget)?;
-        let mut set = Self::empty(name, query, settings, input_source(summary, None));
+        let mut set = Self::empty(name, query, settings, source);
         set.take(logs, &matcher)?;
         set.counts(summary);
         set.finish();
@@ -453,9 +459,10 @@ impl SelectionSet {
             let mut input = ZipInput::open(path, options, budget)?;
             input.hold_beside(before + reserve);
             let source = MarkedSource::Input(MarkedInput {
-                path: path.to_string_lossy().into_owned(),
+                path: MarkedInput::source_location(path)?,
                 content_sha256: input.content_sha256().into(),
                 archive_entries: Some(options.entries.clone()),
+                interpretation: Some(crate::marks::InputInterpretation::archive(options)),
             });
             let mut set = Self::empty(name, query, settings, source);
             // Constant reservation avoids ZipBatches' hold_beside one-batch lag.

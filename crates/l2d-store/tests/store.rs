@@ -2357,3 +2357,30 @@ fn a_store_whose_file_names_another_identity_refuses_to_write_or_read() {
     drop(store);
     assert_fts_consistent(&path);
 }
+
+#[test]
+fn initial_fill_publishes_only_a_complete_new_store() {
+    let scratch = Scratch::new("initial-fill");
+    let paths = scratch.paths();
+    let ident = identity();
+    let origin = VectorOrigin::made_under(&ident, "1.9.0");
+    let bad = rows(
+        &logs_of(&[
+            record("valid", Label::Good, None, 1),
+            record("bad\0record", Label::Unknown, None, 1),
+        ]),
+        "fixture",
+        0,
+    );
+    assert!(Store::create_with_rows(&paths, "logs", origin, &bad, &mut budget()).is_err());
+    assert!(scratch.store_files().is_empty());
+    let good = rows(&synthetic_logs(3), "fixture", 0);
+    let saved = Store::create_with_rows(&paths, "logs", origin, &good, &mut budget()).unwrap();
+    assert_eq!(saved.added, 3);
+    assert!(matches!(
+        Store::create_with_rows(&paths, "logs", origin, &good, &mut budget()),
+        Err(StoreError::Exists { .. })
+    ));
+    assert_eq!(Store::open(&paths, "logs").unwrap().len().unwrap(), 3);
+    assert_eq!(scratch.store_files(), vec!["logs.db"]);
+}

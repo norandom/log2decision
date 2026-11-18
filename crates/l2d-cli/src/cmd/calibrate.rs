@@ -20,9 +20,7 @@ use l2d_decide::conformal::{
     DEFAULT_ERROR_RATE, DEFAULT_MIN_PER_GROUP, EXCHANGEABILITY_NOTE, HELD_OUT_ROW_BYTES, HeldOut,
     HeldOutCheck, estimated_bytes, held_out_logs,
 };
-use l2d_decide::{
-    CalibrationError, CalibrationSettings, ConformalCalibrator, Scorer, ScorerKind, Stratum,
-};
+use l2d_decide::{CalibrationError, CalibrationSettings, ConformalCalibrator, Scorer, Stratum};
 use serde::Serialize;
 
 use super::common::{
@@ -193,7 +191,7 @@ pub fn run(context: &Context, args: &CalibrateArgs) -> Result<(), L2dError> {
         revision: calibrator.revision().to_string(),
         directory: directory.to_string_lossy().into_owned(),
         scorer: CalibratedScorer {
-            kind: ScorerKind::Baseline.as_str(),
+            kind: scorer.kind().as_str(),
             revision: calibrator.scorer_revision().to_string(),
         },
         min_per_group: calibrator.settings().min_per_group,

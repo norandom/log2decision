@@ -13,5 +13,6 @@ l2d-decide.workspace = true
 # The report is written as JSON; the fold membership is named by a SHA-256, so that it
 # can be compared with the run records of the science gate. Both crates are in the
 # workspace already.
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

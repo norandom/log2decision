@@ -73,6 +73,8 @@ pub enum PrimaryChoice {
 #[derive(Debug, Clone, Args)]
 pub struct TriageArgs {
     #[command(flatten)]
+    pub mark: super::analyst_triage::MarkTriageArgs,
+    #[command(flatten)]
     pub input: InputArgs,
 
     /// The saved baseline scorer: its name, or its directory name <name>-<revision>
@@ -402,6 +404,15 @@ struct Head<'a> {
 
 /// Runs `l2d triage`.
 pub fn run(context: &Context, args: &TriageArgs) -> Result<(), L2dError> {
+    if let Some(marks) = &args.mark.mark_set {
+        return super::analyst_triage::run(context, args, marks);
+    }
+    if args.mark.history.supplied() || args.mark.profile.profile_dir.is_some() {
+        return Err(L2dError::InvalidInput {
+            detail: "history and profile options require --mark-set".into(),
+        });
+    }
+    args.mark.archive.refuse_for_other_input(&[])?;
     if args.store.is_some() {
         return Err(store_not_available("triage"));
     }

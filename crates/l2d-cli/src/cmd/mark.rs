@@ -30,11 +30,17 @@ pub struct MarkArgs {
     pub input: InputArgs,
     #[command(flatten)]
     pub archive: ArchiveArgs,
+    /// Search original logs in this store, identified by their stable record IDs
+    #[arg(long, conflicts_with = "input")]
+    pub store: Option<String>,
+    /// Select these original positions in a file or archive
+    #[arg(long = "position", conflicts_with_all=["phrase","regex","store"])]
+    pub positions: Vec<u64>,
     /// Match this literal, case-sensitive substring
-    #[arg(long, required_unless_present = "regex", conflicts_with = "regex")]
+    #[arg(long, required_unless_present_any = ["regex","positions"], conflicts_with = "regex")]
     pub phrase: Option<String>,
     /// Match this regular expression (use (?i) for case-insensitive matching)
-    #[arg(long, required_unless_present = "phrase")]
+    #[arg(long, required_unless_present_any = ["phrase","positions"])]
     pub regex: Option<String>,
     /// Analyst label saved with the marks; dataset labels do not choose matches
     #[arg(long, value_enum, default_value = "bad")]
@@ -45,9 +51,9 @@ pub struct MarkArgs {
 }
 
 pub fn run(context: &Context, args: &MarkArgs) -> Result<(), L2dError> {
-    if args.input.input.is_none() {
+    if args.input.input.is_none() && args.store.is_none() {
         return Err(L2dError::InvalidInput {
-            detail: "`l2d mark` requires --input <file|archive>".into(),
+            detail: "`l2d mark` requires --input <file|archive> or --store <name>".into(),
         });
     }
     let paths = context.paths()?;
@@ -58,6 +64,9 @@ pub fn run(context: &Context, args: &MarkArgs) -> Result<(), L2dError> {
         },
         (None, Some(pattern)) => MarkQuery::Regex {
             pattern: pattern.clone(),
+        },
+        (None, None) if !args.positions.is_empty() => MarkQuery::Positions {
+            positions: args.positions.clone(),
         },
         _ => {
             return Err(L2dError::InvalidInput {
@@ -70,6 +79,69 @@ pub fn run(context: &Context, args: &MarkArgs) -> Result<(), L2dError> {
         MarkLabel::Bad => Label::Bad,
         MarkLabel::Good => Label::Good,
     };
+    if let Some(store_name) = &args.store {
+        let _guard = l2d_core::resource::ResourceGuard::enter(
+            "CLI store marking",
+            l2d_core::resource::busy_choice(),
+        )?;
+        args.archive.refuse_for_other_input(&[])?;
+        let store = l2d_store::Store::open(&paths, store_name)?;
+        let marks = MarkSet::mark_store(name, label, query, &store, &mut budget)?;
+        let rows = store.len()?;
+        let retained = if marks.ids_spilled() {
+            65536
+        } else {
+            marks.count().saturating_mul(128)
+        };
+        let room = retained.saturating_add(common::output_bytes(store.longest_text_bytes()?));
+        budget.require_whole(room, "streaming marked store originals and their IDs")?;
+        budget.hold(budget.held_bytes().saturating_add(room));
+        let mut out = MarkOut::begin(io::BufWriter::new(io::stdout().lock()), context.json)?;
+        let mut observed = super::discover_store::StoreBatchReport::new(
+            "store mark preview",
+            budget.max_batch_rows(),
+        );
+        let completed = (|| {
+            let generation = store.read_generation()?;
+            store.text_batches_with(0, 0, &mut budget, |frame| {
+                observed.note(frame.height() as u64);
+                let columns = || -> Result<_, l2d_core::polars::prelude::PolarsError> {
+                    Ok((frame.column("id")?.str()?, frame.column("text")?.str()?))
+                };
+                let (ids, texts) = columns().map_err(|e| L2dError::Runtime {
+                    detail: e.to_string(),
+                })?;
+                for (id, text) in ids.into_no_null_iter().zip(texts.into_no_null_iter()) {
+                    if marks.is_selected_id(id)? {
+                        out.store_row(id, text)?;
+                    }
+                }
+                Ok(0)
+            })?;
+            marks.require_store(&store, &mut budget)?;
+            if generation != store.read_generation()? {
+                return Err(L2dError::Refused {
+                    reason: "store changed during mark preview".into(),
+                });
+            }
+            let saved = save(args, &marks, &paths, &budget)?;
+            Ok(saved)
+        })();
+        let saved = match completed {
+            Ok(v) => v,
+            Err(e) => {
+                out.cut_off()?;
+                return Err(e);
+            }
+        };
+        let memory = context.memory_report(&budget, vec![]);
+        return out.finish(
+            &marks,
+            saved.as_deref(),
+            &serde_json::json!({"source":marks.source(),"stored_rows":rows,"batches":observed}),
+            &memory,
+        );
+    }
     if let Some(path) = common::archive_input(&paths, &args.input)? {
         return archive(
             context,
@@ -139,7 +211,7 @@ fn save(
 ) -> Result<Option<std::path::PathBuf>, L2dError> {
     args.name
         .as_ref()
-        .map(|_| marks.save(paths, budget))
+        .map(|_| marks.save_initial(paths, budget))
         .transpose()
 }
 
@@ -297,6 +369,18 @@ impl<W: Write> MarkOut<W> {
                 ),
                 _ => writeln!(out, "{}  {}", row.first_position, shown_text(row.text, 120)),
             },
+        }
+        .map_err(output_failed)
+    }
+    fn store_row(&mut self, id: &str, text: &str) -> Result<(), L2dError> {
+        #[derive(Serialize)]
+        struct StoreMatch<'a> {
+            id: &'a str,
+            text: &'a str,
+        }
+        match self {
+            Self::Json(out) => out.element(&StoreMatch { id, text }),
+            Self::Text(out) => writeln!(out, "{}  {}", id, shown_text(text, 120)),
         }
         .map_err(output_failed)
     }

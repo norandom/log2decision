@@ -564,7 +564,7 @@ fn entries_at_once(text: &str) -> Result<usize, String> {
 }
 
 /// Reads the value of `--max-record-bytes`.
-fn record_bytes(text: &str) -> Result<u64, String> {
+pub(super) fn record_bytes(text: &str) -> Result<u64, String> {
     let bytes = l2d_core::memory::parse_memory_size(text).map_err(|error| match error {
         L2dError::InvalidInput { detail } => detail,
         other => other.to_string(),
@@ -1069,7 +1069,7 @@ impl ScorerReport {
     pub fn of(scorer: &BaselineScorer, directory: &Path) -> Self {
         let settings = scorer.settings();
         Self {
-            kind: l2d_baseline::scorer::SCORER_KIND,
+            kind: scorer.scorer_kind(),
             name: model_name(directory),
             revision: scorer.revision().to_string(),
             directory: directory.to_string_lossy().into_owned(),

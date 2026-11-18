@@ -117,8 +117,17 @@ enum Command {
     /// Fill and query a store
     #[command(subcommand)]
     Store(cmd::store::StoreCommand),
+    /// Group marks by direct distance and optionally de-select groups or individual records
+    Group(cmd::analyst::GroupArgs),
+    /// Propose redactions and explicitly save confirmed rules
+    Redact(cmd::analyst::RedactArgs),
+    /// Fit a character scorer from the analyst's marks
+    #[command(subcommand)]
+    Score(cmd::analyst::ScoreCommand),
+    /// Rank original logs by their squared L2 distance to the k-th neighbour
+    Outliers(cmd::store::Outliers),
     /// Rank logs for review, score down the rest, list what cannot be decided
-    Triage(cmd::triage::TriageArgs),
+    Triage(Box<cmd::triage::TriageArgs>),
     /// Calibrate a fitted scorer on held-out labelled logs
     Calibrate(cmd::calibrate::CalibrateArgs),
     /// Compare two groups of logs for a population shift
@@ -141,14 +150,18 @@ fn dispatch(command: &Command, context: &cmd::common::Context) -> Result<(), L2d
         Command::Mark(args) => cmd::mark::run(context, args),
         Command::Discover(args) => cmd::discover::run(context, args),
         Command::Baseline(sub) => cmd::baseline::run(context, sub),
-        Command::Encoder(sub) => cmd::encoder::run(sub),
-        Command::Store(sub) => cmd::store::run(sub),
+        Command::Encoder(sub) => cmd::encoder::run(context, sub),
+        Command::Store(sub) => cmd::store::run(context, sub),
+        Command::Group(args) => cmd::analyst::group(context, args),
+        Command::Redact(args) => cmd::analyst::redact(context, args),
+        Command::Score(sub) => cmd::analyst::score(context, sub),
+        Command::Outliers(args) => cmd::store::outliers(context, args),
         Command::Triage(args) => cmd::triage::run(context, args),
         Command::Calibrate(args) => cmd::calibrate::run(context, args),
         Command::Shift => cmd::shift::run(),
         Command::Assess => cmd::assess::run(),
         Command::Eval => cmd::eval::run(),
-        Command::Runtime(sub) => cmd::runtime::run(sub),
+        Command::Runtime(sub) => cmd::runtime::run(context, sub),
     }
 }
 
