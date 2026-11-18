@@ -14,6 +14,7 @@ pub mod neighbour_evidence;
 pub mod outlier;
 pub mod policy;
 pub mod scorer;
+pub mod shift;
 pub mod triage;
 
 pub use conformal::{
