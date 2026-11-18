@@ -216,13 +216,141 @@ pub enum MarkQuery {
 /// The input a mark set was made on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkedInput {
-    /// The path the input was read from, as given.
+    /// Stable absolute source location. Legacy artifacts can contain the original spelling.
     pub path: String,
     /// The SHA-256 of the input file (of the archive file for an archive).
     pub content_sha256: String,
     /// For an archive, the entry patterns it was read with (empty: every entry); `None`
     /// for a file.
     pub archive_entries: Option<Vec<String>>,
+    /// Binds reviewed positions to the effective reader interpretation. Older files
+    /// still deserialize, but need a new review before their positions can be used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation: Option<InputInterpretation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputInterpretation {
+    FileRowsV1 { sha256: String },
+    ArchiveLinesV1 { max_record_bytes: u64 },
+}
+
+impl InputInterpretation {
+    /// Hash the ordered frame without duplicating log text, including endpoint keys,
+    /// omissions versus empty strings, and counts after deduplication.
+    pub fn file(logs: &LogsFrame, budget: &MemoryBudget) -> Result<Self, L2dError> {
+        use sha2::{Digest, Sha256};
+        fn field(hash: &mut Sha256, value: &str) {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        let frame = logs.frame();
+        let strings = |name| {
+            frame
+                .column(name)
+                .expect("checked frame")
+                .str()
+                .expect("string")
+        };
+        let texts = strings(LogsFrame::TEXT);
+        let labels = strings(LogsFrame::LABEL);
+        let groups = strings(LogsFrame::GROUP);
+        let positions = frame
+            .column(LogsFrame::FIRST_POSITION)
+            .expect("checked frame")
+            .u64()
+            .expect("position");
+        let occurrences = frame
+            .column(LogsFrame::OCCURRENCES)
+            .expect("checked frame")
+            .u32()
+            .expect("occurrences");
+        let mut hash = Sha256::new();
+        hash.update(b"l2d-file-rows-v1");
+        let mut add = |i| {
+            let pos = positions.get(i).expect("non-null position");
+            hash.update(pos.to_le_bytes());
+            hash.update(occurrences.get(i).expect("non-null count").to_le_bytes());
+            field(&mut hash, texts.get(i).expect("non-null text"));
+            field(&mut hash, labels.get(i).expect("non-null label"));
+            let group = groups.get(i);
+            hash.update([u8::from(group.is_some())]);
+            if let Some(group) = group {
+                field(&mut hash, group);
+            }
+        };
+        // Input adapters emit first-position order. Discovery can also present the
+        // same rows in another order. Only that case needs an index reservation.
+        if positions.into_no_null_iter().is_sorted() {
+            (0..logs.len()).for_each(&mut add);
+        } else {
+            let bytes = (logs.len() as u64).saturating_mul(std::mem::size_of::<usize>() as u64);
+            budget.require_whole(bytes, "ordering original positions for the history digest")?;
+            let mut indices: Vec<_> = (0..logs.len()).collect();
+            indices.sort_unstable_by_key(|i| positions.get(*i).expect("non-null position"));
+            indices.into_iter().for_each(add);
+        }
+        Ok(Self::FileRowsV1 {
+            sha256: format!("{:x}", hash.finalize()),
+        })
+    }
+    pub fn archive(settings: &ZipInputSettings) -> Self {
+        Self::ArchiveLinesV1 {
+            max_record_bytes: settings.max_record_bytes,
+        }
+    }
+}
+
+impl MarkedInput {
+    /// Physical inputs use the resolved filesystem location. Library callers also
+    /// mark materialized frames whose supplied source name has no backing file.
+    /// Anchor those names now; reopening still requires the original bytes and rows.
+    pub(crate) fn source_location(path: &Path) -> Result<String, L2dError> {
+        let location = match fs::canonicalize(path) {
+            Ok(physical) => physical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::path::absolute(path).map_err(|e| io_failure("resolving", path, &e))?
+            }
+            Err(error) => return Err(io_failure("resolving", path, &error)),
+        };
+        location
+            .into_os_string()
+            .into_string()
+            .map_err(|_| L2dError::Refused {
+                reason: format!(
+                    "the source location {} cannot be recorded losslessly in JSON",
+                    path.display()
+                ),
+            })
+    }
+
+    /// An older relative reference has no saved base and cannot establish which
+    /// physical source the analyst used.
+    pub fn saved_location(&self) -> Result<&Path, L2dError> {
+        let path = Path::new(&self.path);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        Err(L2dError::Refused {
+            reason: format!(
+                "the saved source {} is relative and has no recorded working directory; repeat the search or mark under a new name",
+                path.display()
+            ),
+        })
+    }
+
+    pub fn require_interpretation(&self, actual: &InputInterpretation) -> Result<(), L2dError> {
+        if self.interpretation.as_ref() == Some(actual) {
+            return Ok(());
+        }
+        Err(L2dError::Refused {
+            reason: format!(
+                "the saved mark source {} has a different or unverified input interpretation; read it as originally reviewed, or mark it again under a new name",
+                self.path
+            ),
+        })
+    }
 }
 
 /// The store a mark set was made on.
@@ -240,6 +368,30 @@ pub struct MarkedStore {
 pub enum MarkedSource {
     Input(MarkedInput),
     Store(MarkedStore),
+}
+
+impl MarkedSource {
+    /// Pair unmodified legacy absolute spellings with newly resolved paths only
+    /// when the file, reader interpretation and original bytes all agree.
+    pub fn same_history(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+        let (Self::Input(a), Self::Input(b)) = (self, other) else {
+            return false;
+        };
+        if a.content_sha256 != b.content_sha256
+            || a.archive_entries != b.archive_entries
+            || a.interpretation.is_none()
+            || a.interpretation != b.interpretation
+        {
+            return false;
+        }
+        let (Ok(first), Ok(second)) = (a.saved_location(), b.saved_location()) else {
+            return false;
+        };
+        matches!((first.canonicalize(),second.canonicalize()),(Ok(x),Ok(y)) if x==y)
+    }
 }
 
 /// How a redaction rule finds what it replaces (task 1.22).
@@ -406,6 +558,7 @@ impl MarkSet {
     ) -> Result<Self, L2dError> {
         check_name(name)?;
         check_label(label)?;
+        let interpretation = InputInterpretation::file(logs, budget)?;
         let fixed = Matcher::check(&query)?;
         let left = budget.left_bytes();
         if fixed > left {
@@ -426,9 +579,10 @@ impl MarkSet {
             label,
             query,
             MarkedInput {
-                path: summary.source_path.to_string_lossy().into_owned(),
+                path: MarkedInput::source_location(&summary.source_path)?,
                 content_sha256: summary.content_sha256.clone(),
                 archive_entries: None,
+                interpretation: Some(interpretation),
             },
             positions,
         ))
@@ -531,9 +685,10 @@ impl MarkSet {
             label,
             query,
             MarkedInput {
-                path: path.to_string_lossy().into_owned(),
+                path: MarkedInput::source_location(path)?,
                 content_sha256: summary.input.content_sha256.clone(),
                 archive_entries: Some(settings.entries.clone()),
+                interpretation: Some(InputInterpretation::archive(settings)),
             },
             positions,
         );
@@ -915,6 +1070,45 @@ impl MarkSet {
         Ok(())
     }
 
+    /// Verify original bytes and the effective position/text/group/count mapping.
+    pub fn require_file(
+        &self,
+        summary: &InputSummary,
+        logs: &LogsFrame,
+        budget: &MemoryBudget,
+    ) -> Result<(), L2dError> {
+        self.require_input(summary, None)?;
+        self.input()
+            .expect("validated input")
+            .require_interpretation(&InputInterpretation::file(logs,budget)?)
+            .map_err(|error| {
+                let present = logs.frame()
+                    .column(LogsFrame::FIRST_POSITION).expect("checked frame")
+                    .u64().expect("position")
+                    .into_no_null_iter()
+                    .filter(|pos| self.is_selected(*pos))
+                    .count();
+                L2dError::Refused {
+                    reason: format!(
+                        "could not verify {} marked logs in `{}`: {present} selected positions present; {error}",
+                        self.selected_count(), self.name()
+                    )
+                }
+            })
+    }
+
+    /// The archive bytes, entry patterns and line limit determine the history.
+    pub fn require_archive(
+        &self,
+        summary: &InputSummary,
+        settings: &ZipInputSettings,
+    ) -> Result<(), L2dError> {
+        self.require_input(summary, Some(&settings.entries))?;
+        self.input()
+            .expect("validated input")
+            .require_interpretation(&InputInterpretation::archive(settings))
+    }
+
     /// Checks that `summary` is of the input the mark set was made on, read the same
     /// way: the same content hash, and for an archive the same entry patterns
     /// (`archive_entries`: the patterns it is read with now, `None` for a file).
@@ -1097,6 +1291,25 @@ impl MarkSet {
     /// refused with the figures when it does not fit what `budget` leaves, and nothing
     /// is written then.
     pub fn save(&self, paths: &ProjectPaths, budget: &MemoryBudget) -> Result<PathBuf, L2dError> {
+        self.write_marks(paths, budget, false)
+    }
+
+    /// Publish a fresh query. Existing identical bytes can be reused. Analyst
+    /// decisions can only be replaced through an explicit refinement operation.
+    pub fn save_initial(
+        &self,
+        paths: &ProjectPaths,
+        budget: &MemoryBudget,
+    ) -> Result<PathBuf, L2dError> {
+        self.write_marks(paths, budget, true)
+    }
+
+    fn write_marks(
+        &self,
+        paths: &ProjectPaths,
+        budget: &MemoryBudget,
+        initial: bool,
+    ) -> Result<PathBuf, L2dError> {
         check_name(&self.name)?;
         let dir = paths.marks_dir();
         let path = paths.mark_set_path(&self.name);
@@ -1105,7 +1318,19 @@ impl MarkSet {
             if metadata.len() < (64 * 1024 / MARKED_ID_BYTES) * 67 {
                 budget.require_whole(metadata.len().saturating_mul(LOAD_FACTOR), &operation)?;
             }
-            let same = Self::load(paths, &self.name, budget)?.same_marks(self)?;
+            let existing = Self::load(paths, &self.name, budget)?;
+            let same = existing.same_marks(self)?;
+            if initial && same {
+                if existing.same_refinements(self)? {
+                    return Ok(path);
+                }
+                return Err(L2dError::Refused {
+                    reason: format!(
+                        "the named mark set {} has saved refinements; use it as saved or choose a new name",
+                        self.name
+                    ),
+                });
+            }
             if !same {
                 return Err(L2dError::Refused {
                     reason: format!(
@@ -1144,7 +1369,15 @@ impl MarkSet {
                 .map_err(|error| io_failure("writing", &temporary, &error))
         };
         let written = write().and_then(|()| {
-            fs::rename(&temporary, &path).map_err(|error| io_failure("completing", &path, &error))
+            if initial {
+                fs::hard_link(&temporary, &path)
+                    .map_err(|error| io_failure("publishing initial marks", &path, &error))?;
+                fs::remove_file(&temporary)
+                    .map_err(|error| io_failure("removing temporary marks", &temporary, &error))
+            } else {
+                fs::rename(&temporary, &path)
+                    .map_err(|error| io_failure("completing", &path, &error))
+            }
         });
         if written.is_err() {
             // Best effort: the failure itself is what the caller has to see.
@@ -1259,8 +1492,10 @@ impl MarkSet {
 
     /// Full equality with disk errors propagated, including de-selections and rules.
     pub fn try_eq(&self, other: &Self) -> Result<bool, L2dError> {
-        Ok(self.same_marks(other)?
-            && self.deselected == other.deselected
+        Ok(self.same_marks(other)? && self.same_refinements(other)?)
+    }
+    fn same_refinements(&self, other: &Self) -> Result<bool, L2dError> {
+        Ok(self.deselected == other.deselected
             && self.deselected_ids.equals(&other.deselected_ids)?
             && self.redactions == other.redactions)
     }

@@ -37,6 +37,10 @@ pub trait ExplorationEncoder {
     }
     fn unsupported_reason(&self) -> &str;
     fn scratch_bytes(&self) -> u64;
+    /// Hardware telemetry is available only on the actual encoder route.
+    fn encoding_run(&self) -> Option<l2d_core::RunRecord> {
+        None
+    }
 }
 pub enum Representation {
     Vector(Vec<f32>),
@@ -108,6 +112,9 @@ impl DirectExemplar {
     }
 }
 impl ExplorationEncoder for l2d_encoder::hierarchy::HierarchicalSession {
+    fn encoding_run(&self) -> Option<l2d_core::RunRecord> {
+        Some(self.observed_run())
+    }
     fn profile(&self) -> &str {
         l2d_encoder::hierarchy::PROFILE
     }

@@ -740,7 +740,7 @@ fn fit(
                 ),
             });
         }
-        if other.source() != marks.source() {
+        if !other.source().same_history(marks.source()) {
             let describe = |source: &MarkedSource| match source {
                 MarkedSource::Input(input) => {
                     format!(
@@ -767,7 +767,7 @@ fn fit(
         }
     }
     match input {
-        RedactionInput::File { summary, .. } => marks.require_input(summary, None)?,
+        RedactionInput::File { summary, logs } => marks.require_file(summary, logs, budget)?,
         RedactionInput::Store(store) => marks.require_store(*store, budget)?,
         RedactionInput::Archive { .. } => {}
     }

@@ -1222,7 +1222,7 @@ pub(crate) fn runtime(dll: &Path) -> Result<(Environment, f64), EncoderError> {
 }
 
 /// `time` as `YYYY-MM-DDTHH:MM:SSZ` (UTC, proleptic Gregorian calendar).
-fn utc_timestamp(time: SystemTime) -> String {
+pub(crate) fn utc_timestamp(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())

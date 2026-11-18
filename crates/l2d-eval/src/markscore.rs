@@ -100,7 +100,7 @@ impl HeldOutSettings {
 }
 
 /// One fold of the report.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HeldOutFold {
     pub fold: usize,
     /// The group keys the fold holds out, and the SHA-256 of their list (as
@@ -119,7 +119,7 @@ pub struct HeldOutFold {
 }
 
 /// The held-out-group report (16.9).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HeldOutReport {
     /// The group key, as named by the fit.
     pub group_key: String,
@@ -188,6 +188,16 @@ pub fn held_out_report(
     settings: &HeldOutSettings,
     budget: &mut MemoryBudget,
 ) -> Result<Option<HeldOutReport>, L2dError> {
+    held_out_report_with_group_key(fit, settings, &fit.group_key.name(), budget)
+}
+
+/// Evaluate a frame whose endpoint keys have already been resolved by the caller.
+pub fn held_out_report_with_group_key(
+    fit: &MarkFit,
+    settings: &HeldOutSettings,
+    group_key: &str,
+    budget: &mut MemoryBudget,
+) -> Result<Option<HeldOutReport>, L2dError> {
     let guard = l2d_core::resource::ResourceGuard::tracked(
         "held-out fold evaluation",
         l2d_core::resource::busy_choice(),
@@ -205,7 +215,7 @@ pub fn held_out_report(
         return Ok(None);
     }
     let before = budget.held_bytes();
-    let report = report(fit, settings, budget, before);
+    let report = report(fit, settings, budget, before, group_key);
     budget.hold(before);
     guard.finish()?;
     report.map(Some)
@@ -256,6 +266,7 @@ fn report(
     settings: &HeldOutSettings,
     budget: &mut MemoryBudget,
     before: u64,
+    group_key: &str,
 ) -> Result<HeldOutReport, L2dError> {
     let workspace = report_workspace(fit, settings);
     budget.require_whole(workspace, "the held-out-group report workspace")?;
@@ -372,7 +383,6 @@ fn report(
         (Some(fitted), Some(held)) => Some(fitted - held),
         _ => None,
     };
-    let group_key = fit.group_key.name();
     let warning = difference
         .filter(|difference| *difference > settings.margin)
         .map(|difference| {
@@ -387,7 +397,7 @@ fn report(
             )
         });
     Ok(HeldOutReport {
-        group_key,
+        group_key: group_key.to_owned(),
         groups,
         logs: data.len() as u64,
         fold_rule: FOLD_RULE,

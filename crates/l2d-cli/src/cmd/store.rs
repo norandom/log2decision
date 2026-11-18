@@ -1,21 +1,41 @@
-//! `l2d store`: fill and query a store.
-
-use clap::Subcommand;
+//! Store fills and external distance queries use the identical pinned encoder adapter.
+use super::common::Context;
+use super::encoder::{EncodeArgs, Operation, encoded};
+use clap::{Args, Subcommand};
 use l2d_core::L2dError;
 
-/// The operations below `l2d store`.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, Args)]
+pub struct StoreInput {
+    #[arg(long)]
+    pub store: String,
+    #[command(flatten)]
+    pub encode: EncodeArgs,
+}
+#[derive(Debug, Clone, Args)]
+pub struct Outliers {
+    #[command(flatten)]
+    pub input: StoreInput,
+    /// Rank by distance to the k-th nearest eligible stored record
+    #[arg(long)]
+    pub k: Option<usize>,
+}
+#[derive(Debug, Clone, Subcommand)]
 pub enum StoreCommand {
-    /// Add logs and their vectors to a store
-    Add,
+    /// Add the original records and their NPU vectors in one transaction
+    Add(Box<StoreInput>),
     /// Search a store by vector, text or metadata
     Search,
 }
-
-/// Runs one `l2d store` operation.
-pub fn run(command: &StoreCommand) -> Result<(), L2dError> {
+pub fn run(context: &Context, command: &StoreCommand) -> Result<(), L2dError> {
     match command {
-        StoreCommand::Add => Err(super::not_implemented("store add")),
+        StoreCommand::Add(args) => encoded(context, &args.encode, Operation::StoreAdd(&args.store)),
         StoreCommand::Search => Err(super::not_implemented("store search")),
     }
+}
+pub fn outliers(context: &Context, args: &Outliers) -> Result<(), L2dError> {
+    encoded(
+        context,
+        &args.input.encode,
+        Operation::Outliers(&args.input.store, args.k),
+    )
 }

@@ -422,7 +422,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - Reuse the exploration of 2.19; this task owns the production close-enough decision and mark-set bridge, not a second clustering engine. Measure endpoint-template bias and route unsupported cases to review; no unreviewed background is described as verified good evidence.
   - _Depends: 1.9, 1.23, 2.7, 2.18, 2.19_
   - _Requirements: 16.2, 16.3, 16.10, 16.11, 6.2, 6.3, 6.7, 6.8, 14.13_
-- [ ] 2.9 Wire NPU & Encoder CLI commands
+- [x] 2.9 Wire NPU & Encoder CLI commands
   - Final integration also wires policy triage and score/redaction qualification artifacts after 2.20. Discovery commands are already delivered by 1.28; vector exploration by 2.19. Feedback commands belong to 2.21.
   - _Depends: 2.20_
   - _Requirements added: 18.1 to 18.6, 20.1 to 20.5, 20.7_

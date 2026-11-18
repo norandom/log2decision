@@ -114,7 +114,7 @@ impl PatternRefinement {
     /// Revalidate the original bytes, including the complete archive and its saved scope.
     pub fn require_current_input(&self) -> Result<(), L2dError> {
         match &self.catalogue.source {
-            MarkedSource::Input(s) if hash_file(Path::new(&s.path))? == s.content_sha256 => Ok(()),
+            MarkedSource::Input(s) if hash_file(s.saved_location()?)? == s.content_sha256 => Ok(()),
             _ => Err(fail(
                 "discovery input changed or is not a file/archive; search again",
             )),

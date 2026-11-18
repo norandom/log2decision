@@ -17,7 +17,7 @@ pub(super) struct StoreBatchReport {
     pub sizing: &'static str,
 }
 impl StoreBatchReport {
-    fn new(operation: &'static str, limit: u64) -> Self {
+    pub(super) fn new(operation: &'static str, limit: u64) -> Self {
         Self {
             operation,
             configured_max_rows: limit,
@@ -25,7 +25,7 @@ impl StoreBatchReport {
             ..Default::default()
         }
     }
-    fn note(&mut self, rows: u64) {
+    pub(super) fn note(&mut self, rows: u64) {
         self.batches += 1;
         self.rows += rows;
         self.min_delivered_rows = Some(self.min_delivered_rows.map_or(rows, |n| n.min(rows)));

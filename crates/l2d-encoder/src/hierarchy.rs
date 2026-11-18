@@ -50,6 +50,41 @@ const FILES: [(&str, u64, &str); 5] = [
         "0db323de50bda05e6ee7feb07be2425d371d414ae9ec736d34488a3e62c034a1",
     ),
 ];
+pub fn identity() -> l2d_core::EncoderIdentity {
+    let mut hash = Sha256::new();
+    hash.update(b"l2d-pinned-hierarchical-original-v1\0");
+    hash.update(PROFILE);
+    for (name, length, digest) in FILES {
+        hash.update(name);
+        hash.update(length.to_le_bytes());
+        hash.update(digest);
+    }
+    l2d_core::EncoderIdentity {
+        name: "f0-s0-mask".into(),
+        revision: format!("{:x}", hash.finalize()),
+        dimension: 128,
+    }
+}
+
+/// Observations about the original as accepted or refused by this fixed no-cut codec.
+#[derive(serde::Serialize, Clone, Copy)]
+pub struct OriginalFlags {
+    pub truncated: bool,
+    pub text_longer_than_input: bool,
+    pub empty: bool,
+}
+impl OriginalFlags {
+    pub fn of(text: &str) -> Self {
+        Self {
+            truncated: false,
+            text_longer_than_input: text.len() > MAX_BYTES,
+            empty: text.is_empty(),
+        }
+    }
+    pub fn supported(self) -> bool {
+        !self.text_longer_than_input && !self.empty
+    }
+}
 fn fail(e: impl std::fmt::Display) -> L2dError {
     L2dError::Refused {
         reason: format!(
@@ -62,7 +97,17 @@ pub fn verify_profile(directory: &Path, budget: &MemoryBudget) -> Result<(), L2d
     budget.require_whole(4 * 1024 * 1024, "verify pinned hierarchical package")?;
     for (name, length, hash) in FILES {
         let path = directory.join(name);
-        if fs::metadata(&path).map_err(fail)?.len() != length {
+        let metadata = fs::metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                L2dError::Missing {
+                    item: format!("pinned encoder artifact {name}"),
+                    expected_at: path.clone(),
+                }
+            } else {
+                fail(format!("{}: {error}", path.display()))
+            }
+        })?;
+        if metadata.len() != length {
             return Err(fail(format!(
                 "incompatible {name}: expected {length} bytes for {PROFILE}"
             )));
@@ -77,7 +122,18 @@ pub fn verify_profile(directory: &Path, budget: &MemoryBudget) -> Result<(), L2d
     }
     Ok(())
 }
+/// Placement counts and first-execution operators read from the actual provider reports.
+#[derive(serde::Serialize)]
+pub struct GraphEvidence {
+    pub graph: String,
+    pub npu_nodes: u32,
+    pub cpu_boundary_nodes: u32,
+    pub all_nodes: u32,
+    pub executed_on_provider: Vec<String>,
+    pub executed_elsewhere: Vec<(String, String)>,
+}
 struct Graph {
+    evidence: GraphEvidence,
     session: Session,
     input: String,
     dims: Vec<i64>,
@@ -158,6 +214,14 @@ fn graph(
         ));
     }
     Ok(Graph {
+        evidence: GraphEvidence {
+            graph: name.to_owned(),
+            npu_nodes: placement.npu_nodes,
+            cpu_boundary_nodes: placement.cpu_nodes,
+            all_nodes: placement.all_nodes,
+            executed_on_provider: executed.on_provider,
+            executed_elsewhere: executed.elsewhere,
+        },
         session,
         input: input.name.clone(),
         dims: input.shape.clone(),
@@ -171,6 +235,12 @@ pub struct HierarchicalSession {
     exp: Vec<[f64; 2]>,
     image: Vec<f32>,
     patches: Vec<f32>,
+    started_utc: String,
+    started: std::time::Instant,
+    encoded: u64,
+    encoding_time: std::time::Duration,
+    driver_version: String,
+    runtime_release: String,
     _guard: ResourceGuard,
 }
 impl HierarchicalSession {
@@ -185,6 +255,8 @@ impl HierarchicalSession {
             "hierarchical NPU session including estimated native provider peak",
         )?;
         verify_profile(directory, budget)?;
+        let started = std::time::Instant::now();
+        let started_utc = session::utc_timestamp(std::time::SystemTime::now());
         let guard = ResourceGuard::npu("stable hierarchical retrieval encoder", busy_choice())?;
         let files = RuntimeFiles::check(runtime_dir, CheckDepth::Fast)?;
         let npu = NpuStatus::query()?;
@@ -236,14 +308,71 @@ impl HierarchicalSession {
             exp,
             image: vec![0.; 64 * 16 * 1024],
             patches: vec![0.; 96 * 64 * 128],
+            started_utc,
+            started,
+            encoded: 0,
+            encoding_time: std::time::Duration::ZERO,
+            runtime_release: files.release,
+            driver_version: npu.driver_version().unwrap_or_default().into(),
             _guard: guard,
         })
     }
+    pub fn placement(&self) -> [&GraphEvidence; 2] {
+        [&self.byte.evidence, &self.line.evidence]
+    }
+    pub fn run_record(
+        &self,
+        input: l2d_core::InputSummary,
+        count: u64,
+        encoding: std::time::Duration,
+        duration: std::time::Duration,
+    ) -> l2d_core::RunRecord {
+        self.record(vec![input], count, encoding, duration)
+    }
+    /// Include every completed original encoding across the method adapter's calls.
+    pub fn observed_run(&self) -> l2d_core::RunRecord {
+        self.record(
+            Vec::new(),
+            self.encoded,
+            self.encoding_time,
+            self.started.elapsed(),
+        )
+    }
+    fn record(
+        &self,
+        inputs: Vec<l2d_core::InputSummary>,
+        count: u64,
+        encoding: std::time::Duration,
+        duration: std::time::Duration,
+    ) -> l2d_core::RunRecord {
+        use l2d_core::{Device, Placement, PlacementSource, RunKind, RunRecord};
+        let evidence = self.placement();
+        RunRecord {
+            kind: RunKind::Encode,
+            started_utc: self.started_utc.clone(),
+            duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            inputs,
+            settings: serde_json::json!({"profile":PROFILE,"runtime_release":self.runtime_release,
+                "graph_placement":evidence,"input_bytes":MAX_BYTES,"normalization":"raw pooled f32 outputs; cosine normalizes during comparison",
+                "encoded":count,"encoding_seconds":encoding.as_secs_f64()}),
+            seed: None,
+            encoder: Some(identity()),
+            device: Some(Device::Npu),
+            driver_version: Some(self.driver_version.clone()),
+            logs_per_second: (!encoding.is_zero()).then(|| count as f64 / encoding.as_secs_f64()),
+            placement: Some(Placement {
+                npu_nodes: evidence.iter().map(|g| g.npu_nodes).sum(),
+                cpu_nodes: evidence.iter().map(|g| g.cpu_boundary_nodes).sum(),
+                source: PlacementSource::ProviderReport,
+            }),
+        }
+    }
     /// One original in row zero; other rows are zero. No input cutting or text masks.
     pub fn encode(&mut self, text: &str) -> Result<Option<Vec<f32>>, L2dError> {
-        if text.is_empty() || text.len() > MAX_BYTES {
+        if !OriginalFlags::of(text).supported() {
             return Ok(None);
         }
+        let start = std::time::Instant::now();
         self.image.fill(0.);
         self.patches.fill(0.);
         for (t, byte) in text.bytes().enumerate() {
@@ -315,6 +444,8 @@ impl HierarchicalSession {
                     / count as f64) as f32
             })
             .collect();
+        self.encoded += 1;
+        self.encoding_time += start.elapsed();
         Ok(Some(v))
     }
 }

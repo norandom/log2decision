@@ -207,7 +207,7 @@ pub(crate) fn rows_bytes(records: &[LogRecord], groups: &[String]) -> u64 {
 }
 
 /// Counts and ranking figures of a set of logs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Block {
     pub logs: u64,
     pub good: u64,

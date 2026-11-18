@@ -143,7 +143,10 @@ fn phrase_regex_and_positions_mark_the_expected_logs_on_the_fixture() {
     );
     let input = phrase.input().expect("a mark set of an input");
     assert_eq!(input.content_sha256, summary.content_sha256);
-    assert_eq!(input.path, fixture_path().to_string_lossy());
+    assert_eq!(
+        Path::new(&input.path),
+        fixture_path().canonicalize().unwrap()
+    );
     assert_eq!(input.archive_entries, None);
     assert!(phrase.store().is_none());
     assert!(phrase.ids(&budget).unwrap().is_empty());

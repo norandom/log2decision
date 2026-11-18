@@ -1153,6 +1153,7 @@ dependencies = [
  "l2d-baseline",
  "l2d-core",
  "l2d-decide",
+ "serde",
  "serde_json",
  "sha2",
 ]

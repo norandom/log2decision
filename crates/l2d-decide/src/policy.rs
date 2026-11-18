@@ -193,6 +193,10 @@ pub struct AllocationCounts {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PolicyReport {
     pub format: u32,
+    /// Query snapshot supplied by a file/archive adapter. Library callers may supply
+    /// independent original IDs without a file. Earlier reports omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_source: Option<l2d_core::MarkedInput>,
     pub policy: TriagePolicy,
     pub eligibility: String,
     pub allocation_rule: String,
@@ -447,6 +451,7 @@ pub fn triage_policy<'a>(
         }
         Ok(PolicyReport {
             format: 1,
+            query_source: None,
             policy: policy.clone(),
             eligibility: ELIGIBILITY.into(),
             allocation_rule: ALLOCATION.into(),

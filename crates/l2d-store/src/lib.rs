@@ -737,6 +737,57 @@ impl Store {
         }
     }
 
+    /// Fill a new database privately and publish the completed SQLite file without
+    /// replacing a destination that another writer may have created in the meantime.
+    pub fn create_with_rows(
+        paths: &ProjectPaths,
+        name: &str,
+        origin: VectorOrigin<'_>,
+        rows: &DataFrame,
+        budget: &mut MemoryBudget,
+    ) -> Result<AddReport, StoreError> {
+        validate_name(name)?;
+        let directory = paths.stores_dir();
+        fs::create_dir_all(&directory)
+            .map_err(|e| failed("creating store directory", &directory, e))?;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stage = loop {
+            let candidate = directory.join(format!(
+                ".fill-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(failed("creating private store stage", &candidate, e)),
+            }
+        };
+        let private = ProjectPaths::new(&stage);
+        let db = private.store_path(name);
+        let destination = paths.store_path(name);
+        let result = (|| {
+            let mut store = Self::create(&private, name, origin)?;
+            let report = store.add_with(rows, origin, budget)?;
+            drop(store);
+            fs::hard_link(&db, &destination).map_err(|e| {
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    StoreError::Exists {
+                        name: name.into(),
+                        at: destination.clone(),
+                    }
+                } else {
+                    failed("publishing completed store", &destination, e)
+                }
+            })?;
+            Ok(report)
+        })();
+        let _ = fs::remove_file(db);
+        let _ = fs::remove_dir(private.stores_dir());
+        let _ = fs::remove_dir(stage);
+        result
+    }
+
     /// Opens the store `name`.
     ///
     /// A file that is not there is [`StoreError::Missing`], naming the store and where

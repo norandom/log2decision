@@ -1,14 +1,13 @@
 //! First discovery workflow. Every write creates a new artifact; no inferred labels.
 use super::common::{self, ArchiveArgs, AtOnceDefault, Context, InputArgs};
+
 use clap::{Args, Subcommand, ValueEnum};
 use l2d_core::patterns::refinement::{PatternRefinement, Priority, QueryPreview};
 use l2d_core::patterns::{PatternCatalogue, PatternSettings};
 use l2d_core::selections::{ReviewAction, ReviewState, SearchQuery, SearchSettings, SelectionSet};
 use l2d_core::{L2dError, Label, MarkedSource, MemoryBudget, ProjectPaths};
-use serde::ser::{SerializeMap, Serializer};
 use std::{
     fs,
-    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -255,61 +254,13 @@ fn failed(e: impl std::fmt::Display) -> L2dError {
     }
 }
 fn output(context: &Context, b: &MemoryBudget, value: &serde_json::Value) -> Result<(), L2dError> {
-    let mut out = io::BufWriter::new(io::stdout().lock());
-    let memory = context.memory_report(b, Vec::new());
-    if context.json {
-        let fields = value
-            .as_object()
-            .ok_or_else(|| failed("result must be an object"))?;
-        let extra = usize::from(!fields.contains_key("memory"));
-        let mut serializer = serde_json::Serializer::new(&mut out);
-        let mut map = serializer
-            .serialize_map(Some(fields.len() + extra))
-            .map_err(failed)?;
-        for (key, value) in fields {
-            map.serialize_entry(key, value).map_err(failed)?;
-        }
-        if extra != 0 {
-            map.serialize_entry("memory", &memory).map_err(failed)?;
-        }
-        map.end().map_err(failed)?;
-    } else {
-        human(&mut out, value, 0).map_err(failed)?;
-        if value.get("memory").is_none() {
-            writeln!(out, "memory:").map_err(failed)?;
-            human(&mut out, &serde_json::to_value(&memory).map_err(failed)?, 2).map_err(failed)?;
-        }
-    }
-    writeln!(out).map_err(failed)?;
-    out.flush().map_err(failed)
-}
-fn human(out: &mut impl Write, value: &serde_json::Value, indent: usize) -> io::Result<()> {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (name, value) in fields {
-                write!(out, "{:indent$}{name}: ", "")?;
-                if value.is_array() || value.is_object() {
-                    writeln!(out)?;
-                }
-                human(out, value, indent + 2)?;
-            }
-        }
-        serde_json::Value::Array(rows) => {
-            if rows.is_empty() {
-                writeln!(out, "{:indent$}(none)", "")?;
-            }
-            for row in rows {
-                writeln!(out, "{:indent$}-", "")?;
-                human(out, row, indent + 2)?;
-            }
-        }
-        serde_json::Value::String(s) => writeln!(out, "{}", crate::output::shown_text(s, s.len()))?,
-        other => writeln!(out, "{other}")?,
-    }
-    Ok(())
+    crate::output::report_with_text_limit(context, b, value, usize::MAX)
 }
 /// Directory publication makes review/export bundles indivisible.
-fn bundle<T>(out: &Path, build: impl FnOnce(&Path) -> Result<T, L2dError>) -> Result<T, L2dError> {
+pub(super) fn bundle<T>(
+    out: &Path,
+    build: impl FnOnce(&Path) -> Result<T, L2dError>,
+) -> Result<T, L2dError> {
     if out.exists() {
         return Err(failed(
             "output already exists; choose a new revision destination",

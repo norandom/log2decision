@@ -122,6 +122,7 @@ fn fixture(name: &str, rows: &[(&str, usize, u64)]) -> PatternRefinement {
             path: format!("{name}.log"),
             content_sha256: name.repeat(64),
             archive_entries: None,
+            interpretation: None,
         }),
         source_data_revision: None,
         completeness: Completeness {
