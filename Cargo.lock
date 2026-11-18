@@ -1058,6 +1058,7 @@ dependencies = [
 name = "l2d-assess"
 version = "0.1.0"
 dependencies = [
+ "faer",
  "l2d-baseline",
  "l2d-core",
  "l2d-store",
