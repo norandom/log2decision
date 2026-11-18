@@ -507,7 +507,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
 
 ## Milestone 3: Vector Assessment & Comprehensive Evaluation
 
-- [ ] 3.1 Kernel MMD population shift test
+- [x] 3.1 Kernel MMD population shift test
   - Implement RBF MMD two-sample test in `l2d-decide` (`shift.rs`) with median-distance bandwidth and seeded permutations
   - Refuse groups with fewer than 30 logs; subsample groups > 2,000 using seed
   - Done when identical groups yield $p > 0.05$, shifted groups yield $p < 0.01$, seed reproduces exact result, and 29-log group is refused
