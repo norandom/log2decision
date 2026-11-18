@@ -1,5 +1,6 @@
 //! Shared measurements for vector representations of logs.
 mod clusters;
+mod compare;
 mod loss;
 mod overlap;
 mod projection;
@@ -7,6 +8,7 @@ mod properties;
 mod separability;
 
 pub use clusters::{ClusterReport, assess_clusters, assess_clusters_with};
+pub use compare::{ComparisonColumn, ComparisonReport, compare, compare_with};
 use l2d_core::{L2dError, Label};
 pub use loss::{LossReport, ShortenedResult, assess_loss, assess_loss_with};
 pub use overlap::{NeighbourOverlap, neighbour_overlap, neighbour_overlap_with};
