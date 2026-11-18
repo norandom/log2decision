@@ -12,3 +12,9 @@ l2d-baseline.workspace = true
 l2d-store.workspace = true
 rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 faer = { workspace = true, features = ["linalg"] }
+csv.workspace = true
+# Use supplied neighbours and seeded initial coordinates, with deterministic Rayon reductions.
+bhtsne = { version = "=0.5.12", default-features = false }
+rayon = "1"
+# Stage chart output alongside its destination for atomic publication.
+tempfile = "3"
