@@ -528,7 +528,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - Done when synthetic dataset with known rank correctly reports variance profile and intrinsic dimension
   - _Requirements: 8.1_
 
-- [ ] 3.4 Measure clustering capability and within-group separability
+- [x] 3.4 Measure clustering capability and within-group separability
   - Implement `assess_clusters`: KMeans silhouette score and separability overall and within groups sharing a key
   - Done when well-separated synthetic clusters give silhouette > 0.5, and within-group separability evaluates on valid groups
   - _Boundary: ClusterAssessment_

@@ -37,11 +37,29 @@ pub fn separability_with(
     budget: &MemoryBudget,
 ) -> Result<Option<Separability>, L2dError> {
     set.validate()?;
+    separability_rows(
+        set,
+        0..set.vectors.len(),
+        seed,
+        budget,
+        set.resident_bytes(),
+    )
+}
+
+/// Group assessments borrow original rows in input order. The resident estimate
+/// includes the full input and any index storage retained by the caller.
+pub(crate) fn separability_rows(
+    set: &VectorSet,
+    rows: impl Iterator<Item = usize> + Clone,
+    seed: u64,
+    budget: &MemoryBudget,
+    resident: u64,
+) -> Result<Option<Separability>, L2dError> {
     let Some(labels) = &set.labels else {
         return Ok(None);
     };
-    let good = labels.iter().filter(|&&l| l == Label::Good).count();
-    let bad = labels.iter().filter(|&&l| l == Label::Bad).count();
+    let good = rows.clone().filter(|&i| labels[i] == Label::Good).count();
+    let bad = rows.clone().filter(|&i| labels[i] == Label::Bad).count();
     let folds = 5.min(good).min(bad);
     if folds < 2 {
         return Ok(None);
@@ -51,8 +69,7 @@ pub fn separability_with(
     // fit_dense copies training coordinates into f64. The baseline scorer's
     // conservative L-BFGS estimate is 48 parameter and six row-sized vectors.
     // Include class indices, training references/labels and held-out scores.
-    let bytes = set
-        .resident_bytes()
+    let bytes = resident
         .saturating_add((n as u64).saturating_mul(width.saturating_mul(8).saturating_add(128)))
         .saturating_add((width + 1).saturating_mul(48 * 8))
         .saturating_add(4096);
@@ -61,8 +78,8 @@ pub fn separability_with(
         "vector separability inputs and dense training workspace",
     )?;
     let mut classes = [Vec::with_capacity(good), Vec::with_capacity(bad)];
-    for (i, label) in labels.iter().enumerate() {
-        match label {
+    for i in rows {
+        match labels[i] {
             Label::Good => classes[0].push(i),
             Label::Bad => classes[1].push(i),
             Label::Unknown => {}
