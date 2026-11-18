@@ -1,5 +1,11 @@
 # Handover: npu-log-decision
 
+## Overnight run, 17–18 November
+
+The overnight run integrated tasks 2.20, 2.9 and 3.1–3.6. The final code merge was `7af9416`. The reviewed workspace passed 944 tests with zero failures and 56 ignored. The final CLI passed all 30 real-NPU workflow checks on this workstation. The spec has 53 checked tasks and 10 open. [Commits, evidence and worktrees](overnight/2026-11-18-report.md)
+
+Task 2.22 remains blocked. At 100 reviews per fold, score alone recovered 500 of 15,964 CSIC development positives. The other two workflows lack comparable frozen selections. Independent reviewed outcomes, operational targets and a protected final cohort are missing. Keep 2.21 pending. The 2.22 status report and audit can be resumed from `D:\BuildArtifacts\log2decision\worktrees\task-2.22`. [Qualification evidence and exact replay command](overnight/2026-11-18-report.md#worktrees-and-replay)
+
 ## Current roadmap update — 2026-11-17
 
 Latest owner decision (2026-11-17): exploratory comparison first for the next
