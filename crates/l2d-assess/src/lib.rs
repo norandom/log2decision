@@ -1,8 +1,10 @@
 //! Shared measurements for vector representations of logs.
+mod loss;
 mod overlap;
 mod separability;
 
 use l2d_core::{L2dError, Label};
+pub use loss::{LossReport, ShortenedResult, assess_loss, assess_loss_with};
 pub use overlap::{NeighbourOverlap, neighbour_overlap, neighbour_overlap_with};
 pub use separability::{Separability, separability, separability_with};
 

@@ -2,7 +2,7 @@ use crate::{VectorSet, invalid};
 use l2d_core::{L2dError, MemoryBudget, MemorySettings};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-const SAMPLE_CAP: usize = 5000;
+pub(crate) const SAMPLE_CAP: usize = 5000;
 
 #[derive(Debug, PartialEq)]
 pub struct NeighbourOverlap {
@@ -23,7 +23,7 @@ pub fn neighbour_overlap(
     neighbour_overlap_with(set, reference, k, 0, &budget)
 }
 
-fn sample_indices(total: usize, seed: u64) -> Vec<usize> {
+pub(crate) fn sample_indices(total: usize, seed: u64) -> Vec<usize> {
     let mut sample: Vec<_> = (0..total.min(SAMPLE_CAP)).collect();
     let mut rng = SmallRng::seed_from_u64(seed);
     for i in SAMPLE_CAP..total {

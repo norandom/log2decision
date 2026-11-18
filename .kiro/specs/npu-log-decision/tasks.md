@@ -523,7 +523,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 1.6_
   - _Requirements: 8.2_
 
-- [ ] 3.3 Measure information loss and vector shortening
+- [x] 3.3 Measure information loss and vector shortening
   - Implement `assess_loss`: PCA explained variance, TwoNN intrinsic dimension, and neighbor overlap / separability after shortening vectors
   - Done when synthetic dataset with known rank correctly reports variance profile and intrinsic dimension
   - _Requirements: 8.1_
