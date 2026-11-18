@@ -1061,6 +1061,7 @@ dependencies = [
  "l2d-baseline",
  "l2d-core",
  "l2d-store",
+ "rand 0.9.5",
 ]
 
 [[package]]

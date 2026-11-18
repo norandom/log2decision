@@ -515,7 +515,7 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Depends: 1.1_
   - _Requirements: 7.1, 7.2, 7.3, 7.4_
 
-- [ ] 3.2 Vector set abstraction and shared measures
+- [x] 3.2 Vector set abstraction and shared measures
   - Implement `VectorSet` in `l2d-assess` with optional labels and group keys
   - Implement nearest-neighbor set overlap and cross-validated label separability
   - Done when set overlap with itself is 1.0, with shuffled copy is near 0.0, and separability is near 1.0 for separated clusters
