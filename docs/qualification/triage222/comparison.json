@@ -1,0 +1,489 @@
+{
+  "frozen_decisions_sha256": "3d7c190bfc919403ccbf2694d4090805fcd440695601291354010705fdcbc0c4",
+  "panel": 96,
+  "positive": 69,
+  "positive_beyond_seed": 62,
+  "endpoint_groups": 10,
+  "seed_matches": 7,
+  "score_ranking": {
+    "roc_auc": 0.8132045088566827,
+    "average_precision": 0.9352417398821466
+  },
+  "pattern_matched": 0,
+  "policy_supported": 79,
+  "unsupported_positives": 17,
+  "unsupported_positives_selected": 0,
+  "unsupported_positives_missed": 17,
+  "audit_reviews": 2,
+  "audit_positives": 1,
+  "allocations": {
+    "General": 8,
+    "LowPriorityAudit": 2,
+    "UnknownConflict": 2
+  },
+  "routes": {
+    "LowCorroborated": 61,
+    "Uncertain": 5,
+    "HighCorroborated": 8,
+    "Unsupported": 17,
+    "Disagreement": 5
+  },
+  "comparisons": {
+    "offered_capacity": {
+      "arm": {
+        "score": {
+          "reviewed": 12,
+          "hits": 12,
+          "missed": 57,
+          "precision": 1.0,
+          "recall": 0.17391304347826086,
+          "hits_beyond_seed": 6,
+          "missed_beyond_seed": 56
+        },
+        "patterns": {
+          "reviewed": 12,
+          "hits": 8,
+          "missed": 61,
+          "precision": 0.6666666666666666,
+          "recall": 0.11594202898550725,
+          "hits_beyond_seed": 6,
+          "missed_beyond_seed": 56
+        },
+        "policy": {
+          "reviewed": 12,
+          "hits": 11,
+          "missed": 58,
+          "precision": 0.9166666666666666,
+          "recall": 0.15942028985507245,
+          "hits_beyond_seed": 5,
+          "missed_beyond_seed": 57
+        }
+      },
+      "pairwise": {
+        "score_vs_patterns": {
+          "positive_both": 3,
+          "positive_left_only": 9,
+          "positive_right_only": 5,
+          "left_only_positive_ids": [
+            "2152f80ec21fcffdab2d0432d18f41cb04a799b1ea5195407cbde4b13b278e67",
+            "339db99bb132a790503e0c60cee75658ec97869f274589798a45cf57124c6c42",
+            "35dd898251077536e1f4ca8dec735e99f35de54e87b8baba7765b1318e370884",
+            "6030317138c01cbb9a2322ea3cb7a5af526b6b658d6a1dd55ad732d0aab358dc",
+            "9bd35fd1578332b45640161f6c97980f2a481dd091a4b40bc69284e046e90a8a",
+            "adce3b1b56b5e551dd7f859b6c8ca649fd61d559ccd83be414c9daa300e79d9f",
+            "b90449c9990818fae00dda6ca92e9682689d6c3af3c79494b1cc54bbecd5684f",
+            "d31ff2356c321d2b01c6a3529377d447a40772701e8c868010a509c33c5eca55",
+            "e680cab9a0496452b22ba1d8bb031e17d009a53ed4314bb5976ea822ee02c36b"
+          ],
+          "right_only_positive_ids": [
+            "06cac5fe147282d185156fc59577655cdbe52881626b8cbc439c4d5afcf4e5c7",
+            "0b2d6a895107b253fa64c890455fab59e29e8cb0df478a3eab7a24d9299e7341",
+            "0fc3450d074fa2f1bf3c5b757fdd4ef23cd49473a7f822c2a59c8eccd865fefe",
+            "1745c969e4cd2eec9cb32960e9841c1b8173e0b7e6b3d74e17d8b74f21bb8770",
+            "1ef0372aa6d0701d5849f97cb97d85580d7646e657fe2bb42483ea2716598aab"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": -1,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": 3,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": 2,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        },
+        "score_vs_policy": {
+          "positive_both": 8,
+          "positive_left_only": 4,
+          "positive_right_only": 3,
+          "left_only_positive_ids": [
+            "1be34ad74149bf6918743383447ac060e1274ca0ac825a45435cc3a027a47232",
+            "6030317138c01cbb9a2322ea3cb7a5af526b6b658d6a1dd55ad732d0aab358dc",
+            "9bd35fd1578332b45640161f6c97980f2a481dd091a4b40bc69284e046e90a8a",
+            "d31ff2356c321d2b01c6a3529377d447a40772701e8c868010a509c33c5eca55"
+          ],
+          "right_only_positive_ids": [
+            "4fb04c154877f2968605bd48c1e2f540ffd2107b00a8c47fe5cc64cde1598307",
+            "73c493edb340c539c4f925ce7438b196b91679702af99cdd9e2ebd039022ca5b",
+            "77959ad6ff5add81253142c052b6165ce53e7ea1370e5ee42b820cf7684b4f68"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": 0,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": 1,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": 0,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        },
+        "patterns_vs_policy": {
+          "positive_both": 2,
+          "positive_left_only": 6,
+          "positive_right_only": 9,
+          "left_only_positive_ids": [
+            "06cac5fe147282d185156fc59577655cdbe52881626b8cbc439c4d5afcf4e5c7",
+            "0b2d6a895107b253fa64c890455fab59e29e8cb0df478a3eab7a24d9299e7341",
+            "0fc3450d074fa2f1bf3c5b757fdd4ef23cd49473a7f822c2a59c8eccd865fefe",
+            "1745c969e4cd2eec9cb32960e9841c1b8173e0b7e6b3d74e17d8b74f21bb8770",
+            "1be34ad74149bf6918743383447ac060e1274ca0ac825a45435cc3a027a47232",
+            "1ef0372aa6d0701d5849f97cb97d85580d7646e657fe2bb42483ea2716598aab"
+          ],
+          "right_only_positive_ids": [
+            "2152f80ec21fcffdab2d0432d18f41cb04a799b1ea5195407cbde4b13b278e67",
+            "339db99bb132a790503e0c60cee75658ec97869f274589798a45cf57124c6c42",
+            "35dd898251077536e1f4ca8dec735e99f35de54e87b8baba7765b1318e370884",
+            "4fb04c154877f2968605bd48c1e2f540ffd2107b00a8c47fe5cc64cde1598307",
+            "73c493edb340c539c4f925ce7438b196b91679702af99cdd9e2ebd039022ca5b",
+            "77959ad6ff5add81253142c052b6165ce53e7ea1370e5ee42b820cf7684b4f68",
+            "adce3b1b56b5e551dd7f859b6c8ca649fd61d559ccd83be414c9daa300e79d9f",
+            "b90449c9990818fae00dda6ca92e9682689d6c3af3c79494b1cc54bbecd5684f",
+            "e680cab9a0496452b22ba1d8bb031e17d009a53ed4314bb5976ea822ee02c36b"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": 1,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": -2,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": -2,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        }
+      }
+    },
+    "matched_review_count": {
+      "arm": {
+        "score": {
+          "reviewed": 12,
+          "hits": 12,
+          "missed": 57,
+          "precision": 1.0,
+          "recall": 0.17391304347826086,
+          "hits_beyond_seed": 6,
+          "missed_beyond_seed": 56
+        },
+        "patterns": {
+          "reviewed": 12,
+          "hits": 8,
+          "missed": 61,
+          "precision": 0.6666666666666666,
+          "recall": 0.11594202898550725,
+          "hits_beyond_seed": 6,
+          "missed_beyond_seed": 56
+        },
+        "policy": {
+          "reviewed": 12,
+          "hits": 11,
+          "missed": 58,
+          "precision": 0.9166666666666666,
+          "recall": 0.15942028985507245,
+          "hits_beyond_seed": 5,
+          "missed_beyond_seed": 57
+        }
+      },
+      "pairwise": {
+        "score_vs_patterns": {
+          "positive_both": 3,
+          "positive_left_only": 9,
+          "positive_right_only": 5,
+          "left_only_positive_ids": [
+            "2152f80ec21fcffdab2d0432d18f41cb04a799b1ea5195407cbde4b13b278e67",
+            "339db99bb132a790503e0c60cee75658ec97869f274589798a45cf57124c6c42",
+            "35dd898251077536e1f4ca8dec735e99f35de54e87b8baba7765b1318e370884",
+            "6030317138c01cbb9a2322ea3cb7a5af526b6b658d6a1dd55ad732d0aab358dc",
+            "9bd35fd1578332b45640161f6c97980f2a481dd091a4b40bc69284e046e90a8a",
+            "adce3b1b56b5e551dd7f859b6c8ca649fd61d559ccd83be414c9daa300e79d9f",
+            "b90449c9990818fae00dda6ca92e9682689d6c3af3c79494b1cc54bbecd5684f",
+            "d31ff2356c321d2b01c6a3529377d447a40772701e8c868010a509c33c5eca55",
+            "e680cab9a0496452b22ba1d8bb031e17d009a53ed4314bb5976ea822ee02c36b"
+          ],
+          "right_only_positive_ids": [
+            "06cac5fe147282d185156fc59577655cdbe52881626b8cbc439c4d5afcf4e5c7",
+            "0b2d6a895107b253fa64c890455fab59e29e8cb0df478a3eab7a24d9299e7341",
+            "0fc3450d074fa2f1bf3c5b757fdd4ef23cd49473a7f822c2a59c8eccd865fefe",
+            "1745c969e4cd2eec9cb32960e9841c1b8173e0b7e6b3d74e17d8b74f21bb8770",
+            "1ef0372aa6d0701d5849f97cb97d85580d7646e657fe2bb42483ea2716598aab"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": -1,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": 3,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": 2,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        },
+        "score_vs_policy": {
+          "positive_both": 8,
+          "positive_left_only": 4,
+          "positive_right_only": 3,
+          "left_only_positive_ids": [
+            "1be34ad74149bf6918743383447ac060e1274ca0ac825a45435cc3a027a47232",
+            "6030317138c01cbb9a2322ea3cb7a5af526b6b658d6a1dd55ad732d0aab358dc",
+            "9bd35fd1578332b45640161f6c97980f2a481dd091a4b40bc69284e046e90a8a",
+            "d31ff2356c321d2b01c6a3529377d447a40772701e8c868010a509c33c5eca55"
+          ],
+          "right_only_positive_ids": [
+            "4fb04c154877f2968605bd48c1e2f540ffd2107b00a8c47fe5cc64cde1598307",
+            "73c493edb340c539c4f925ce7438b196b91679702af99cdd9e2ebd039022ca5b",
+            "77959ad6ff5add81253142c052b6165ce53e7ea1370e5ee42b820cf7684b4f68"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": 0,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": 1,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": 0,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        },
+        "patterns_vs_policy": {
+          "positive_both": 2,
+          "positive_left_only": 6,
+          "positive_right_only": 9,
+          "left_only_positive_ids": [
+            "06cac5fe147282d185156fc59577655cdbe52881626b8cbc439c4d5afcf4e5c7",
+            "0b2d6a895107b253fa64c890455fab59e29e8cb0df478a3eab7a24d9299e7341",
+            "0fc3450d074fa2f1bf3c5b757fdd4ef23cd49473a7f822c2a59c8eccd865fefe",
+            "1745c969e4cd2eec9cb32960e9841c1b8173e0b7e6b3d74e17d8b74f21bb8770",
+            "1be34ad74149bf6918743383447ac060e1274ca0ac825a45435cc3a027a47232",
+            "1ef0372aa6d0701d5849f97cb97d85580d7646e657fe2bb42483ea2716598aab"
+          ],
+          "right_only_positive_ids": [
+            "2152f80ec21fcffdab2d0432d18f41cb04a799b1ea5195407cbde4b13b278e67",
+            "339db99bb132a790503e0c60cee75658ec97869f274589798a45cf57124c6c42",
+            "35dd898251077536e1f4ca8dec735e99f35de54e87b8baba7765b1318e370884",
+            "4fb04c154877f2968605bd48c1e2f540ffd2107b00a8c47fe5cc64cde1598307",
+            "73c493edb340c539c4f925ce7438b196b91679702af99cdd9e2ebd039022ca5b",
+            "77959ad6ff5add81253142c052b6165ce53e7ea1370e5ee42b820cf7684b4f68",
+            "adce3b1b56b5e551dd7f859b6c8ca649fd61d559ccd83be414c9daa300e79d9f",
+            "b90449c9990818fae00dda6ca92e9682689d6c3af3c79494b1cc54bbecd5684f",
+            "e680cab9a0496452b22ba1d8bb031e17d009a53ed4314bb5976ea822ee02c36b"
+          ],
+          "per_endpoint_net_hits": {
+            "/WEB-INF/webapp.properties": 1,
+            "/tienda1/global.OLD": 0,
+            "/tienda1/global/creditos.jsp/6909030637832563290.jsp": 0,
+            "/tienda1/miembros~": 0,
+            "/tienda1/publico/asf-logo-wide.gif~": 0,
+            "/tienda1/publico/autenticar.jsp": -2,
+            "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java": 0,
+            "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old": 0,
+            "/tienda1/publico/caracteristicas.jsp": -2,
+            "/tienda1/publico/entrar.jsp.BAK": 0
+          }
+        }
+      }
+    }
+  },
+  "endpoint_breakdown": [
+    {
+      "endpoint": "/WEB-INF/webapp.properties",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 1,
+          "hits": 1
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/global.OLD",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/global/creditos.jsp/6909030637832563290.jsp",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/miembros~",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/asf-logo-wide.gif~",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/autenticar.jsp",
+      "records": 84,
+      "positive": 57,
+      "arms": {
+        "score": {
+          "reviewed": 9,
+          "hits": 9
+        },
+        "patterns": {
+          "reviewed": 10,
+          "hits": 6
+        },
+        "policy": {
+          "reviewed": 9,
+          "hits": 8
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/autenticar.jsp/6909030637832563290.jsp.java",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/autenticar.jsp/asf-logo-wide.gif.old",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/caracteristicas.jsp",
+      "records": 4,
+      "positive": 4,
+      "arms": {
+        "score": {
+          "reviewed": 3,
+          "hits": 3
+        },
+        "patterns": {
+          "reviewed": 1,
+          "hits": 1
+        },
+        "policy": {
+          "reviewed": 3,
+          "hits": 3
+        }
+      }
+    },
+    {
+      "endpoint": "/tienda1/publico/entrar.jsp.BAK",
+      "records": 1,
+      "positive": 1,
+      "arms": {
+        "score": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "patterns": {
+          "reviewed": 0,
+          "hits": 0
+        },
+        "policy": {
+          "reviewed": 0,
+          "hits": 0
+        }
+      }
+    }
+  ]
+}

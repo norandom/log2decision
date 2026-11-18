@@ -1,10 +1,16 @@
 # Handover: npu-log-decision
 
+## Foreground comparison, 18 November
+
+Task 2.22 now has a frozen three-way comparison on the same 96 held CSIC development records. At 12 reviews per workflow, score alone recovered 12 of 69 benchmark positives, Venn recovered 11 and automatic patterns recovered 8. None of the 16 learned templates matched a held record. The Venn allocation recovered three positives missed by score alone and omitted four positives found by score alone. All 17 unsupported cases were positive and deferred. Independent review reproduced the decisions, counts and endpoint breakdown. [Report and frozen evidence](../docs/2026-11-18-triage-workflow-comparison.md)
+
+Final qualification still needs independent analyst outcomes, operational review and missed-case targets, reserved allocations and a protected final cohort. One endpoint supplied 84 of the 96 development records. Task 2.22 stays open and 2.21 awaits it.
+
 ## Overnight run, 17–18 November
 
 The overnight run integrated tasks 2.20, 2.9 and 3.1–3.6. The final code merge was `7af9416`. The reviewed workspace passed 944 tests with zero failures and 56 ignored. The final CLI passed all 30 real-NPU workflow checks on this workstation. The spec has 53 checked tasks and 10 open. [Commits, evidence and worktrees](overnight/2026-11-18-report.md)
 
-Task 2.22 remains blocked. At 100 reviews per fold, score alone recovered 500 of 15,964 CSIC development positives. The other two workflows lack comparable frozen selections. Independent reviewed outcomes, operational targets and a protected final cohort are missing. Keep 2.21 pending. The 2.22 status report and audit can be resumed from `D:\BuildArtifacts\log2decision\worktrees\task-2.22`. [Qualification evidence and exact replay command](overnight/2026-11-18-report.md#worktrees-and-replay)
+In the earlier five-fold development replay, score alone recovered 500 of 15,964 CSIC positives at 100 reviews per fold. Comparable pattern and policy selections for that full five-fold run remain unavailable. Its audit is in `D:\BuildArtifacts\log2decision\worktrees\task-2.22`. [Overnight evidence and replay command](overnight/2026-11-18-report.md#worktrees-and-replay)
 
 ## Current roadmap update — 2026-11-17
 
