@@ -1,5 +1,9 @@
 # Handover: npu-log-decision
 
+## Task 2.24, 23 November
+
+The policy does not beat score alone on a 10 % positive panel of 1,000 fresh held fold-zero records, at any of five budgets, and ties at equal effort. It sent 53 of 100 positives to low priority. Unsupported records were 22 of 27 positive, but 18 of the 20 records off the dominant endpoint are unsupported and 17 of those 20 are positive, so the panel cannot separate the vector evidence from the endpoint. The first report draft overstated this and was rejected in review; read the published report, not earlier summaries. Automation stays parked. Task 2.25 is drafted and awaits owner approval: score order with reserved unsupported slots against an encoder-free control on the last fresh panel of this fold. [Report](../docs/2026-11-23-triage-low-share-comparison.md) · evidence in `D:\BuildArtifacts\log2decision\task-2.24\`
+
 ## Task 2.23, 23 November
 
 Unsupported records can now have their own review slots. A policy JSON that states `unsupported_slots` selects a second allocation rule; `unknown_slots` then serves disagreements alone. Policies without the field behave and serialize as before, and earlier reports reload unchanged. One test enumerates all 96 routing cases. Reviewed and approved; workspace 1,001 passed, 0 failed, 56 ignored. On the old 96-record panel the yield stays at 11 with the new reservation, as expected where score alone already reached the ceiling. Task 2.24 is next: a 10 % positive panel of fresh held fold-zero records with a sweep of budgets. One endpoint supplies nearly all held good records, so it will dominate that panel. The reusable Cargo target is near its 30 GiB admission limit. [Contract](../docs/qualification/venn-policy-contract.md) · evidence in `D:\BuildArtifacts\log2decision\task-2.23\`

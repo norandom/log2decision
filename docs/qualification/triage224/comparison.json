@@ -1,0 +1,656 @@
+{
+  "frozen_decisions_sha256": "c7577df6ff92438567f6afac2179db9fcec08bfddf18e731df99a3f80debb5d5",
+  "panel": 1000,
+  "positive": 100,
+  "positive_share": 0.1,
+  "main_endpoint": {
+    "name": "/tienda1/publico/autenticar.jsp",
+    "records": 980,
+    "positive": 83
+  },
+  "score_ranking": {
+    "roc_auc": 0.8173,
+    "average_precision": 0.6254472580776157,
+    "first_negative_rank": 33
+  },
+  "routes": {
+    "Disagreement": {
+      "records": 20,
+      "positive": 11
+    },
+    "HighCorroborated": {
+      "records": 8,
+      "positive": 8
+    },
+    "LowCorroborated": {
+      "records": 939,
+      "positive": 53
+    },
+    "Uncertain": {
+      "records": 6,
+      "positive": 6
+    },
+    "Unsupported": {
+      "records": 27,
+      "positive": 22
+    }
+  },
+  "policy_supported": 973,
+  "budgets": {
+    "12": {
+      "score": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "recall": 0.12,
+        "missed": 88,
+        "unsupported_reviewed": 5,
+        "unsupported_positive_reviewed": 5,
+        "unsupported_positive_missed": 17,
+        "positive_on_main_endpoint": 7,
+        "positive_elsewhere": 5
+      },
+      "patterns": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 3,
+        "precision": 0.25,
+        "recall": 0.03,
+        "missed": 97,
+        "unsupported_reviewed": 1,
+        "unsupported_positive_reviewed": 1,
+        "unsupported_positive_missed": 21,
+        "positive_on_main_endpoint": 2,
+        "positive_elsewhere": 1
+      },
+      "policy_shared": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 10,
+        "precision": 0.8333333333333334,
+        "recall": 0.1,
+        "missed": 90,
+        "unsupported_reviewed": 0,
+        "unsupported_positive_reviewed": 0,
+        "unsupported_positive_missed": 22,
+        "positive_on_main_endpoint": 8,
+        "positive_elsewhere": 2,
+        "pools": {
+          "General": {
+            "selected": 8,
+            "positive": 8
+          },
+          "LowPriorityAudit": {
+            "selected": 2,
+            "positive": 0
+          },
+          "UnknownConflict": {
+            "selected": 2,
+            "positive": 2
+          }
+        }
+      },
+      "policy_separate": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 10,
+        "precision": 0.8333333333333334,
+        "recall": 0.1,
+        "missed": 90,
+        "unsupported_reviewed": 2,
+        "unsupported_positive_reviewed": 2,
+        "unsupported_positive_missed": 20,
+        "positive_on_main_endpoint": 7,
+        "positive_elsewhere": 3,
+        "pools": {
+          "General": {
+            "selected": 6,
+            "positive": 6
+          },
+          "LowPriorityAudit": {
+            "selected": 2,
+            "positive": 0
+          },
+          "UnknownConflict": {
+            "selected": 2,
+            "positive": 2
+          },
+          "Unsupported": {
+            "selected": 2,
+            "positive": 2
+          }
+        }
+      },
+      "score_vs_policy_shared": {
+        "positive_both": 7,
+        "score_only": 5,
+        "policy_only": 3
+      },
+      "score_vs_policy_separate": {
+        "positive_both": 6,
+        "score_only": 6,
+        "policy_only": 4
+      }
+    },
+    "25": {
+      "score": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "recall": 0.25,
+        "missed": 75,
+        "unsupported_reviewed": 10,
+        "unsupported_positive_reviewed": 10,
+        "unsupported_positive_missed": 12,
+        "positive_on_main_endpoint": 20,
+        "positive_elsewhere": 5
+      },
+      "patterns": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 4,
+        "precision": 0.16,
+        "recall": 0.04,
+        "missed": 96,
+        "unsupported_reviewed": 1,
+        "unsupported_positive_reviewed": 1,
+        "unsupported_positive_missed": 21,
+        "positive_on_main_endpoint": 3,
+        "positive_elsewhere": 1
+      },
+      "policy_shared": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 20,
+        "precision": 0.8,
+        "recall": 0.2,
+        "missed": 80,
+        "unsupported_reviewed": 0,
+        "unsupported_positive_reviewed": 0,
+        "unsupported_positive_missed": 22,
+        "positive_on_main_endpoint": 18,
+        "positive_elsewhere": 2,
+        "pools": {
+          "General": {
+            "selected": 17,
+            "positive": 15
+          },
+          "LowPriorityAudit": {
+            "selected": 4,
+            "positive": 1
+          },
+          "UnknownConflict": {
+            "selected": 4,
+            "positive": 4
+          }
+        }
+      },
+      "policy_separate": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 21,
+        "precision": 0.84,
+        "recall": 0.21,
+        "missed": 79,
+        "unsupported_reviewed": 4,
+        "unsupported_positive_reviewed": 4,
+        "unsupported_positive_missed": 18,
+        "positive_on_main_endpoint": 17,
+        "positive_elsewhere": 4,
+        "pools": {
+          "General": {
+            "selected": 13,
+            "positive": 12
+          },
+          "LowPriorityAudit": {
+            "selected": 4,
+            "positive": 1
+          },
+          "UnknownConflict": {
+            "selected": 4,
+            "positive": 4
+          },
+          "Unsupported": {
+            "selected": 4,
+            "positive": 4
+          }
+        }
+      },
+      "score_vs_policy_shared": {
+        "positive_both": 9,
+        "score_only": 16,
+        "policy_only": 11
+      },
+      "score_vs_policy_separate": {
+        "positive_both": 11,
+        "score_only": 14,
+        "policy_only": 10
+      }
+    },
+    "50": {
+      "score": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 42,
+        "precision": 0.84,
+        "recall": 0.42,
+        "missed": 58,
+        "unsupported_reviewed": 10,
+        "unsupported_positive_reviewed": 10,
+        "unsupported_positive_missed": 12,
+        "positive_on_main_endpoint": 37,
+        "positive_elsewhere": 5
+      },
+      "patterns": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 6,
+        "precision": 0.12,
+        "recall": 0.06,
+        "missed": 94,
+        "unsupported_reviewed": 1,
+        "unsupported_positive_reviewed": 1,
+        "unsupported_positive_missed": 21,
+        "positive_on_main_endpoint": 5,
+        "positive_elsewhere": 1
+      },
+      "policy_shared": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 31,
+        "precision": 0.62,
+        "recall": 0.31,
+        "missed": 69,
+        "unsupported_reviewed": 14,
+        "unsupported_positive_reviewed": 11,
+        "unsupported_positive_missed": 11,
+        "positive_on_main_endpoint": 21,
+        "positive_elsewhere": 10,
+        "pools": {
+          "General": {
+            "selected": 34,
+            "positive": 22
+          },
+          "LowPriorityAudit": {
+            "selected": 8,
+            "positive": 1
+          },
+          "UnknownConflict": {
+            "selected": 8,
+            "positive": 8
+          }
+        }
+      },
+      "policy_separate": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 31,
+        "precision": 0.62,
+        "recall": 0.31,
+        "missed": 69,
+        "unsupported_reviewed": 14,
+        "unsupported_positive_reviewed": 11,
+        "unsupported_positive_missed": 11,
+        "positive_on_main_endpoint": 21,
+        "positive_elsewhere": 10,
+        "pools": {
+          "General": {
+            "selected": 26,
+            "positive": 15
+          },
+          "LowPriorityAudit": {
+            "selected": 8,
+            "positive": 1
+          },
+          "UnknownConflict": {
+            "selected": 8,
+            "positive": 8
+          },
+          "Unsupported": {
+            "selected": 8,
+            "positive": 7
+          }
+        }
+      },
+      "score_vs_policy_shared": {
+        "positive_both": 22,
+        "score_only": 20,
+        "policy_only": 9
+      },
+      "score_vs_policy_separate": {
+        "positive_both": 22,
+        "score_only": 20,
+        "policy_only": 9
+      }
+    },
+    "100": {
+      "score": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 56,
+        "precision": 0.56,
+        "recall": 0.56,
+        "missed": 44,
+        "unsupported_reviewed": 12,
+        "unsupported_positive_reviewed": 12,
+        "unsupported_positive_missed": 10,
+        "positive_on_main_endpoint": 49,
+        "positive_elsewhere": 7
+      },
+      "patterns": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 12,
+        "precision": 0.12,
+        "recall": 0.12,
+        "missed": 88,
+        "unsupported_reviewed": 2,
+        "unsupported_positive_reviewed": 2,
+        "unsupported_positive_missed": 20,
+        "positive_on_main_endpoint": 10,
+        "positive_elsewhere": 2
+      },
+      "policy_shared": {
+        "offered": 100,
+        "reviewed": 77,
+        "positive": 49,
+        "precision": 0.6363636363636364,
+        "recall": 0.49,
+        "missed": 51,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_reviewed": 22,
+        "unsupported_positive_missed": 0,
+        "positive_on_main_endpoint": 32,
+        "positive_elsewhere": 17,
+        "pools": {
+          "General": {
+            "selected": 45,
+            "positive": 36
+          },
+          "LowPriorityAudit": {
+            "selected": 16,
+            "positive": 2
+          },
+          "UnknownConflict": {
+            "selected": 16,
+            "positive": 11
+          }
+        }
+      },
+      "policy_separate": {
+        "offered": 100,
+        "reviewed": 77,
+        "positive": 49,
+        "precision": 0.6363636363636364,
+        "recall": 0.49,
+        "missed": 51,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_reviewed": 22,
+        "unsupported_positive_missed": 0,
+        "positive_on_main_endpoint": 32,
+        "positive_elsewhere": 17,
+        "pools": {
+          "General": {
+            "selected": 29,
+            "positive": 23
+          },
+          "LowPriorityAudit": {
+            "selected": 16,
+            "positive": 2
+          },
+          "UnknownConflict": {
+            "selected": 16,
+            "positive": 11
+          },
+          "Unsupported": {
+            "selected": 16,
+            "positive": 13
+          }
+        }
+      },
+      "score_vs_policy_shared": {
+        "positive_both": 37,
+        "score_only": 19,
+        "policy_only": 12
+      },
+      "score_vs_policy_separate": {
+        "positive_both": 37,
+        "score_only": 19,
+        "policy_only": 12
+      }
+    },
+    "200": {
+      "score": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 67,
+        "precision": 0.335,
+        "recall": 0.67,
+        "missed": 33,
+        "unsupported_reviewed": 12,
+        "unsupported_positive_reviewed": 12,
+        "unsupported_positive_missed": 10,
+        "positive_on_main_endpoint": 60,
+        "positive_elsewhere": 7
+      },
+      "patterns": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 27,
+        "precision": 0.135,
+        "recall": 0.27,
+        "missed": 73,
+        "unsupported_reviewed": 5,
+        "unsupported_positive_reviewed": 5,
+        "unsupported_positive_missed": 17,
+        "positive_on_main_endpoint": 23,
+        "positive_elsewhere": 4
+      },
+      "policy_shared": {
+        "offered": 200,
+        "reviewed": 94,
+        "positive": 51,
+        "precision": 0.5425531914893617,
+        "recall": 0.51,
+        "missed": 49,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_reviewed": 22,
+        "unsupported_positive_missed": 0,
+        "positive_on_main_endpoint": 34,
+        "positive_elsewhere": 17,
+        "pools": {
+          "General": {
+            "selected": 28,
+            "positive": 26
+          },
+          "LowPriorityAudit": {
+            "selected": 33,
+            "positive": 4
+          },
+          "UnknownConflict": {
+            "selected": 33,
+            "positive": 21
+          }
+        }
+      },
+      "policy_separate": {
+        "offered": 200,
+        "reviewed": 94,
+        "positive": 51,
+        "precision": 0.5425531914893617,
+        "recall": 0.51,
+        "missed": 49,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_reviewed": 22,
+        "unsupported_positive_missed": 0,
+        "positive_on_main_endpoint": 34,
+        "positive_elsewhere": 17,
+        "pools": {
+          "General": {
+            "selected": 14,
+            "positive": 14
+          },
+          "LowPriorityAudit": {
+            "selected": 33,
+            "positive": 4
+          },
+          "UnknownConflict": {
+            "selected": 20,
+            "positive": 11
+          },
+          "Unsupported": {
+            "selected": 27,
+            "positive": 22
+          }
+        }
+      },
+      "score_vs_policy_shared": {
+        "positive_both": 39,
+        "score_only": 28,
+        "policy_only": 12
+      },
+      "score_vs_policy_separate": {
+        "positive_both": 39,
+        "score_only": 28,
+        "policy_only": 12
+      }
+    }
+  },
+  "question": {
+    "bins": [
+      {
+        "bin": 1,
+        "ranks": [
+          1,
+          100
+        ],
+        "supported": 88,
+        "supported_positive": 44,
+        "unsupported": 12,
+        "unsupported_positive": 12,
+        "used": true
+      },
+      {
+        "bin": 2,
+        "ranks": [
+          101,
+          200
+        ],
+        "supported": 100,
+        "supported_positive": 11,
+        "unsupported": 0,
+        "unsupported_positive": 0,
+        "used": false
+      },
+      {
+        "bin": 3,
+        "ranks": [
+          201,
+          300
+        ],
+        "supported": 98,
+        "supported_positive": 4,
+        "unsupported": 2,
+        "unsupported_positive": 2,
+        "used": true
+      },
+      {
+        "bin": 4,
+        "ranks": [
+          301,
+          400
+        ],
+        "supported": 97,
+        "supported_positive": 4,
+        "unsupported": 3,
+        "unsupported_positive": 2,
+        "used": true
+      },
+      {
+        "bin": 5,
+        "ranks": [
+          401,
+          500
+        ],
+        "supported": 100,
+        "supported_positive": 2,
+        "unsupported": 0,
+        "unsupported_positive": 0,
+        "used": false
+      },
+      {
+        "bin": 6,
+        "ranks": [
+          501,
+          600
+        ],
+        "supported": 98,
+        "supported_positive": 2,
+        "unsupported": 2,
+        "unsupported_positive": 1,
+        "used": true
+      },
+      {
+        "bin": 7,
+        "ranks": [
+          601,
+          700
+        ],
+        "supported": 98,
+        "supported_positive": 6,
+        "unsupported": 2,
+        "unsupported_positive": 2,
+        "used": true
+      },
+      {
+        "bin": 8,
+        "ranks": [
+          701,
+          800
+        ],
+        "supported": 99,
+        "supported_positive": 1,
+        "unsupported": 1,
+        "unsupported_positive": 1,
+        "used": true
+      },
+      {
+        "bin": 9,
+        "ranks": [
+          801,
+          900
+        ],
+        "supported": 98,
+        "supported_positive": 1,
+        "unsupported": 2,
+        "unsupported_positive": 1,
+        "used": true
+      },
+      {
+        "bin": 10,
+        "ranks": [
+          901,
+          1000
+        ],
+        "supported": 97,
+        "supported_positive": 3,
+        "unsupported": 3,
+        "unsupported_positive": 1,
+        "used": true
+      }
+    ],
+    "unsupported_in_used_bins": 27,
+    "unsupported_outside_used_bins": 0,
+    "observed_positive": 22.0,
+    "expected_positive_from_supported_rate": 6.491901977910814,
+    "excess": 15.508098022089186,
+    "observed_rate": 0.8148148148148148,
+    "expected_rate": 0.2404408139966968,
+    "one_sided_p": 0.0001,
+    "permutations": 9999,
+    "seed": 224
+  },
+  "qualification": "exploratory; no operational targets, no pass/fail threshold, no final holdout"
+}

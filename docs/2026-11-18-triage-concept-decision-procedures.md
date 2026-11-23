@@ -79,6 +79,8 @@ Recomputing the frozen panel's allocation at the same budget of 12, with the con
 
 The yield stays at 11, as expected on a saturated panel: every reviewed unsupported record was positive and replaced a positive. The recomputation used the persisted evidence and no NPU run. It first reproduced the persisted allocation exactly, and the built product validated each recomputed report with its own allocation code. Whether the reservation pays is the question for the low-base-rate panel of task 2.24.
 
+**Task 2.24 answered the open question with a no (2026-11-23).** On 1,000 fresh held records with 100 positives and budgets from 12 to 200, the policy found fewer positives than score alone at every budget offered, and no advantage at equal effort. Unsupported records were positive more often than their score rank predicts, but on that panel the flag nearly coincides with being off the one dominant endpoint, so the vector evidence is not shown to carry the signal. The condition in the order below is therefore not met, and the skill with an automated flow stays parked. [Report](2026-11-23-triage-low-share-comparison.md)
+
 ## RAM: one process is bounded, the machine is not
 
 Checked against `crates/l2d-core/src/memory.rs` and `resource.rs`. A process has a budget from live free memory, re-reads it before every batch, spills or refuses, and one heavy job and one NPU job run at a time across processes.
