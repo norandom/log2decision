@@ -83,7 +83,8 @@ fn failed(e: impl std::fmt::Display) -> L2dError {
         detail: format!("selection: {e}"),
     }
 }
-fn compile(query: &SearchQuery, budget: &MemoryBudget) -> Result<regex::Regex, L2dError> {
+/// Compile a selection with the same matching rules and resource limits as discovery.
+pub fn compile(query: &SearchQuery, budget: &MemoryBudget) -> Result<regex::Regex, L2dError> {
     query.check()?;
     budget.require_whole(
         crate::marks::REGEX_HELD_BYTES + 16 * query.text().len() as u64,

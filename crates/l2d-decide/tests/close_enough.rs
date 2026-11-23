@@ -11,25 +11,22 @@ use l2d_decide::conformal::points_frame;
 use l2d_decide::exploration::{CharacterTrigram, ExplorationEncoder, Representation};
 use l2d_decide::{CalibrationPoint, CalibrationSettings, ConformalCalibrator, Scorer, ScorerKind};
 use l2d_store::{LogFlags, Store, VectorOrigin, rows_frame};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 fn budget() -> MemoryBudget {
     MemoryBudget::observe_with(&MemorySettings::default(), || Ok(8 * 1024 * 1024 * 1024)).unwrap()
 }
-static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     paths: ProjectPaths,
     store: Store,
     bad: MarkSet,
     good: MarkSet,
     scorer: BaselineScorer,
+    // Declared last so SQLite closes before the temporary directory is removed.
+    _directory: tempfile::TempDir,
 }
 fn fixture() -> Fixture {
-    let paths = ProjectPaths::new(std::env::temp_dir().join(format!(
-        "l2d-close-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )));
+    let directory = tempfile::tempdir().unwrap();
+    let paths = ProjectPaths::new(directory.path());
     let identity = EncoderIdentity {
         name: "fixture".into(),
         revision: "a".repeat(64),
@@ -90,6 +87,7 @@ fn fixture() -> Fixture {
         bad,
         good,
         scorer,
+        _directory: directory,
     }
 }
 fn add(store: &mut Store, source: &str, rows: &[LogRecord]) {

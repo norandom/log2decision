@@ -22,6 +22,7 @@ pub mod parts;
 pub mod paths;
 pub mod resource;
 pub mod runrecord;
+pub mod terminal_text;
 pub mod types;
 mod zip_directory;
 pub mod zip_input;

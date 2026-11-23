@@ -1,0 +1,152 @@
+{
+  "title": "A sign-in hunt shared across two mock clients",
+  "fixture": "Synthetic scores, occurrences and recommendation decisions in workflow.js. Receipts live in the shared in-memory fixture store for this replay.",
+  "steps": [
+    {
+      "name": "Open the fixture in an agent client",
+      "tool": "triager_open",
+      "args": {"v":1,"source":{"ref":"auth-fixture"}},
+      "expect": {"snapshot":"U"}
+    },
+    {
+      "name": "Score eight originals with a frozen fixture model",
+      "tool": "triager_select",
+      "args": {"v":1,"scope":"U","producer":{"kind":"score","model":"fixture-score","top_k":8,"ties":"record_id_ascending"}},
+      "expect": {"set":"A","counts.in":8,"occurrence_counts.in":14}
+    },
+    {
+      "name": "Search the same snapshot for login",
+      "tool": "triager_select",
+      "args": {"v":1,"scope":"U","producer":{"kind":"filter","syntax":"glob","query":"*login*"}},
+      "expect": {"set":"B","counts.in":4,"occurrence_counts.in":6}
+    },
+    {
+      "name": "Reduce to A minus B",
+      "tool": "triager_compose",
+      "args": {"v":1,"snapshot":"U","scope":"U","mode":"view","sets":{"a":"A","b":"B","c":"C"},"expr":{"difference":["a","b"]}},
+      "expect": {"view":"D","counts.parent":12,"counts.in":6,"counts.out":6,"occurrence_counts.parent":20,"occurrence_counts.in":11}
+    },
+    {
+      "name": "Inspect A and B before commissioning C",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"D","view":"regions"},
+      "expect": {"ab_unclassified":0,"rows.0.count":6,"rows.4.count":0,"rows.5.count":0,"rows.6.count":6,"rows.6.occurrences":11}
+    },
+    {
+      "name": "Collect prepared recommendations scoped to D",
+      "tool": "triager_select",
+      "args": {"v":1,"scope":"D","producer":{"kind":"recommend","method":"issued_batch","action":"collect","run":"fixture-review","submissions_ref":"fixture-batch","membership":"recommend"}},
+      "expect": {"set":"C","coverage":{"in":3,"out":2,"not_evaluated":1}}
+    },
+    {
+      "name": "Reduce D to recommendations",
+      "tool": "triager_compose",
+      "args": {"v":1,"snapshot":"U","scope":"D","mode":"view","sets":{"a":"A","b":"B","c":"C"},"expr":"c"},
+      "expect": {"view":"V1","parent":"D","counts.parent":6,"counts.in":3,"counts.out":2,"counts.unknown":1,"counts.retained_share":0.5,"occurrence_counts.parent":11,"occurrence_counts.in":6,"occurrence_counts.out":3,"occurrence_counts.unknown":2}
+    },
+    {
+      "name": "Reconcile both partitions at U including unassessed coverage",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"U","view":"regions"},
+      "expect": {"rows.0.count":6,"rows.1.count":2,"rows.2.count":2,"rows.3.count":2,"rows.4.count":3,"rows.5.count":2,"rows.6.count":7,"rows.0.occurrences":11,"rows.1.occurrences":3,"rows.2.occurrences":3,"rows.3.occurrences":3,"rows.4.occurrences":6,"rows.5.occurrences":3,"rows.6.occurrences":11}
+    },
+    {
+      "name": "Drill on a host in the recommended region",
+      "tool": "triager_refine",
+      "args": {"v":1,"set":"V1","action":{"kind":"host","value":"edge-01"}},
+      "expect": {"view":"V2","parent":"V1","counts.in":1,"occurrence_counts.in":2}
+    },
+    {
+      "name": "Read two matching occurrences of the same original",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"V2","view":"evidence","record":"R03"},
+      "expect": {"id":"R03","occurrences":2,"locations.0.host":"edge-01","locations.1.host":"edge-01"}
+    },
+    {
+      "name": "Return to the parent and retain all three locations",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"V1","view":"evidence","record":"R03"},
+      "expect": {"occurrences":3,"locations.2.host":"idp-01"}
+    },
+    {
+      "name": "Branch from D to its unassessed original",
+      "tool": "triager_compose",
+      "args": {"v":1,"snapshot":"U","scope":"D","mode":"view","sets":{"a":"A","b":"B","c":"C"},"expr":{"state":{"set":"c","is":"not_evaluated"}}},
+      "expect": {"parent":"D","view":"V3","counts.in":1,"occurrence_counts.in":2}
+    },
+    {
+      "name": "Inspect the branch reason",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"V3","view":"evidence","record":"R08"},
+      "expect": {"reason":"The fixture producer abstained on an unfamiliar format.","membership.c":"not_evaluated"}
+    },
+    {
+      "name": "Choose a UTC hour at D",
+      "tool": "triager_refine",
+      "args": {"v":1,"set":"D","action":{"kind":"hour","value":"2026-11-18T08:00Z"}},
+      "expect": {"parent":"D","view":"V4","counts.in":2,"occurrence_counts.in":3}
+    },
+    {
+      "name": "Exercise a valid empty drill",
+      "tool": "triager_select",
+      "args": {"v":1,"scope":"V4","producer":{"kind":"filter","syntax":"literal","query":"no matching fixture original"}},
+      "expect": {"set":"V5","counts.in":0,"counts.parent":2}
+    },
+    {
+      "name": "Recover D without rerunning either producer",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"D","view":"overview"},
+      "expect": {"handle":"D","counts.in":6,"allocated":false}
+    },
+    {
+      "name": "Save D before allocating the review budget",
+      "tool": "triager_save",
+      "args": {"v":1,"handle":"D","idempotency_key":"fixture-D"},
+      "expect": {"receipt":"receipt/fixture-D","handle":"D"}
+    },
+    {
+      "name": "Open the draft in a fresh terminal client",
+      "fresh_client": true,
+      "tool": "triager_open",
+      "args": {"v":1,"receipt":"receipt/fixture-D"},
+      "expect": {"handle":"D","snapshot":"U","kind":"view"}
+    },
+    {
+      "name": "Recover its navigation lineage independently of the originating UI",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"D","view":"lineage"},
+      "expect": {"path.0.handle":"U","path.1.handle":"D","path.1.kind":"view","path.1.parent":"U"}
+    },
+    {
+      "name": "The resumed scope preserves its region counts",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"D","view":"regions"},
+      "expect": {"rows.0.count":6,"rows.1.count":0,"rows.2.count":0,"rows.3.count":0,"rows.4.count":3,"rows.5.count":2,"rows.6.count":1,"rows.4.occurrences":6,"rows.5.occurrences":3,"rows.6.occurrences":2}
+    },
+    {
+      "name": "Allocate once from the three disjoint pools",
+      "tool": "triager_compose",
+      "args": {"v":1,"mode":"allocate","snapshot":"U","scope":"D","sets":{"d":"D","c":"C"},"expr":{"intersection":["d","c"]},"budget":{"total":4,"duplicate_rule":"first_pool_wins","shortfall":"leave_unfilled","pools":[{"name":"general","limit":2,"from":{"intersection":["d","c"]},"order":["score_desc","record_id_ascending"]},{"name":"unfamiliar","limit":1,"from":{"intersection":["d",{"state":{"set":"c","is":"not_evaluated"}}]},"order":["record_id_ascending"]},{"name":"audit","limit":1,"from":{"difference":["d","c"]},"order":["seeded_hash","record_id_ascending"],"seed":5}]}},
+      "expect": {"set":"F","ordered_ids":["R03","R04","R08","R07"],"occurrence_counts.in":8,"selected":4,"deferred":2}
+    },
+    {
+      "name": "Save the final work set",
+      "tool": "triager_save",
+      "args": {"v":1,"handle":"F","idempotency_key":"fixture-F"},
+      "expect": {"receipt":"receipt/fixture-F"}
+    },
+    {
+      "name": "Open the final receipt in another fresh client",
+      "fresh_client": true,
+      "tool": "triager_open",
+      "args": {"v":1,"receipt":"receipt/fixture-F"},
+      "expect": {"handle":"F","kind":"allocation"}
+    },
+    {
+      "name": "Read the original order and attribution",
+      "tool": "triager_inspect",
+      "args": {"v":1,"handle":"F","view":"records","projection":["id","allocation"]},
+      "expect": {"rows":[{"id":"R03","allocation":"general"},{"id":"R04","allocation":"general"},{"id":"R08","allocation":"unfamiliar"},{"id":"R07","allocation":"audit"}],"next_cursor":null}
+    }
+  ]
+}

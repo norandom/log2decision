@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>triager · Analyst workbench</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="workflow.js" defer></script>
+  <script src="ui.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span aria-hidden="true" class="brand-mark">⫶</span> triager</div>
+    <span class="fixture">Offline design fixture</span>
+    <div class="toolbar">
+      <button id="save">Save view</button>
+      <button id="handoffs">Handoffs <span id="saved-count">0</span></button>
+      <button id="trace">MCP trace <span id="trace-count">0</span></button>
+    </div>
+  </header>
+  <main>
+    <section class="query-section" aria-label="Search within the active view">
+      <form id="search-form">
+        <label for="search-text">Search this view</label>
+        <div class="query-line">
+          <select id="search-mode" aria-label="Search syntax"><option value="literal">Literal</option><option value="glob">Glob</option></select>
+          <textarea id="search-text" rows="1" placeholder="Enter text to narrow the current view" spellcheck="false"></textarea>
+          <button type="submit" class="accent">Run search</button>
+        </div>
+      </form>
+      <div class="editor-size"><label for="search-height">Editor rows</label><input id="search-height" type="range" min="1" max="5" value="1"></div>
+    </section>
+
+    <div class="navline">
+      <button id="back" aria-label="Back to parent view">← Back</button>
+      <nav id="breadcrumbs" aria-label="View ancestry"></nav>
+      <button id="branches">Branches</button>
+    </div>
+
+    <section class="scope" aria-labelledby="view-title">
+      <div class="scope-head">
+        <div><div class="eyebrow" id="scope-source">AUTH-FIXTURE.ZIP</div><h1 id="view-title" tabindex="-1">Opening snapshot…</h1></div>
+        <button id="allocate" class="accent">Allocate review slots</button>
+      </div>
+      <div id="metrics" class="metrics"></div>
+    </section>
+
+    <div class="workspace">
+      <aside id="sidebar" aria-label="Drill into the active view">
+        <details class="facet-group" open>
+          <summary>Venn regions</summary>
+          <p class="hint">A scored · B matched <code>*login*</code> · C recommended within A − B</p>
+          <div id="regions"></div>
+        </details>
+        <details class="facet-group" open>
+          <summary>Host <span class="count-unit">· occurrences</span></summary>
+          <div id="hosts"></div>
+        </details>
+        <div class="size-control"><label for="sidebar-width">Sidebar width</label><input id="sidebar-width" type="range" min="180" max="370" value="240" step="10"></div>
+      </aside>
+      <section class="results" aria-label="Current view results">
+        <section class="histogram" aria-labelledby="time-title">
+          <div class="section-head"><h2 id="time-title">Activity by hour</h2><span>occurrences · UTC</span></div>
+          <div id="bins"></div>
+        </section>
+        <section class="record-panel" aria-labelledby="records-title">
+          <div class="section-head"><h2 id="records-title">Original records</h2><span id="record-count"></span></div>
+          <div id="records-wrap" tabindex="0" aria-label="Scrollable original records">
+            <table><thead><tr><th scope="col">Record &amp; message</th><th scope="col">Score</th><th scope="col">A</th><th scope="col">B</th><th scope="col">C</th><th scope="col"><abbr title="Occurrences in this view">Occ.</abbr></th></tr></thead><tbody id="records"></tbody></table>
+          </div>
+          <p id="record-note" class="hint">Open a record for its evidence. + in &nbsp; − out &nbsp; ? unevaluated</p>
+        </section>
+      </section>
+    </div>
+  </main>
+  <footer class="status"><span id="connection">Local fixture</span><span id="status-text" role="status" aria-live="polite">Initializing the workflow</span><span class="keyboard-hint">/ Search &nbsp; Esc Back</span></footer>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-inner">
+      <div class="dialog-head"><h2 id="dialog-title"></h2><button id="close-dialog">Close</button></div>
+      <div id="dialog-body"></div>
+    </div>
+  </dialog>
+  <noscript>This offline workflow design requires JavaScript to navigate the fixture.</noscript>
+</body>
+</html>

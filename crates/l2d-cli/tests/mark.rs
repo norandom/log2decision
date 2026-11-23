@@ -593,14 +593,96 @@ fn analyst_workflow_pins_rules_score_history_and_replays_policy() {
         .unwrap();
     assert!(unsupported["score"]["actionable_ratio"].is_null());
     assert_eq!(unsupported["queue"], "Review");
+    let open = ["tui", "--report", saved.to_str().unwrap()];
+    let imported = s.json(&open);
+    assert_eq!(imported["counts"]["originals"], 3);
+    assert_eq!(imported["counts"]["occurrences"], Value::Null);
+    assert_eq!(imported["regions"]["unknown"]["originals"], 3);
+    let digest = l2d_core::input::content_sha256(&fs::read(&saved).unwrap());
+    assert_eq!(imported["source_revision"], digest);
+    let decisions = policy["decisions"].as_array().unwrap();
+    let expected_in = decisions
+        .iter()
+        .filter(|r| matches!(r["queue"].as_str(), Some("Investigate" | "Review")))
+        .count();
+    let routed = s.json(&[&open[..], &["--policy-recommendations"]].concat());
+    assert_eq!(routed["regions"]["recommended"]["originals"], expected_in);
+    assert_eq!(routed["regions"]["pass"]["originals"], 3 - expected_in);
+    assert_eq!(routed["regions"]["unknown"]["originals"], 0);
+    let projected_ids: std::collections::BTreeSet<_> = routed["preview"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        projected_ids,
+        decisions
+            .iter()
+            .map(|r| r["input"]["id"].as_str().unwrap())
+            .collect()
+    );
     let replay = s.json(&[&common[..], &config, &["--replay", saved.to_str().unwrap()]].concat());
     assert_eq!(replay["replay_verified"], true);
     assert_eq!(policy["query_source"]["path"], q);
+    // Task 2.23: a stated unsupported capacity selects the second allocation rule.
+    let separate_policy = s.0.join("policy-separate.json");
+    fs::write(&separate_policy,serde_json::to_vec(&serde_json::json!({"version":"test-2","selection_provenance":"synthetic fixture","low":0.45,"high":0.55,
+        "corroboration":1,"reach":{"radius":0.0,"top_k":3,"minimum_labelled_support":1,"expected_profile":close["decisions"][0]["evidence"]["profile"]},
+        "require_calibration":false,"review_budget":3,"unknown_slots":1,"unsupported_slots":1,"audit_slots":1,"audit_seed":5})).unwrap()).unwrap();
+    let separate_saved = s.0.join("report-separate.json");
+    let separate_config = ["--policy", separate_policy.to_str().unwrap()];
+    let separate = s.json(
+        &[
+            &common[..],
+            &separate_config,
+            &["--out", separate_saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    let separate_report = &separate["policy_report"];
+    assert_eq!(
+        separate_report["allocation_rule"],
+        "reserved-unsupported-and-conflict-no-reassignment-general-priority-fnv1a-audit-v2"
+    );
+    assert_eq!(separate_report["unsupported"]["configured"], 1);
+    assert_eq!(separate_report["unsupported"]["selected"], 1);
+    let novel = separate_report["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["input"]["text"] == "completely novel")
+        .unwrap();
+    assert_eq!(novel["allocation"], "Unsupported");
+    assert!(policy.get("unsupported").is_none());
+    let separate_open = ["tui", "--report", separate_saved.to_str().unwrap()];
+    assert_eq!(s.json(&separate_open)["counts"]["originals"], 3);
+    let separate_replay = s.json(
+        &[
+            &common[..],
+            &separate_config,
+            &["--replay", separate_saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    assert_eq!(separate_replay["replay_verified"], true);
+    // A report allocated under the shared rule does not replay under this policy.
+    let other_rule = s.run(
+        &[
+            &common[..],
+            &separate_config,
+            &["--replay", saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    assert_ne!(other_rule.status.code(), Some(0));
     // Same originals and decisions, different query snapshot.
     let qtext = fs::read_to_string(q).unwrap();
     fs::write(q, format!("{qtext}\n")).unwrap();
     let mismatch = s.run(&[&common[..], &config, &["--replay", saved.to_str().unwrap()]].concat());
     assert_eq!(mismatch.status.code(), Some(4));
+    // Opening retained evidence remains possible after the live source changes.
+    assert_eq!(s.json(&open)["source_revision"], digest);
     fs::write(q, qtext).unwrap();
     fs::write(input, format!("{text}\nnew source row")).unwrap();
     let stale = s.run(&[&common[..], &config].concat());

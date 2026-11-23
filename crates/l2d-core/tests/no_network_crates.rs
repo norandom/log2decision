@@ -11,7 +11,6 @@ const NETWORK_CRATES: &[&str] = &[
     "hyper",
     "rustls",
     "object_store",
-    "mio",
     "socket2",
     "h2",
     "native-tls",
@@ -36,6 +35,31 @@ fn network_crates_in(lock: &str) -> Vec<&str> {
         .collect()
 }
 
+// On Unix, Crossterm waits on the tty and signal-hook-mio wakes it through a local
+// UnixStream pair. Keep mio confined to those audited upstream releases. A new
+// owner or version needs review even when no network client appears by name.
+fn terminal_poll_dependencies_only(lock: &str) -> bool {
+    lock.split("[[package]]").all(|package| {
+        let mut lines = package.lines();
+        let Some(name) = lines.find_map(|line| line.strip_prefix("name = ")) else {
+            return true;
+        };
+        let version = lines.find_map(|line| line.strip_prefix("version = "));
+        if name == "\"mio\"" {
+            return version == Some("\"1.2.5\"");
+        }
+        let uses_mio = lines.any(|line| {
+            let dep = line.trim().trim_end_matches(',').trim_matches('"');
+            dep.split_whitespace().next() == Some("mio")
+        });
+        !uses_mio
+            || matches!(
+                (name, version),
+                ("\"crossterm\"", Some("\"0.29.0\"")) | ("\"signal-hook-mio\"", Some("\"0.2.5\""))
+            )
+    })
+}
+
 #[test]
 fn cargo_lock_names_no_network_client_crate() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -53,11 +77,28 @@ fn cargo_lock_names_no_network_client_crate() {
     );
     let found = network_crates_in(&lock);
     assert!(
+        terminal_poll_dependencies_only(&lock),
+        "review the owners and version of mio in Cargo.lock"
+    );
+    assert!(
         found.is_empty(),
         "Cargo.lock names network crates {found:?}: a dependency or feature change linked \
          them (requirement 10.2). Check `cargo tree -i <crate>` and the Polars entry in the \
          workspace manifest."
     );
+}
+
+#[test]
+fn mio_from_any_other_dependency_or_release_requires_review() {
+    let entry =
+        "[[package]]\nname = \"crossterm\"\nversion = \"0.29.0\"\ndependencies = [\n \"mio\",\n]\n";
+    assert!(terminal_poll_dependencies_only(entry));
+    assert!(!terminal_poll_dependencies_only(
+        &entry.replace("crossterm", "network-adapter")
+    ));
+    assert!(!terminal_poll_dependencies_only(
+        &entry.replace("0.29.0", "0.29.1")
+    ));
 }
 
 #[test]

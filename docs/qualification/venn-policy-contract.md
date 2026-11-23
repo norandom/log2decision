@@ -79,6 +79,34 @@ deferred; no member disappears. Configured, selected and unused capacities are
 separate from deferred counts. Duplicate member IDs refuse; distinct IDs with equal
 text remain distinct input records, while support still deduplicates originals.
 
+### Separate reservation for unsupported records (task 2.23)
+
+A policy may state `unsupported_slots`. It then selects the rule
+`reserved-unsupported-and-conflict-no-reassignment-general-priority-fnv1a-audit-v2`:
+
+- Unsupported records fill their own capacity first, in ID order. Diagnostics still
+  cannot promote one unsupported record over another.
+- `unknown_slots` is reserved for disagreements alone.
+- General = total minus the three reservations. Overflow from both reserved pools
+  competes there in the unchanged order: investigate, disagreement, unsupported,
+  uncertain.
+- An empty or undersized pool leaves its capacity unused, as before.
+- The capacity must be positive, and the three reservations must fit the budget.
+
+The report then carries `unsupported` counts and the allocation `Unsupported`. A
+policy without the field keeps the first rule, and its policy and report keep their
+saved form byte for byte, so earlier reports reload and replay unchanged. A report
+whose rule does not match its policy is refused. Routing is the same under both rules.
+
+This is an exploratory owner decision of 2026-11-18, taken because disagreements
+filled both shared slots on the 96-record panel and all 17 unsupported records were
+deferred. It sets no final allocation. [Panel replay](../2026-11-18-triage-concept-decision-procedures.md)
+
+A unit test enumerates the 96 combinations of supported, good corroboration, bad
+corroboration, score band, calibration required and calibration present. Each reaches
+exactly one route: 48 unsupported, 20 disagreement, 22 uncertain, 3 investigate and
+3 low priority.
+
 ## Source consistency, replay and resource limits
 
 `PolicySource::Store` validates live history metadata and checks the SQLite read

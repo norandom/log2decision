@@ -15,6 +15,10 @@ use std::path::Path;
 /// labelled and assumed-background pools have independent caps. No later filter.
 pub const ELIGIBILITY: &str = "close-enough-originals-labelled-and-separate-background-v1";
 pub const ALLOCATION: &str = "reserved-no-reassignment-general-priority-fnv1a-audit-v1";
+/// Applies when the policy states `unsupported_slots`: unsupported records have their
+/// own reservation and `unknown_slots` is reserved for disagreements alone.
+pub const ALLOCATION_SEPARATE_UNSUPPORTED: &str =
+    "reserved-unsupported-and-conflict-no-reassignment-general-priority-fnv1a-audit-v2";
 const OVERHEAD: u64 = 1024 * 1024;
 const QUALIFICATION: &str = "Exploratory; qualification incomplete. Policy mechanics and local support do not establish deployment quality.";
 
@@ -66,9 +70,26 @@ pub struct TriagePolicy {
     pub reach: ReachSettings,
     pub require_calibration: bool,
     pub review_budget: usize,
+    /// Shared by unsupported and disagreeing records, or reserved for disagreements
+    /// alone when `unsupported_slots` is stated.
     pub unknown_slots: usize,
+    /// A separate reservation for unsupported records. Absent in policies written
+    /// before it existed; those keep the shared reservation and their saved form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_slots: Option<usize>,
     pub audit_slots: usize,
     pub audit_seed: u64,
+}
+
+/// What routing reads from one record's evidence.
+#[derive(Debug, Clone, Copy)]
+struct Facts {
+    ratio: Option<f32>,
+    /// Within reach with enough labelled support, under the expected profile.
+    supported: bool,
+    bad: bool,
+    good: bool,
+    calibrated: bool,
 }
 
 fn refused(reason: impl Into<String>) -> L2dError {
@@ -97,35 +118,54 @@ impl TriagePolicy {
             || self.reach.expected_profile.trim().is_empty()
             || self.unknown_slots == 0
             || self.audit_slots == 0
+            || self.unsupported_slots == Some(0)
             || self
                 .unknown_slots
                 .checked_add(self.audit_slots)
+                .and_then(|n| n.checked_add(self.unsupported_slots.unwrap_or(0)))
                 .is_none_or(|n| n > self.review_budget)
         {
             return Err(refused(
-                "invalid explicit triage policy: versions, thresholds, support, reach and positive reserved allocations are required",
+                "invalid explicit triage policy: versions, thresholds, support, reach and positive reserved allocations within the review budget are required, including any stated unsupported capacity",
             ));
         }
         Ok(())
     }
 
+    /// The allocation revision this policy selects.
+    pub fn allocation_rule(&self) -> &'static str {
+        match self.unsupported_slots {
+            None => ALLOCATION,
+            Some(_) => ALLOCATION_SEPARATE_UNSUPPORTED,
+        }
+    }
+
     /// Only the saved character scorer ratio is actionable; distances are not scores.
     fn route(&self, evidence: &CloseEnough) -> (Queue, Reason) {
-        let Some(ratio) = evidence
+        self.route_facts(Facts {
+            ratio: evidence.ratio,
+            supported: evidence.close_enough && evidence.profile == self.reach.expected_profile,
+            bad: evidence.bad.count >= self.corroboration,
+            good: evidence.good.count >= self.corroboration,
+            calibrated: evidence.calibrated.is_some(),
+        })
+    }
+
+    fn route_facts(&self, facts: Facts) -> (Queue, Reason) {
+        let Some(ratio) = facts
             .ratio
             .filter(|r| r.is_finite() && (0.0..=1.0).contains(r))
         else {
             return (Queue::Review, Reason::Unsupported);
         };
-        if !evidence.close_enough || evidence.profile != self.reach.expected_profile {
+        if !facts.supported {
             return (Queue::Review, Reason::Unsupported);
         }
-        let bad = evidence.bad.count >= self.corroboration;
-        let good = evidence.good.count >= self.corroboration;
+        let Facts { bad, good, .. } = facts;
         if (bad && good) || (bad && ratio <= self.low) || (good && ratio >= self.high) {
             return (Queue::Review, Reason::Disagreement);
         }
-        if self.require_calibration && evidence.calibrated.is_none() {
+        if self.require_calibration && !facts.calibrated {
             return (Queue::Review, Reason::Uncertain);
         }
         if ratio >= self.high && bad {
@@ -170,6 +210,8 @@ pub enum Allocation {
     UnknownConflict,
     General,
     LowPriorityAudit,
+    /// The separate reservation of `ALLOCATION_SEPARATE_UNSUPPORTED`.
+    Unsupported,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -206,6 +248,9 @@ pub struct PolicyReport {
     pub calibration: CalibrationEvidence,
     pub qualification: String,
     pub decisions: Vec<PolicyDecision>,
+    /// Present exactly when the policy states `unsupported_slots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<AllocationCounts>,
     pub unknown: AllocationCounts,
     pub general: AllocationCounts,
     pub audit: AllocationCounts,
@@ -238,10 +283,15 @@ fn audit_key(id: &str, seed: u64) -> u64 {
         })
 }
 
-fn allocate(
-    rows: &mut [PolicyDecision],
-    policy: &TriagePolicy,
-) -> (AllocationCounts, AllocationCounts, AllocationCounts, usize) {
+struct Allocated {
+    unsupported: Option<AllocationCounts>,
+    unknown: AllocationCounts,
+    general: AllocationCounts,
+    audit: AllocationCounts,
+    deferred: usize,
+}
+
+fn allocate(rows: &mut [PolicyDecision], policy: &TriagePolicy) -> Allocated {
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|a, b| {
         priority(rows[*a].reason)
@@ -255,16 +305,31 @@ fn allocate(
             })
             .then_with(|| rows[*a].input.id.cmp(&rows[*b].input.id))
     });
+    let mut unsupported = 0;
+    if let Some(slots) = policy.unsupported_slots {
+        for &i in &order {
+            if unsupported < slots && rows[i].reason == Reason::Unsupported {
+                rows[i].allocation = Some(Allocation::Unsupported);
+                unsupported += 1;
+            }
+        }
+    }
     let mut unknown = 0;
     for &i in &order {
-        if unknown < policy.unknown_slots
-            && matches!(rows[i].reason, Reason::Unsupported | Reason::Disagreement)
-        {
+        // With a separate unsupported reservation these slots are for disagreements.
+        let eligible = match policy.unsupported_slots {
+            None => matches!(rows[i].reason, Reason::Unsupported | Reason::Disagreement),
+            Some(_) => rows[i].reason == Reason::Disagreement,
+        };
+        if unknown < policy.unknown_slots && eligible {
             rows[i].allocation = Some(Allocation::UnknownConflict);
             unknown += 1;
         }
     }
-    let general_capacity = policy.review_budget - policy.unknown_slots - policy.audit_slots;
+    let general_capacity = policy.review_budget
+        - policy.unknown_slots
+        - policy.audit_slots
+        - policy.unsupported_slots.unwrap_or(0);
     let mut general = 0;
     for &i in &order {
         if general < general_capacity
@@ -288,12 +353,13 @@ fn allocate(
             audit += 1;
         }
     }
-    (
-        count(policy.unknown_slots, unknown),
-        count(general_capacity, general),
-        count(policy.audit_slots, audit),
-        rows.len() - unknown - general - audit,
-    )
+    Allocated {
+        unsupported: policy.unsupported_slots.map(|n| count(n, unsupported)),
+        unknown: count(policy.unknown_slots, unknown),
+        general: count(general_capacity, general),
+        audit: count(policy.audit_slots, audit),
+        deferred: rows.len() - unsupported - unknown - general - audit,
+    }
 }
 
 /// Source validation distinguishes mutable stores from captured file/archive frames.
@@ -441,7 +507,7 @@ pub fn triage_policy<'a>(
         }
         // Stable member order independent of input iteration order.
         decisions.sort_by(|a, b| a.input.id.cmp(&b.input.id));
-        let (unknown, general, audit, deferred) = allocate(&mut decisions, policy);
+        let allocated = allocate(&mut decisions, policy);
         if let PolicySource::Store(store) = source
             && generation != Some(store.read_generation()?)
         {
@@ -454,17 +520,18 @@ pub fn triage_policy<'a>(
             query_source: None,
             policy: policy.clone(),
             eligibility: ELIGIBILITY.into(),
-            allocation_rule: ALLOCATION.into(),
+            allocation_rule: policy.allocation_rule().into(),
             scorer_revision: scorer.revision().into(),
             evidence_revision: history.metadata_revision().into(),
             actual_profile: encoder.profile().into(),
             calibration: calibration_evidence,
             qualification: QUALIFICATION.into(),
             decisions,
-            unknown,
-            general,
-            audit,
-            deferred,
+            unsupported: allocated.unsupported,
+            unknown: allocated.unknown,
+            general: allocated.general,
+            audit: allocated.audit,
+            deferred: allocated.deferred,
         })
     })();
     let result = result.and_then(|report| {
@@ -564,6 +631,23 @@ fn evidence_consistent(v: &CloseEnough, input: &PolicyInput, rate: Option<f32>) 
 }
 
 impl PolicyReport {
+    /// Check the report against its embedded policy, including the retained routes,
+    /// support and allocations. This reads no current scorer, history or source.
+    pub fn validate_saved(mut self) -> Result<Self, L2dError> {
+        self.policy.validate()?;
+        if self.format != 1
+            || self.qualification != QUALIFICATION
+            || self.eligibility != ELIGIBILITY
+            || self.allocation_rule != self.policy.allocation_rule()
+        {
+            return Err(refused(
+                "incompatible saved policy report format, qualification, eligibility or allocation",
+            ));
+        }
+        self.validate_members()?;
+        Ok(self)
+    }
+
     fn validate_members(&mut self) -> Result<(), L2dError> {
         let rate = match &self.calibration {
             CalibrationEvidence::Missing => None,
@@ -621,11 +705,12 @@ impl PolicyReport {
             .iter_mut()
             .map(|r| r.allocation.take())
             .collect();
-        let (unknown, general, audit, deferred) = allocate(&mut self.decisions, &self.policy);
-        if unknown != self.unknown
-            || general != self.general
-            || audit != self.audit
-            || deferred != self.deferred
+        let allocated = allocate(&mut self.decisions, &self.policy);
+        if allocated.unsupported != self.unsupported
+            || allocated.unknown != self.unknown
+            || allocated.general != self.general
+            || allocated.audit != self.audit
+            || allocated.deferred != self.deferred
             || self.decisions.iter().map(|r| r.allocation).ne(allocations)
         {
             return Err(refused("inconsistent saved allocations or deferred count"));
@@ -710,12 +795,8 @@ impl PolicyReport {
         if bytes.len() as u64 != len {
             return Err(refused("policy report changed during reload"));
         }
-        let mut out: Self = serde_json::from_slice(&bytes).map_err(|e| refused(e.to_string()))?;
-        if out.format != 1
-            || out.qualification != QUALIFICATION
-            || out.eligibility != ELIGIBILITY
-            || out.allocation_rule != ALLOCATION
-            || out.scorer_revision != scorer_revision
+        let out: Self = serde_json::from_slice(&bytes).map_err(|e| refused(e.to_string()))?;
+        if out.scorer_revision != scorer_revision
             || out.actual_profile != profile
             || out.evidence_revision != evidence_revision
             || out.policy != *policy
@@ -724,7 +805,7 @@ impl PolicyReport {
                 "incompatible report format, policy, scorer, eligibility, allocation, history or profile revision",
             ));
         }
-        out.validate_members()?;
+        let out = out.validate_saved()?;
         guard.finish()?;
         budget.hold(budget.held_bytes().saturating_add(needed));
         Ok(out)
@@ -808,5 +889,270 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"complete");
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    fn policy(unsupported_slots: Option<usize>) -> TriagePolicy {
+        TriagePolicy {
+            version: "unit".into(),
+            selection_provenance: "unit fixture; exploratory only".into(),
+            low: 0.4,
+            high: 0.6,
+            corroboration: 1,
+            reach: ReachSettings {
+                radius: 0.5,
+                top_k: 3,
+                minimum_labelled_support: 1,
+                expected_profile: "unit-profile".into(),
+            },
+            require_calibration: false,
+            review_budget: 6,
+            unknown_slots: 2,
+            unsupported_slots,
+            audit_slots: 1,
+            audit_seed: 5,
+        }
+    }
+
+    fn queue_of(reason: Reason) -> Queue {
+        match reason {
+            Reason::HighCorroborated => Queue::Investigate,
+            Reason::LowCorroborated => Queue::LowPriority,
+            _ => Queue::Review,
+        }
+    }
+
+    fn row(id: &str, reason: Reason) -> PolicyDecision {
+        let ratio = (reason != Reason::Unsupported).then_some(0.5);
+        PolicyDecision {
+            input: PolicyInput {
+                id: id.into(),
+                text: id.into(),
+                group: None,
+            },
+            score: ScoreEvidence {
+                kind: ScorerKind::MarkSet,
+                revision: "unit".into(),
+                comparison_class_assumed: false,
+                diagnostic_ratio: 0.5,
+                actionable_ratio: ratio,
+            },
+            vector: None,
+            queue: queue_of(reason),
+            reason,
+            explanation: String::new(),
+            allocation: None,
+        }
+    }
+
+    /// Three disagreements, three unsupported, one investigate and one low priority,
+    /// in ID order as `triage_policy` supplies them.
+    fn panel() -> Vec<PolicyDecision> {
+        vec![
+            row("d1", Reason::Disagreement),
+            row("d2", Reason::Disagreement),
+            row("d3", Reason::Disagreement),
+            row("h1", Reason::HighCorroborated),
+            row("l1", Reason::LowCorroborated),
+            row("u1", Reason::Unsupported),
+            row("u2", Reason::Unsupported),
+            row("u3", Reason::Unsupported),
+        ]
+    }
+
+    fn pools(rows: &[PolicyDecision]) -> Vec<(&str, Option<Allocation>)> {
+        rows.iter()
+            .map(|r| (r.input.id.as_str(), r.allocation))
+            .collect()
+    }
+
+    #[test]
+    fn every_routing_case_reaches_exactly_one_documented_route() {
+        let mut seen = std::collections::BTreeMap::new();
+        for required in [false, true] {
+            let mut p = policy(None);
+            p.require_calibration = required;
+            for supported in [false, true] {
+                for good in [false, true] {
+                    for bad in [false, true] {
+                        for calibrated in [false, true] {
+                            // The low and high bands include their thresholds.
+                            for (band, ratio) in [(-1, 0.4), (0, 0.5), (1, 0.6)] {
+                                let got = p.route_facts(Facts {
+                                    ratio: Some(ratio),
+                                    supported,
+                                    bad,
+                                    good,
+                                    calibrated,
+                                });
+                                // Precedence as written in the policy contract.
+                                let expected = if !supported {
+                                    Reason::Unsupported
+                                } else if (good && bad) || (bad && band < 0) || (good && band > 0) {
+                                    Reason::Disagreement
+                                } else if required && !calibrated {
+                                    Reason::Uncertain
+                                } else if band > 0 && bad {
+                                    Reason::HighCorroborated
+                                } else if band < 0 && good {
+                                    Reason::LowCorroborated
+                                } else {
+                                    Reason::Uncertain
+                                };
+                                assert_eq!(
+                                    got,
+                                    (queue_of(expected), expected),
+                                    "required={required} supported={supported} good={good} bad={bad} calibrated={calibrated} band={band}"
+                                );
+                                *seen.entry(format!("{:?}", got.1)).or_insert(0usize) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Counted by hand from the precedence: 96 cases, every route reachable.
+        let expected: std::collections::BTreeMap<String, usize> = [
+            ("Disagreement", 20),
+            ("HighCorroborated", 3),
+            ("LowCorroborated", 3),
+            ("Uncertain", 22),
+            ("Unsupported", 48),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(seen, expected);
+        assert_eq!(seen.values().sum::<usize>(), 96);
+    }
+
+    #[test]
+    fn an_unusable_ratio_is_unsupported_whatever_the_evidence() {
+        let p = policy(None);
+        for ratio in [None, Some(f32::NAN), Some(-0.1), Some(1.1)] {
+            let got = p.route_facts(Facts {
+                ratio,
+                supported: true,
+                bad: true,
+                good: false,
+                calibrated: true,
+            });
+            assert_eq!(got, (Queue::Review, Reason::Unsupported));
+        }
+    }
+
+    #[test]
+    fn shared_reservation_is_unchanged_without_an_unsupported_capacity() {
+        let p = policy(None);
+        assert_eq!(p.allocation_rule(), ALLOCATION);
+        let mut rows = panel();
+        let out = allocate(&mut rows, &p);
+        // Disagreements precede unsupported records, so they take both shared slots.
+        // An unsupported record is reviewed only if the general pool reaches it.
+        assert_eq!(
+            pools(&rows),
+            [
+                ("d1", Some(Allocation::UnknownConflict)),
+                ("d2", Some(Allocation::UnknownConflict)),
+                ("d3", Some(Allocation::General)),
+                ("h1", Some(Allocation::General)),
+                ("l1", Some(Allocation::LowPriorityAudit)),
+                ("u1", Some(Allocation::General)),
+                ("u2", None),
+                ("u3", None),
+            ]
+        );
+        assert!(out.unsupported.is_none());
+        assert_eq!(out.unknown, count(2, 2));
+        assert_eq!(out.general, count(3, 3));
+        assert_eq!(out.audit, count(1, 1));
+        assert_eq!(out.deferred, 2);
+    }
+
+    #[test]
+    fn unsupported_records_receive_their_own_slots_while_disagreements_fill_theirs() {
+        let p = policy(Some(2));
+        p.validate().unwrap();
+        assert_eq!(p.allocation_rule(), ALLOCATION_SEPARATE_UNSUPPORTED);
+        let mut rows = panel();
+        let out = allocate(&mut rows, &p);
+        assert_eq!(
+            pools(&rows),
+            [
+                ("d1", Some(Allocation::UnknownConflict)),
+                ("d2", Some(Allocation::UnknownConflict)),
+                ("d3", None),
+                ("h1", Some(Allocation::General)),
+                ("l1", Some(Allocation::LowPriorityAudit)),
+                ("u1", Some(Allocation::Unsupported)),
+                ("u2", Some(Allocation::Unsupported)),
+                ("u3", None),
+            ]
+        );
+        assert_eq!(out.unsupported, Some(count(2, 2)));
+        assert_eq!(out.unknown, count(2, 2));
+        assert_eq!(out.general, count(1, 1));
+        assert_eq!(out.audit, count(1, 1));
+        assert_eq!(out.deferred, 2);
+    }
+
+    #[test]
+    fn overflow_from_both_reservations_competes_in_the_general_pool() {
+        let mut p = policy(Some(1));
+        p.unknown_slots = 1;
+        p.review_budget = 7;
+        let mut rows = panel();
+        let out = allocate(&mut rows, &p);
+        // General holds four: investigate, then disagreements, then unsupported.
+        assert_eq!(
+            pools(&rows),
+            [
+                ("d1", Some(Allocation::UnknownConflict)),
+                ("d2", Some(Allocation::General)),
+                ("d3", Some(Allocation::General)),
+                ("h1", Some(Allocation::General)),
+                ("l1", Some(Allocation::LowPriorityAudit)),
+                ("u1", Some(Allocation::Unsupported)),
+                ("u2", Some(Allocation::General)),
+                ("u3", None),
+            ]
+        );
+        assert_eq!(out.general, count(4, 4));
+        assert_eq!(out.deferred, 1);
+    }
+
+    #[test]
+    fn an_empty_unsupported_pool_leaves_its_capacity_unused() {
+        let p = policy(Some(2));
+        let mut rows: Vec<_> = panel()
+            .into_iter()
+            .filter(|r| r.reason != Reason::Unsupported)
+            .collect();
+        let out = allocate(&mut rows, &p);
+        assert_eq!(out.unsupported, Some(count(2, 0)));
+        // No reassignment: the third disagreement stays deferred.
+        assert_eq!(out.unknown, count(2, 2));
+        assert_eq!(out.general, count(1, 1));
+        assert_eq!(rows[2].allocation, None);
+        assert_eq!(out.deferred, 1);
+    }
+
+    #[test]
+    fn unsupported_capacity_must_be_positive_and_fit_the_budget() {
+        policy(Some(3)).validate().unwrap();
+        assert!(policy(Some(0)).validate().is_err());
+        assert!(policy(Some(4)).validate().is_err());
+        assert!(policy(Some(usize::MAX)).validate().is_err());
+    }
+
+    #[test]
+    fn a_policy_without_the_capacity_keeps_its_saved_form() {
+        let old = serde_json::to_value(policy(None)).unwrap();
+        assert!(old.get("unsupported_slots").is_none());
+        let back: TriagePolicy = serde_json::from_value(old).unwrap();
+        assert_eq!(back, policy(None));
+        let new = serde_json::to_value(policy(Some(2))).unwrap();
+        assert_eq!(new["unsupported_slots"], 2);
+        let back: TriagePolicy = serde_json::from_value(new).unwrap();
+        assert_eq!(back, policy(Some(2)));
     }
 }

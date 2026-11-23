@@ -1,0 +1,14 @@
+[
+  {"id":"R01","text":"login denied for guest","score":0.98,"events":[["edge-01","08:01"],["edge-02","09:08"]]},
+  {"id":"R02","text":"login challenge failed","score":0.96,"events":[["edge-01","08:02"]]},
+  {"id":"R03","text":"authentication challenge rejected","score":0.94,"opinion":"recommend","reason":"Similar wording in a reviewed challenge rejection.","events":[["edge-01","08:05"],["edge-01","08:46"],["idp-01","09:17"]]},
+  {"id":"R04","text":"session verification declined","score":0.91,"opinion":"recommend","reason":"Reviewed session-verification failures provide a lead.","events":[["idp-01","09:12"],["edge-02","10:15"]]},
+  {"id":"R05","text":"identity check expired","score":0.88,"opinion":"recommend","reason":"A reviewed expiry warrants a closer look.","events":[["idp-01","10:18"]]},
+  {"id":"R06","text":"token refresh scheduled","score":0.84,"opinion":"pass","reason":"The fixture records a scheduled refresh.","events":[["edge-02","08:27"],["edge-02","09:42"]]},
+  {"id":"R07","text":"service account rotation complete","score":0.82,"opinion":"pass","reason":"The fixture records a completed rotation.","events":[["idp-01","10:23"]]},
+  {"id":"R08","text":"identity response format changed","score":0.80,"opinion":"abstain","reason":"The fixture producer abstained on an unfamiliar format.","events":[["edge-01","09:26"],["idp-01","11:04"]]},
+  {"id":"R09","text":"login succeeded for guest","score":0.40,"events":[["edge-02","08:50"],["edge-01","10:46"]]},
+  {"id":"R10","text":"login window closed","score":0.31,"events":[["edge-02","09:15"]]},
+  {"id":"R11","text":"session cache cleared","score":0.22,"events":[["idp-01","10:52"],["idp-01","11:19"]]},
+  {"id":"R12","text":"service heartbeat received","score":0.10,"events":[["edge-01","11:48"]]}
+]

@@ -21,6 +21,7 @@ members = [
     "crates/l2d-decide",
     "crates/l2d-assess",
     "crates/l2d-eval",
+    "crates/l2d-triager",
     "crates/l2d-cli",
 ]
 # l2d-train (offline training, later `burn`) is optional: it is left out of the default
@@ -33,6 +34,7 @@ default-members = [
     "crates/l2d-decide",
     "crates/l2d-assess",
     "crates/l2d-eval",
+    "crates/l2d-triager",
     "crates/l2d-cli",
 ]
 
@@ -52,6 +54,7 @@ l2d-train = { path = "crates/l2d-train" }
 l2d-decide = { path = "crates/l2d-decide" }
 l2d-assess = { path = "crates/l2d-assess" }
 l2d-eval = { path = "crates/l2d-eval" }
+l2d-triager = { path = "crates/l2d-triager" }
 
 clap = { version = "4", features = ["derive"] }
 csv = "1"
@@ -94,6 +97,7 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tempfile = "3"
 # Only the call that reports the free physical memory (requirement 12.1) and the call
 # that reports the free space of a volume (the check before result parts are written,
 # requirement 13.11). The crate is already in the dependency tree through Polars; no
