@@ -1,5 +1,7 @@
 # Embedding qualification: what is in the vectors the NPU encoder gives?
 
+Update, 2026-11-18. This report covers the earlier single-graph payload encoder. The current assessment covers the hierarchical NPU encoder, its use in security triage and the evidence on held endpoints. [Current vectorization assessment](2026-11-18-vectorization-assessment.md)
+
 2026-11-14. Task 2.15 of the spec `npu-log-decision`, the gate before the
 neighbour scorer, the linear head and the outlier ranking (tasks 2.8, 2.10,
 2.11). Measured on the reference host (NPU driver 32.0.20102.4480, AMD Ryzen AI

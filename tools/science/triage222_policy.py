@@ -65,6 +65,10 @@ def run_policy(run, runtime, output=None):
     require(artifacts in run.parents, 'Use a directory below the project artifacts root')
     target = (ARTIFACTS / 'task-1.26-target').resolve(strict=True)
     binary = target / 'debug/l2d.exe'
+    # A later foreground build may have replaced the reusable debug executable.
+    archived_binary = run / f'l2d-{INTEGRATED_CLI_SHA256[:8]}.exe'
+    if archived_binary.is_file():
+        binary = archived_binary
     require(sha(binary) == INTEGRATED_CLI_SHA256, 'Executable differs from the certified merged CLI')
     query = run / 'queries.csv'
     history = run / 'history.csv'

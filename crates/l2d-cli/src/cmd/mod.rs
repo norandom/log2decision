@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod shift;
 pub mod store;
 pub mod triage;
+pub mod tui;
 
 /// The failure of an operation that is offered on the command line but not wired yet.
 ///

@@ -1,5 +1,21 @@
 # Handover: npu-log-decision
 
+## Triage concept and owner decisions, 18 November
+
+The [triage concept](../docs/2026-11-18-triage-concept-decision-procedures.md) orders the pipeline, separates the three meanings of Venn and parks agents, remote sources, the SPL translator and a host memory ledger with their preconditions. Owner decisions of 18 November, all exploratory: unsupported records get their own review slots in a new policy revision; the next comparison uses a low positive share and a sweep of review budgets; the memory gaps stay parked. Neither change has a task yet. Propose tasks in the parent spec before starting.
+
+A one-off analysis of the frozen 96-record panel found the score's top 35 are 35 of 35 positive, like the policy's 35 non-low-priority records. The first negative is at score rank 42. In ranks 42 to 96 (55 records, 28 positive), the 7 unsupported records were all positive and the 48 low-priority ones 21 positive. The next panel must test whether unsupported records are positive at a higher rate than their score rank predicts.
+
+## Triager workflow, 18 November
+
+Press `r` on a result or its evidence to browse the current view's originals. Long records page through the full retained text. Esc restores the result selection or evidence scroll position. Browsing a final work set follows its allocation order and preserves the receipt.
+
+The first native Rust workbench opens with `l2d tui --demo --session hunt.json` or `l2d tui --report policy-report.json`. Taffy lays out the panes, Ratatui draws them and Crossterm handles terminal input. The reference walkthrough, actual parent CLI producer and native PTY share acceptance cases. A candidate can be handed off before allocation. [Cross-spec cases and replay](../docs/qualification/triager-e2e.md) · [Analyst flow](specs/triager/analyst-flow.md) · [Interactive design](specs/triager/prototype/index.html)
+
+The final native binary passed the synthetic and 96-original policy PTY cases on Windows. Independent review verified immutable finals, guarded receipt updates, exact console-mode restoration and diagnostic score labels. In the workspace run, 960 of 962 tests passed on the first attempt and 56 were skipped. Two test fixtures reused a stale SQLite path after Windows recycled a process ID. Both suites now use isolated temporary directories, and all 23 enabled tests in them passed on rerun. The full run and recheck are recorded in `D:\BuildArtifacts\log2decision\triager-e2e\workspace-final.log` and `fixture-recheck.log`.
+
+The next service milestone binds archive score and filter memberships to one source, drives the reduction over MCP stdio and compares the resulting counts with the terminal. The native client currently works from bounded retained evidence. The large-data targets, SSH deployment test and cross-client receipts remain open. Parent 2.22 owns qualification on future cases. The frozen executable for the earlier 96-record comparison was preserved in its run directory as `l2d-9215ee72.exe`; the replay script verifies its original SHA-256. [Worked recipe](specs/triager/recipe.md) · [Performance contract](specs/triager/performance.md) · [Triager tasks](specs/triager/tasks.md)
+
 ## Foreground comparison, 18 November
 
 Task 2.22 now has a frozen three-way comparison on the same 96 held CSIC development records. At 12 reviews per workflow, score alone recovered 12 of 69 benchmark positives, Venn recovered 11 and automatic patterns recovered 8. None of the 16 learned templates matched a held record. The Venn allocation recovered three positives missed by score alone and omitted four positives found by score alone. All 17 unsupported cases were positive and deferred. Independent review reproduced the decisions, counts and endpoint breakdown. [Report and frozen evidence](../docs/2026-11-18-triage-workflow-comparison.md)

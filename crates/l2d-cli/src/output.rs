@@ -131,28 +131,7 @@ pub fn human_bytes(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// Whether a character changes how a terminal lays out or interprets what follows
-/// without being visible itself: control characters (C0, C1), and the format
-/// characters that hide text or reverse its direction (soft hyphen, the Arabic letter
-/// mark, zero-width characters and direction marks U+200B to U+200F, line and paragraph
-/// separators and the bidirectional embeddings and overrides U+2028 to U+202E, the word
-/// joiner, invisible operators and bidirectional isolates U+2060 to U+206F, the byte
-/// order mark, the interlinear annotation marks and the tag characters).
-fn is_invisible_or_control(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{ad}'
-                | '\u{61c}'
-                | '\u{180e}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
-                | '\u{e0000}'..='\u{e007f}'
-        )
-}
+use l2d_core::terminal_text::is_invisible_or_control;
 
 /// A log text for the text output, on one line: control characters and invisible
 /// format characters are shown escaped (log text is data, often an attacker's, and must
@@ -287,7 +266,7 @@ fn error_message(error: &L2dError) -> String {
 
 /// The one-line diagnostic for standard error.
 pub fn error_line(error: &L2dError) -> String {
-    format!("error: {}", error_message(error))
+    format!("error: {}", shown_text(&error_message(error), 4096))
 }
 
 /// The machine-readable form of a failure: `{"error":{"kind":…,"message":…,"exit_code":…}}`.
@@ -340,6 +319,22 @@ mod tests {
         assert_eq!(
             error_line(&error),
             "error: runtime failure: database error: disk full"
+        );
+    }
+
+    #[test]
+    fn terminal_errors_escape_log_controls_and_preserve_machine_readable_detail() {
+        let error = L2dError::InvalidInput {
+            detail: "record\u{1b}[2J\u{200b}".into(),
+        };
+        let shown = error_line(&error);
+        assert!(!shown.contains(['\u{1b}', '\u{200b}']));
+        assert!(shown.contains(r"record\u{1b}[2J\u{200b}"));
+        assert!(
+            error_json(&error)["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains('\u{1b}')
         );
     }
 

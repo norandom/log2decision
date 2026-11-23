@@ -1,0 +1,23 @@
+[package]
+name = "l2d-triager"
+description = "Local set reduction and terminal workbench for retained log evidence."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+l2d-core.workspace = true
+l2d-decide.workspace = true
+l2d-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+tempfile.workspace = true
+crossterm = { version = "=0.29.0", default-features = false, features = ["windows", "events"] }
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
+taffy = { version = "=0.15.1", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }

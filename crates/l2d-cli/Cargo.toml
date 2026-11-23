@@ -18,6 +18,7 @@ l2d-baseline.workspace = true
 l2d-decide.workspace = true
 l2d-assess.workspace = true
 l2d-eval.workspace = true
+l2d-triager.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -11,11 +11,10 @@ It is built for a security analyst with a laptop and too many logs. Nothing is
 sent anywhere, and the tool is designed to stay out of the way of whatever else
 the machine is doing.
 
-Status, 2026-11-17: under construction. You can read, mark, score, calibrate and
-triage a file of logs from the command line with the simple scorer. The store,
-the search and the encoder on the NPU exist as tested library code and are not
-wired to commands yet. See
-[what works today](#what-works-today).
+As of 18 November 2026, the CLI can read archives, discover patterns, mark and
+score logs, encode original records on the NPU, and use reviewed neighbours to
+explain a triage queue. The assessment library now compares vector sets.
+[What works today](#what-works-today) · [Current vectorization assessment](docs/2026-11-18-vectorization-assessment.md)
 
 ## What you will get
 
@@ -30,11 +29,9 @@ For a file of logs, `l2d triage` returns three lists:
 Each decision shows what it rests on: which scorer produced it and, once the
 encoder exists, the nearest labelled logs.
 
-Three things it will not do. It does not block, delete or change logs; it ranks
-and you decide. It does not send log data over a network; no network code is
-even linked into the binary. And it does not take the machine down: before it
-loads a file it reads the free memory, sizes its batches to fit, and refuses
-with a clear message when a job would not fit.
+The analyst decides what to review. The tool preserves source logs and processes
+evidence locally. Before loading a file it checks free memory, sizes its batches
+and reports when a job exceeds the available budget.
 
 ## How it decides
 
@@ -49,9 +46,10 @@ On top of the score sits a calibration step (conformal prediction). It turns
 bad, or too close to call. Without it you have a ranking; with it you have a
 bounded risk when you skip a log.
 
-A small encoder trained on log text, running on the laptop's NPU, is the next
-stage. It has to beat the simple scorer on endpoints it has never seen before
-it is allowed in.
+The laptop's NPU turns each supported original into a 128-component vector.
+An analyst can use a known example to retrieve similar records and inspect
+where their outcomes agree or differ. The fitted text score supplies the
+ranking. [Retrieval and held-endpoint evidence](docs/2026-11-18-vectorization-assessment.md)
 
 ## What works today
 
@@ -83,6 +81,16 @@ deduplicated to 25,608 distinct logs in about a quarter of a second, with a
 peak of 73 MiB of memory. In small batches the peak drops to about 35 MiB.
 
 ## Try it
+
+The commands below use `l2d` when the executable is on your `PATH`. From a source checkout, you can also launch the verified debug build directly. On the Windows reference workstation, run this in PowerShell from the repository root.
+
+```powershell
+& 'D:\BuildArtifacts\log2decision\task-1.26-target\debug\l2d.exe' tui --demo --session hunt.json
+```
+
+Open the Rust triage workbench with `l2d tui --demo --session hunt.json`. Press `1` for high-scoring originals outside the filter, then `r` to browse their raw log text. Use ↑/↓ to move between originals and Esc to return to your selected result. Press Enter for a record's evidence, `c` for recommendation coverage, and `s` to save. For an existing investigation, pass `--report policy-report.json` in place of `--demo`. The report comes from `l2d triage --policy … --out policy-report.json`. [Walkthrough, keys and test cases](docs/qualification/triager-e2e.md)
+
+The demo has 20 occurrences across 12 distinct originals. To try the search bar, press `/` at the root, type `host=edge-01 (login OR challenge) score>=0.9` and press Enter. Three raw log rows represent four matching occurrences on that host. Press `1` from those results to see which high-scoring originals the saved filter missed. You can also open a search directly with `l2d tui --demo --query 'host=edge-01 (login OR challenge) score>=0.9'`. Searches use Splunk's language and can be piped, for example `fail* | sort - score | head 5`. [Search language reference](docs/2026-11-18-triager-search-language.md)
 
 You need Windows 11 and Rust 1.98 (the repository pins the toolchain). Linux
 should work for everything except the NPU, but has not been tested.
@@ -134,6 +142,10 @@ overturned something, the document says so at the top.
 
 | Date | Document | What it settles |
 | --- | --- | --- |
+| 2026-11-18 | [Triage concept: the model proposes, set algebra decides, the analyst judges](docs/2026-11-18-triage-concept-decision-procedures.md) | Concept for owner review. Orders the pipeline into five stages, separates the three meanings of Venn, and states what Venn changes as measured: the policy does not rank better than the score on a panel the score saturated, but its unsupported queue was 17 of 17 positive and all deferred. Proposes an exhaustive 96-case policy test and a decision on the shared reservation; agents, remote sources and the host memory ledger are parked with their preconditions |
+| 2026-11-18 | [The triager's search language: Splunk SPL over retained originals](docs/2026-11-18-triager-search-language.md) | Terms follow Splunk's segmentation (`fail*` finds `failed`, `fail` does not). Supports `TERM`, `CASE`, `IN`, automatic `key=value` fields, `earliest`/`latest`, and pipes to `where`, `regex`, `rex`, `fields`, `head`, `tail`, `sort` and `dedup`. Table-building commands are refused, and every difference from Splunk is listed |
+| 2026-11-18 | [Archive-scale triage performance and the SSH terminal stack](docs/2026-11-18-triager-performance-and-terminal-stack.md) | Measured archive and NPU costs, proposed warm drill-down targets, and the choice of Taffy, Ratatui and Crossterm. |
+| 2026-11-18 | [Vectorization assessment for security triage](docs/2026-11-18-vectorization-assessment.md) | What the current NPU vector captures, when neighbours help a hunt, and how to compare representations with the new assessment library. |
 | 2026-11-18 | [Three review workflows on held CSIC endpoints](docs/2026-11-18-triage-workflow-comparison.md) | At 12 reviews on one development panel, score alone found 12 benchmark positives, Venn found 11 and automatic patterns found 8 via the fallback. All 17 unsupported records were deferred positives. |
 | 2026-11-17 | [Outlier distance and neighbourhood size](docs/2026-11-17-outlier-k-comparison.md) | Bounded squared-L2 ranking and per-label evidence; larger k did not improve a frozen CSIC endpoint-presence proxy. Three groups per class and encoder-training overlap limit the result to development evidence; default k=5 remains unchanged |
 | 2026-11-17 | [Exploratory redaction transfer comparison](docs/2026-11-17-redaction-transfer-comparison.md) | Confirmed host/path redactions do not establish agnostic MarkSet scoring: five-fold mean held AUC 0.6163 raw and 0.6158 redacted, with two redacted folds exceeding the 0.05 diagnostic gap. Frozen fold-specific NPU vectors give an uncertain diagnostic-head change, not a production classifier. All arms exhaust the same 100-record review budget at precision one; recall is budget-limited to about 3.14%. Qualification remains incomplete; no final holdout was examined |

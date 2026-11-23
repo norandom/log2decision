@@ -593,6 +593,35 @@ fn analyst_workflow_pins_rules_score_history_and_replays_policy() {
         .unwrap();
     assert!(unsupported["score"]["actionable_ratio"].is_null());
     assert_eq!(unsupported["queue"], "Review");
+    let open = ["tui", "--report", saved.to_str().unwrap()];
+    let imported = s.json(&open);
+    assert_eq!(imported["counts"]["originals"], 3);
+    assert_eq!(imported["counts"]["occurrences"], Value::Null);
+    assert_eq!(imported["regions"]["unknown"]["originals"], 3);
+    let digest = l2d_core::input::content_sha256(&fs::read(&saved).unwrap());
+    assert_eq!(imported["source_revision"], digest);
+    let decisions = policy["decisions"].as_array().unwrap();
+    let expected_in = decisions
+        .iter()
+        .filter(|r| matches!(r["queue"].as_str(), Some("Investigate" | "Review")))
+        .count();
+    let routed = s.json(&[&open[..], &["--policy-recommendations"]].concat());
+    assert_eq!(routed["regions"]["recommended"]["originals"], expected_in);
+    assert_eq!(routed["regions"]["pass"]["originals"], 3 - expected_in);
+    assert_eq!(routed["regions"]["unknown"]["originals"], 0);
+    let projected_ids: std::collections::BTreeSet<_> = routed["preview"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        projected_ids,
+        decisions
+            .iter()
+            .map(|r| r["input"]["id"].as_str().unwrap())
+            .collect()
+    );
     let replay = s.json(&[&common[..], &config, &["--replay", saved.to_str().unwrap()]].concat());
     assert_eq!(replay["replay_verified"], true);
     assert_eq!(policy["query_source"]["path"], q);
@@ -601,6 +630,8 @@ fn analyst_workflow_pins_rules_score_history_and_replays_policy() {
     fs::write(q, format!("{qtext}\n")).unwrap();
     let mismatch = s.run(&[&common[..], &config, &["--replay", saved.to_str().unwrap()]].concat());
     assert_eq!(mismatch.status.code(), Some(4));
+    // Opening retained evidence remains possible after the live source changes.
+    assert_eq!(s.json(&open)["source_revision"], digest);
     fs::write(q, qtext).unwrap();
     fs::write(input, format!("{text}\nnew source row")).unwrap();
     let stale = s.run(&[&common[..], &config].concat());

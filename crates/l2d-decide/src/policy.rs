@@ -564,6 +564,23 @@ fn evidence_consistent(v: &CloseEnough, input: &PolicyInput, rate: Option<f32>) 
 }
 
 impl PolicyReport {
+    /// Check the report against its embedded policy, including the retained routes,
+    /// support and allocations. This reads no current scorer, history or source.
+    pub fn validate_saved(mut self) -> Result<Self, L2dError> {
+        self.policy.validate()?;
+        if self.format != 1
+            || self.qualification != QUALIFICATION
+            || self.eligibility != ELIGIBILITY
+            || self.allocation_rule != ALLOCATION
+        {
+            return Err(refused(
+                "incompatible saved policy report format, qualification, eligibility or allocation",
+            ));
+        }
+        self.validate_members()?;
+        Ok(self)
+    }
+
     fn validate_members(&mut self) -> Result<(), L2dError> {
         let rate = match &self.calibration {
             CalibrationEvidence::Missing => None,
@@ -710,12 +727,8 @@ impl PolicyReport {
         if bytes.len() as u64 != len {
             return Err(refused("policy report changed during reload"));
         }
-        let mut out: Self = serde_json::from_slice(&bytes).map_err(|e| refused(e.to_string()))?;
-        if out.format != 1
-            || out.qualification != QUALIFICATION
-            || out.eligibility != ELIGIBILITY
-            || out.allocation_rule != ALLOCATION
-            || out.scorer_revision != scorer_revision
+        let out: Self = serde_json::from_slice(&bytes).map_err(|e| refused(e.to_string()))?;
+        if out.scorer_revision != scorer_revision
             || out.actual_profile != profile
             || out.evidence_revision != evidence_revision
             || out.policy != *policy
@@ -724,7 +737,7 @@ impl PolicyReport {
                 "incompatible report format, policy, scorer, eligibility, allocation, history or profile revision",
             ));
         }
-        out.validate_members()?;
+        let out = out.validate_saved()?;
         guard.finish()?;
         budget.hold(budget.held_bytes().saturating_add(needed));
         Ok(out)

@@ -19,6 +19,8 @@ This order supersedes earlier sequencing notes; completed task records remain hi
 | Venn triage | 2.8 → 2.11 → 2.20 → 2.9 → 2.22 | Explained queues compared with score alone at equal review budget |
 | Feedback | 2.21 | Observed outcomes versioned; explicit, revalidated updates |
 
+The companion `triager` now consumes this project's retained policy decisions in a Rust terminal. Parent task 2.9 owns the saved report and pre-allocation routes. Triager task 3.2a owns their interpretation as selectable evidence. A producer-to-consumer CLI test checks stable IDs, missing occurrence information, optional C and the report digest. The native PTY walkthrough checks what the analyst ultimately receives. Run these cases when changing the producer schema, score interpretation, search semantics or allocation. Parent task 2.22 still needs independent evidence of effectiveness at a predeclared review budget. [Cross-spec end-to-end cases](../../../docs/qualification/triager-e2e.md) · [Triager tasks](../triager/tasks.md)
+
 Validation accompanies every task. Milestones 3 and 4 remain planned after this workflow; 2.10 remains deferred. A fixed count of records reviewed is the first evaluation budget; its value, positive reserved review share, audit allocation and acceptable missed-case rate must be specified in the qualification manifest before the final holdout is examined. No numerical release threshold is implied by this roadmap.
 
 ### New work packages from the accepted pattern-discovery amendment
@@ -62,6 +64,28 @@ Validation accompanies every task. Milestones 3 and 4 remain planned after this 
   - _Boundary: TriagePolicy, Evidence, Calibration provenance_
   - _Depends: 2.8, 2.11, 1.13_
   - _Requirements: 20.1 to 20.5, 20.7, 16.10, 16.11_
+
+- [ ] 2.23 Separate review reservation for unsupported records, and an exhaustive routing test _(approved by the owner on 2026-11-23)_
+  - Owner decision of 2026-11-18, exploratory: unsupported records get their own review slots. On the 96-record panel disagreements took both shared unknown/conflict slots and all 17 unsupported records, all positive, were deferred. [Concept and analysis](../../../docs/2026-11-18-triage-concept-decision-procedures.md)
+  - Add an unsupported capacity to `TriagePolicy` beside the conflict and audit capacities. Issue a new allocation revision. An undersized pool leaves its capacity unused, as today. Overflow from either reserved pool still competes in the general pool in the existing order. Reports saved under the old allocation revision keep reloading and replaying under that revision. Update the saved report, CLI flags, the triager's reading of the report and the policy contract.
+  - Add one test that enumerates every combination of supported, good corroboration, bad corroboration, score band, calibration required and calibration compatible (96 cases). It checks that each case reaches exactly one route, that every route is reachable, and that the routes match the precedence in the policy contract. Routing itself does not change.
+  - Replay the frozen 96-record panel under the new revision at the same total budget and report what moves. No NPU run is needed if the persisted evidence is reused. Score alone already reached 12 of 12 there, so this shows the cost of the deferral, not a gain.
+  - Done when a fixture shows a non-empty unsupported pool receiving its slots while disagreements fill theirs, invalid capacities refuse, old reports replay unchanged, the enumeration test passes, memory stays admitted for the added queue, and the cross-spec triager cases pass on the new report.
+  - Requirement 20.4 speaks of one share for unsupported and conflicting cases. Separate shares satisfy it. If the owner wants the split stated, 20.4 needs a one-line amendment.
+  - _Boundary: TriagePolicy allocation, saved report, CLI, triager report reader_
+  - _Depends: 2.20, 2.9_
+  - _Requirements: 20.2, 20.3, 20.4, 20.7_
+
+- [ ] 2.24 Exploratory comparison on a low positive share with a sweep of review budgets _(approved by the owner on 2026-11-23)_
+  - Owner decision of 2026-11-18, exploratory: the 96-record panel had 72 % positives and 12 reviews, so score alone reached the maximum and no workflow could show a gain. The first negative was at score rank 42.
+  - Build a larger panel from held CSIC development endpoints, subsampled without reading outcomes or scores to a low positive share. The share, panel size, budgets and seed go into the manifest before any label is joined. Prefer endpoints so that no single one dominates. The final qualification holdout stays untouched.
+  - Freeze the scorer, pattern catalogue, the 2.23 policy revision and all selections first. Report score alone, patterns and policy at each budget in the sweep, with missed positives including unsupported ones, and per-endpoint figures.
+  - Answer one question explicitly: are unsupported records positive at a higher rate than records of the same score rank? On the old panel the 7 unsupported records ranked 42 to 96 were all positive against 21 of 48 low-priority records there. Report the uncertainty of that difference.
+  - One NPU job at a time, run alone. Record encoding calls, elapsed range and memory peaks.
+  - Done when the report states, per budget, whether the policy found more, fewer or the same positives as score alone, answers the question above with its uncertainty, and names what stays untested. No pass/fail threshold and no deployment claim.
+  - _Boundary: QualificationReport (exploratory), tools/science panel scripts_
+  - _Depends: 2.23_
+  - _Requirements: 19.3, 19.4, 19.5, 19.6, 20.4_
 
 - [ ] 2.22 End-to-end triage qualification
   - _Blocked for final qualification pending independent analyst outcomes, a protected final cohort and operational capacity, missed-case and reserved/audit targets fixed before evaluation. The exploratory three-workflow comparison on one held development fold is complete._ [Report and frozen decisions](../../../docs/2026-11-18-triage-workflow-comparison.md)
