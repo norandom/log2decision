@@ -1380,12 +1380,14 @@ dependencies = [
  "l2d-store",
  "ratatui",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "taffy",
  "tempfile",
  "windows-sys",
+ "zip",
 ]
 
 [[package]]

@@ -306,7 +306,7 @@ impl MarkedInput {
     /// Physical inputs use the resolved filesystem location. Library callers also
     /// mark materialized frames whose supplied source name has no backing file.
     /// Anchor those names now; reopening still requires the original bytes and rows.
-    pub(crate) fn source_location(path: &Path) -> Result<String, L2dError> {
+    pub fn source_location(path: &Path) -> Result<String, L2dError> {
         let location = match fs::canonicalize(path) {
             Ok(physical) => physical,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
