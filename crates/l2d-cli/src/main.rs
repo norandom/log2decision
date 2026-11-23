@@ -130,6 +130,8 @@ enum Command {
     Triage(Box<cmd::triage::TriageArgs>),
     /// Explore scored and filtered sets in the interactive terminal workbench
     Tui(cmd::tui::TuiArgs),
+    /// Serve the triager operations to an MCP client on standard input and output, or run a recipe of tool calls
+    Mcp(cmd::mcp::McpArgs),
     /// Calibrate a fitted scorer on held-out labelled logs
     Calibrate(cmd::calibrate::CalibrateArgs),
     /// Compare two groups of logs for a population shift
@@ -160,6 +162,7 @@ fn dispatch(command: &Command, context: &cmd::common::Context) -> Result<(), L2d
         Command::Outliers(args) => cmd::store::outliers(context, args),
         Command::Triage(args) => cmd::triage::run(context, args),
         Command::Tui(args) => cmd::tui::run(context, args),
+        Command::Mcp(args) => cmd::mcp::run(context, args),
         Command::Calibrate(args) => cmd::calibrate::run(context, args),
         Command::Shift => cmd::shift::run(),
         Command::Assess => cmd::assess::run(),

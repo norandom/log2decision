@@ -26,6 +26,7 @@
 
 mod index;
 mod join;
+mod manifest;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -49,6 +50,7 @@ use sha2::{Digest, Sha256};
 use index::{ID_BYTES, Index, Spool, Work};
 
 pub use join::{JOIN_FIXED_BYTES, JoinError, JoinReport, NativeKey};
+pub use manifest::{ManifestScorer, ScoreManifest};
 
 /// What opening a scope holds beside its reader: the two write buffers of the
 /// relation, the rows its tables are built from at a time, the buffer the archive is
@@ -605,6 +607,20 @@ impl Scope {
         settings: &ScopeSettings,
         budget: &mut MemoryBudget,
     ) -> Result<(Self, ArchiveSummary), L2dError> {
+        Self::open_archive_watched(path, zip, settings, budget, &mut |_| Ok(()))
+    }
+
+    /// [`Scope::open_archive`] with `watch` called after every batch with the rows
+    /// read so far: for a caller that reports progress or ends the read early. An
+    /// error of `watch` ends the open as any other error does, with nothing left in
+    /// the work directory.
+    pub fn open_archive_watched(
+        path: &Path,
+        zip: &ZipInputSettings,
+        settings: &ScopeSettings,
+        budget: &mut MemoryBudget,
+        watch: &mut dyn FnMut(u64) -> Result<(), L2dError>,
+    ) -> Result<(Self, ArchiveSummary), L2dError> {
         let guard = ResourceGuard::tracked(
             "triager scope over an archive",
             busy_choice(),
@@ -627,8 +643,12 @@ impl Scope {
                 free_bytes: settings.free_disk_bytes,
             });
             let id_source = input.path().to_string_lossy().into_owned();
+            let mut rows = 0u64;
             for batch in input.batches(budget) {
-                spool_logs(&mut spool, &batch?, &id_source, false)?;
+                let batch = batch?;
+                spool_logs(&mut spool, &batch, &id_source, false)?;
+                rows += batch.len() as u64;
+                watch(rows)?;
             }
             for chunk in input.occurrence_counts() {
                 for count in chunk? {
@@ -810,6 +830,20 @@ impl Scope {
             Some(row) => self.original_at(row).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// The row of the relation that holds the original first read at `position`.
+    ///
+    /// Rows are in the order the source handed its originals out. That order is fixed
+    /// for one open scope and differs between batch sizes and spill, so a row is never
+    /// part of a result: results name originals by their record ID.
+    pub(crate) fn row_of(&self, position: u64) -> Result<Option<u64>, L2dError> {
+        self.index.find_position(position)
+    }
+
+    /// The original in `row` of the relation; see [`Scope::row_of`].
+    pub(crate) fn row(&self, row: u64) -> Result<Original, L2dError> {
+        self.original_at(row)
     }
 
     fn original_at(&self, row: u64) -> Result<Original, L2dError> {
