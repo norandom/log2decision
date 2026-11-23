@@ -66,6 +66,19 @@ Computed on 2026-11-18 from the frozen score order, the persisted policy decisio
 
 **Own review slots for unsupported records.** Disagreements filled the two slots that unknown and conflicting records share, so every unsupported record was deferred. This follows from the allocation order in the [policy contract](qualification/venn-policy-contract.md). Owner decision of 2026-11-18: unsupported records get their own reservation, as a new exploratory policy revision. It is not a final allocation.
 
+**Both are implemented in task 2.23 (2026-11-23).** The enumeration counts 48 unsupported, 20 disagreement, 22 uncertain, 3 investigate and 3 low-priority cases. A policy that states `unsupported_slots` selects a second allocation rule. Policies without it keep the first rule and their saved form.
+
+Recomputing the frozen panel's allocation at the same budget of 12, with the conflict and audit reservations unchanged:
+
+| Unsupported slots | Positives found | Unsupported reviewed | Unsupported deferred | Displaced from the general pool |
+|---:|---:|---:|---:|---|
+| none (as run) | 11 | 0 | 17 | |
+| 1 | 11 | 1 | 16 | 1 corroborated high score, positive |
+| 2 | 11 | 2 | 15 | 2 corroborated high scores, positive |
+| 4 | 11 | 4 | 13 | 4 corroborated high scores, positive |
+
+The yield stays at 11, as expected on a saturated panel: every reviewed unsupported record was positive and replaced a positive. The recomputation used the persisted evidence and no NPU run. It first reproduced the persisted allocation exactly, and the built product validated each recomputed report with its own allocation code. Whether the reservation pays is the question for the low-base-rate panel of task 2.24.
+
 ## RAM: one process is bounded, the machine is not
 
 Checked against `crates/l2d-core/src/memory.rs` and `resource.rs`. A process has a budget from live free memory, re-reads it before every batch, spills or refuses, and one heavy job and one NPU job run at a time across processes.

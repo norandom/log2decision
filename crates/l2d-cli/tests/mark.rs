@@ -625,6 +625,57 @@ fn analyst_workflow_pins_rules_score_history_and_replays_policy() {
     let replay = s.json(&[&common[..], &config, &["--replay", saved.to_str().unwrap()]].concat());
     assert_eq!(replay["replay_verified"], true);
     assert_eq!(policy["query_source"]["path"], q);
+    // Task 2.23: a stated unsupported capacity selects the second allocation rule.
+    let separate_policy = s.0.join("policy-separate.json");
+    fs::write(&separate_policy,serde_json::to_vec(&serde_json::json!({"version":"test-2","selection_provenance":"synthetic fixture","low":0.45,"high":0.55,
+        "corroboration":1,"reach":{"radius":0.0,"top_k":3,"minimum_labelled_support":1,"expected_profile":close["decisions"][0]["evidence"]["profile"]},
+        "require_calibration":false,"review_budget":3,"unknown_slots":1,"unsupported_slots":1,"audit_slots":1,"audit_seed":5})).unwrap()).unwrap();
+    let separate_saved = s.0.join("report-separate.json");
+    let separate_config = ["--policy", separate_policy.to_str().unwrap()];
+    let separate = s.json(
+        &[
+            &common[..],
+            &separate_config,
+            &["--out", separate_saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    let separate_report = &separate["policy_report"];
+    assert_eq!(
+        separate_report["allocation_rule"],
+        "reserved-unsupported-and-conflict-no-reassignment-general-priority-fnv1a-audit-v2"
+    );
+    assert_eq!(separate_report["unsupported"]["configured"], 1);
+    assert_eq!(separate_report["unsupported"]["selected"], 1);
+    let novel = separate_report["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["input"]["text"] == "completely novel")
+        .unwrap();
+    assert_eq!(novel["allocation"], "Unsupported");
+    assert!(policy.get("unsupported").is_none());
+    let separate_open = ["tui", "--report", separate_saved.to_str().unwrap()];
+    assert_eq!(s.json(&separate_open)["counts"]["originals"], 3);
+    let separate_replay = s.json(
+        &[
+            &common[..],
+            &separate_config,
+            &["--replay", separate_saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    assert_eq!(separate_replay["replay_verified"], true);
+    // A report allocated under the shared rule does not replay under this policy.
+    let other_rule = s.run(
+        &[
+            &common[..],
+            &separate_config,
+            &["--replay", saved.to_str().unwrap()],
+        ]
+        .concat(),
+    );
+    assert_ne!(other_rule.status.code(), Some(0));
     // Same originals and decisions, different query snapshot.
     let qtext = fs::read_to_string(q).unwrap();
     fs::write(q, format!("{qtext}\n")).unwrap();

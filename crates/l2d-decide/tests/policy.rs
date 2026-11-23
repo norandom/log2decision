@@ -147,6 +147,7 @@ fn policy() -> TriagePolicy {
         require_calibration: false,
         review_budget: 4,
         unknown_slots: 1,
+        unsupported_slots: None,
         audit_slots: 1,
         audit_seed: 42,
     }
@@ -669,10 +670,20 @@ fn stale_metadata_before_or_during_run_and_runtime_failures_refuse_without_resul
 
 #[test]
 fn memory_limits_cover_queues_persistence_reload_and_replay() {
+    memory_limits(None);
+}
+
+#[test]
+fn memory_limits_also_cover_the_separate_unsupported_reservation() {
+    memory_limits(Some(1));
+}
+
+fn memory_limits(unsupported_slots: Option<usize>) {
     let f = fixture();
     let mut b = budget();
     let history = MarkHistory::from_store(&f.store, &f.bad, Some(&f.good), &mut b).unwrap();
-    let p = policy();
+    let mut p = policy();
+    p.unsupported_slots = unsupported_slots;
     let out = triage_policy(
         &inputs(),
         &f.store,
@@ -1030,4 +1041,114 @@ fn a_batch_keeps_the_returned_evidence_and_reuses_retrieval_scratch() {
         .is_err()
     );
     assert_eq!(b.held_bytes(), constrained);
+}
+
+/// Task 2.23: a stated unsupported capacity selects the second allocation revision.
+#[test]
+fn separate_unsupported_reservation_saves_reloads_and_refuses_the_other_rule() {
+    use l2d_decide::policy::{ALLOCATION, ALLOCATION_SEPARATE_UNSUPPORTED};
+    let f = fixture();
+    let mut b = budget();
+    let history = MarkHistory::from_store(&f.store, &f.bad, Some(&f.good), &mut b).unwrap();
+    let mut p = policy();
+    p.reach.radius = 0.15;
+    p.low = 0.49;
+    p.high = 0.51;
+    p.unsupported_slots = Some(1);
+    let rows = inputs();
+    let report = triage_policy(
+        &rows,
+        &f.store,
+        &history,
+        &f.scorer,
+        None,
+        &p,
+        &mut CharacterTrigram,
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(report.allocation_rule, ALLOCATION_SEPARATE_UNSUPPORTED);
+    assert_eq!(report.decisions[2].reason, Reason::Unsupported);
+    assert_eq!(
+        report.decisions[2].allocation,
+        Some(Allocation::Unsupported)
+    );
+    let counts = report.unsupported.as_ref().unwrap();
+    assert_eq!(
+        (counts.configured, counts.selected, counts.unused),
+        (1, 1, 0)
+    );
+    assert_eq!(report.general.configured, 1);
+    let selected = report
+        .decisions
+        .iter()
+        .filter(|r| r.allocation.is_some())
+        .count();
+    assert_eq!(report.deferred, report.decisions.len() - selected);
+
+    let path = f.paths.root.join("policy-separate.json");
+    report.save(&path, &b).unwrap();
+    let load = |p: &TriagePolicy, b: &mut MemoryBudget| {
+        PolicyReport::load(
+            &path,
+            1_000_000,
+            p,
+            f.scorer.revision(),
+            CharacterTrigram.profile(),
+            history.metadata_revision(),
+            b,
+        )
+    };
+    let loaded = load(&p, &mut b).unwrap();
+    let saved = serde_json::to_value(&report).unwrap();
+    assert_eq!(saved, serde_json::to_value(&loaded).unwrap());
+    let mut shared = p.clone();
+    shared.unsupported_slots = None;
+    assert!(load(&shared, &mut b).is_err());
+
+    let tampered = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = saved.clone();
+        edit(&mut value);
+        serde_json::from_value::<PolicyReport>(value)
+            .unwrap()
+            .validate_saved()
+    };
+    tampered(&|_| {}).unwrap();
+    assert!(tampered(&|v| v["allocation_rule"] = ALLOCATION.into()).is_err());
+    assert!(
+        tampered(&|v| {
+            v.as_object_mut().unwrap().remove("unsupported");
+        })
+        .is_err()
+    );
+    assert!(tampered(&|v| v["decisions"][2]["allocation"] = "UnknownConflict".into()).is_err());
+
+    // The shared reservation keeps its rule and its saved form.
+    let old = triage_policy(
+        &rows,
+        &f.store,
+        &history,
+        &f.scorer,
+        None,
+        &shared,
+        &mut CharacterTrigram,
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(old.allocation_rule, ALLOCATION);
+    assert_eq!(
+        old.decisions[2].allocation,
+        Some(Allocation::UnknownConflict)
+    );
+    let value = serde_json::to_value(&old).unwrap();
+    assert!(value.get("unsupported").is_none());
+    assert!(value["policy"].get("unsupported_slots").is_none());
+    let mut wrong = value.clone();
+    wrong["allocation_rule"] = ALLOCATION_SEPARATE_UNSUPPORTED.into();
+    assert!(
+        serde_json::from_value::<PolicyReport>(wrong)
+            .unwrap()
+            .validate_saved()
+            .is_err()
+    );
 }

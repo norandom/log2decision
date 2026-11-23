@@ -306,6 +306,41 @@ mod tests {
         assert_eq!(venn.source_revision, plain.source_revision);
     }
 
+    /// Parent task 2.23: a report allocated with a separate unsupported reservation.
+    #[test]
+    fn a_report_with_a_separate_unsupported_reservation_projects_the_same_records() {
+        let mut value = report();
+        value["policy"]["unsupported_slots"] = json!(1);
+        value["allocation_rule"] = json!(l2d_decide::policy::ALLOCATION_SEPARATE_UNSUPPORTED);
+        value["decisions"][0]["allocation"] = json!("Unsupported");
+        value["unsupported"] = json!({"configured":1,"selected":1,"unused":0});
+        value["unknown"] = json!({"configured":1,"selected":0,"unused":1});
+        value["general"] = json!({"configured":1,"selected":0,"unused":1});
+        let shared = project(
+            &serde_json::to_vec(&report()).unwrap(),
+            PolicyMembership::InvestigateOrReview,
+        )
+        .unwrap();
+        let separate = project(
+            &serde_json::to_vec(&value).unwrap(),
+            PolicyMembership::InvestigateOrReview,
+        )
+        .unwrap();
+        assert_eq!(separate.records.len(), 1);
+        assert_eq!(separate.records[0].id, shared.records[0].id);
+        assert_eq!(separate.records[0].score, shared.records[0].score);
+        assert_eq!(separate.records[0].recommendation, Recommendation::In);
+        // The rule and the stated capacity must agree.
+        value["allocation_rule"] = json!(l2d_decide::policy::ALLOCATION);
+        assert!(
+            project(
+                &serde_json::to_vec(&value).unwrap(),
+                PolicyMembership::InvestigateOrReview
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn validates_retained_decisions_and_source_join_before_projection() {
         let bad = [
