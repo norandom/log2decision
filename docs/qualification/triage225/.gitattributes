@@ -1,0 +1,2 @@
+# Preserve the bytes hashed by the experiment on every checkout.
+*.json -text whitespace=cr-at-eol
