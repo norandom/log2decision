@@ -2,5 +2,8 @@
 
 pub mod flow;
 pub mod input;
+pub mod mcp;
+pub mod scope;
+pub mod service;
 pub mod session;
 pub mod ui;

@@ -17,6 +17,7 @@ pub mod encoder;
 pub mod eval;
 pub mod ingest;
 pub mod mark;
+pub mod mcp;
 pub mod runtime;
 pub mod shift;
 pub mod store;

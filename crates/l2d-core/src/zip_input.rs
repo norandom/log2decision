@@ -1987,6 +1987,13 @@ impl ZipBatches<'_> {
         self.input.beside = bytes;
     }
 
+    /// What deduplication on disk has done so far, as [`ZipInput::disk_dedup`] says
+    /// once the read is over: for a caller that reports, between batches, whether
+    /// the read has gone on on disk (triager task 1.2).
+    pub fn disk_dedup(&self) -> Option<DiskDedup> {
+        self.input.disk_dedup()
+    }
+
     /// Reads on until a batch with new texts is complete; `None` at the end of the
     /// archive.
     fn advance(&mut self) -> Result<Option<LogsFrame>, L2dError> {
