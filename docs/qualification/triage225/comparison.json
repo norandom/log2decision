@@ -1,0 +1,1689 @@
+{
+  "frozen_decisions_sha256": "154eed329bb42b5f4729078c93cb2da8257ea5ca17fee68fbf007eee9e5d507f",
+  "panel": 1000,
+  "positive": 100,
+  "main_endpoint": {
+    "name": "/tienda1/publico/autenticar.jsp",
+    "records": 976,
+    "positive": 80
+  },
+  "score_ranking": {
+    "roc_auc": 0.8521222222222222,
+    "average_precision": 0.6696566259114262,
+    "first_negative_rank": 42
+  },
+  "routes": {
+    "Disagreement": {
+      "records": 16,
+      "positive": 9
+    },
+    "HighCorroborated": {
+      "records": 11,
+      "positive": 11
+    },
+    "LowCorroborated": {
+      "records": 942,
+      "positive": 54
+    },
+    "Uncertain": {
+      "records": 4,
+      "positive": 4
+    },
+    "Unsupported": {
+      "records": 27,
+      "positive": 22
+    }
+  },
+  "budgets": {
+    "12": {
+      "score": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 6,
+        "positive_elsewhere": 6,
+        "unsupported_reviewed": 5,
+        "unsupported_positive_missed": 17
+      },
+      "candidate_sixth": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 6,
+        "positive_elsewhere": 6,
+        "unsupported_reviewed": 5,
+        "unsupported_positive_missed": 17,
+        "reservation": {
+          "filled": 2,
+          "positive": 2,
+          "unsupported": 2,
+          "off_main_endpoint": 2
+        }
+      },
+      "control_sixth": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 5,
+        "positive_elsewhere": 7,
+        "unsupported_reviewed": 6,
+        "unsupported_positive_missed": 16,
+        "reservation": {
+          "filled": 2,
+          "positive": 2,
+          "unsupported": 2,
+          "off_main_endpoint": 2
+        }
+      },
+      "candidate_third": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 6,
+        "positive_elsewhere": 6,
+        "unsupported_reviewed": 5,
+        "unsupported_positive_missed": 17,
+        "reservation": {
+          "filled": 4,
+          "positive": 4,
+          "unsupported": 4,
+          "off_main_endpoint": 3
+        }
+      },
+      "control_third": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 12,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 3,
+        "positive_elsewhere": 9,
+        "unsupported_reviewed": 7,
+        "unsupported_positive_missed": 15,
+        "reservation": {
+          "filled": 4,
+          "positive": 4,
+          "unsupported": 4,
+          "off_main_endpoint": 4
+        }
+      },
+      "policy_separate": {
+        "offered": 12,
+        "reviewed": 12,
+        "positive": 9,
+        "precision": 0.75,
+        "positive_on_main_endpoint": 7,
+        "positive_elsewhere": 2,
+        "unsupported_reviewed": 2,
+        "unsupported_positive_missed": 21
+      },
+      "candidate_sixth_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 12,
+        "two_sided_p": null
+      },
+      "candidate_sixth_vs_control_sixth": {
+        "left_only": 2,
+        "right_only": 2,
+        "both": 10,
+        "two_sided_p": 1.0
+      },
+      "control_sixth_vs_score": {
+        "left_only": 2,
+        "right_only": 2,
+        "both": 10,
+        "two_sided_p": 1.0
+      },
+      "reservation_overlap_sixth": 0,
+      "candidate_third_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 12,
+        "two_sided_p": null
+      },
+      "candidate_third_vs_control_third": {
+        "left_only": 4,
+        "right_only": 4,
+        "both": 8,
+        "two_sided_p": 1.0
+      },
+      "control_third_vs_score": {
+        "left_only": 4,
+        "right_only": 4,
+        "both": 8,
+        "two_sided_p": 1.0
+      },
+      "reservation_overlap_third": 0,
+      "policy_separate_vs_score": {
+        "left_only": 3,
+        "right_only": 6,
+        "both": 6,
+        "two_sided_p": 0.5078125
+      }
+    },
+    "25": {
+      "score": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 16,
+        "positive_elsewhere": 9,
+        "unsupported_reviewed": 11,
+        "unsupported_positive_missed": 11
+      },
+      "candidate_sixth": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 16,
+        "positive_elsewhere": 9,
+        "unsupported_reviewed": 11,
+        "unsupported_positive_missed": 11,
+        "reservation": {
+          "filled": 4,
+          "positive": 4,
+          "unsupported": 4,
+          "off_main_endpoint": 3
+        }
+      },
+      "control_sixth": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 13,
+        "positive_elsewhere": 12,
+        "unsupported_reviewed": 14,
+        "unsupported_positive_missed": 8,
+        "reservation": {
+          "filled": 4,
+          "positive": 4,
+          "unsupported": 4,
+          "off_main_endpoint": 4
+        }
+      },
+      "candidate_third": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 16,
+        "positive_elsewhere": 9,
+        "unsupported_reviewed": 11,
+        "unsupported_positive_missed": 11,
+        "reservation": {
+          "filled": 8,
+          "positive": 8,
+          "unsupported": 8,
+          "off_main_endpoint": 6
+        }
+      },
+      "control_third": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 25,
+        "precision": 1.0,
+        "positive_on_main_endpoint": 10,
+        "positive_elsewhere": 15,
+        "unsupported_reviewed": 14,
+        "unsupported_positive_missed": 8,
+        "reservation": {
+          "filled": 8,
+          "positive": 8,
+          "unsupported": 8,
+          "off_main_endpoint": 8
+        }
+      },
+      "policy_separate": {
+        "offered": 25,
+        "reviewed": 25,
+        "positive": 20,
+        "precision": 0.8,
+        "positive_on_main_endpoint": 16,
+        "positive_elsewhere": 4,
+        "unsupported_reviewed": 4,
+        "unsupported_positive_missed": 19
+      },
+      "candidate_sixth_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 25,
+        "two_sided_p": null
+      },
+      "candidate_sixth_vs_control_sixth": {
+        "left_only": 4,
+        "right_only": 4,
+        "both": 21,
+        "two_sided_p": 1.0
+      },
+      "control_sixth_vs_score": {
+        "left_only": 4,
+        "right_only": 4,
+        "both": 21,
+        "two_sided_p": 1.0
+      },
+      "reservation_overlap_sixth": 0,
+      "candidate_third_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 25,
+        "two_sided_p": null
+      },
+      "candidate_third_vs_control_third": {
+        "left_only": 8,
+        "right_only": 8,
+        "both": 17,
+        "two_sided_p": 1.0
+      },
+      "control_third_vs_score": {
+        "left_only": 8,
+        "right_only": 8,
+        "both": 17,
+        "two_sided_p": 1.0
+      },
+      "reservation_overlap_third": 0,
+      "policy_separate_vs_score": {
+        "left_only": 8,
+        "right_only": 13,
+        "both": 12,
+        "two_sided_p": 0.38331031799316406
+      }
+    },
+    "50": {
+      "score": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 45,
+        "precision": 0.9,
+        "positive_on_main_endpoint": 31,
+        "positive_elsewhere": 14,
+        "unsupported_reviewed": 16,
+        "unsupported_positive_missed": 6
+      },
+      "candidate_sixth": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 45,
+        "precision": 0.9,
+        "positive_on_main_endpoint": 31,
+        "positive_elsewhere": 14,
+        "unsupported_reviewed": 16,
+        "unsupported_positive_missed": 6,
+        "reservation": {
+          "filled": 8,
+          "positive": 8,
+          "unsupported": 8,
+          "off_main_endpoint": 6
+        }
+      },
+      "control_sixth": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 47,
+        "precision": 0.94,
+        "positive_on_main_endpoint": 30,
+        "positive_elsewhere": 17,
+        "unsupported_reviewed": 19,
+        "unsupported_positive_missed": 3,
+        "reservation": {
+          "filled": 8,
+          "positive": 8,
+          "unsupported": 8,
+          "off_main_endpoint": 8
+        }
+      },
+      "candidate_third": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 45,
+        "precision": 0.9,
+        "positive_on_main_endpoint": 31,
+        "positive_elsewhere": 14,
+        "unsupported_reviewed": 16,
+        "unsupported_positive_missed": 6,
+        "reservation": {
+          "filled": 16,
+          "positive": 16,
+          "unsupported": 16,
+          "off_main_endpoint": 12
+        }
+      },
+      "control_third": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 48,
+        "precision": 0.96,
+        "positive_on_main_endpoint": 29,
+        "positive_elsewhere": 19,
+        "unsupported_reviewed": 23,
+        "unsupported_positive_missed": 1,
+        "reservation": {
+          "filled": 16,
+          "positive": 14,
+          "unsupported": 14,
+          "off_main_endpoint": 16
+        }
+      },
+      "policy_separate": {
+        "offered": 50,
+        "reviewed": 50,
+        "positive": 34,
+        "precision": 0.68,
+        "positive_on_main_endpoint": 23,
+        "positive_elsewhere": 11,
+        "unsupported_reviewed": 15,
+        "unsupported_positive_missed": 9
+      },
+      "candidate_sixth_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 45,
+        "two_sided_p": null
+      },
+      "candidate_sixth_vs_control_sixth": {
+        "left_only": 1,
+        "right_only": 3,
+        "both": 44,
+        "two_sided_p": 0.625
+      },
+      "control_sixth_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 44,
+        "two_sided_p": 0.625
+      },
+      "reservation_overlap_sixth": 0,
+      "candidate_third_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 45,
+        "two_sided_p": null
+      },
+      "candidate_third_vs_control_third": {
+        "left_only": 2,
+        "right_only": 5,
+        "both": 43,
+        "two_sided_p": 0.453125
+      },
+      "control_third_vs_score": {
+        "left_only": 5,
+        "right_only": 2,
+        "both": 43,
+        "two_sided_p": 0.453125
+      },
+      "reservation_overlap_third": 7,
+      "policy_separate_vs_score": {
+        "left_only": 9,
+        "right_only": 20,
+        "both": 25,
+        "two_sided_p": 0.06142834573984146
+      }
+    },
+    "100": {
+      "score": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 61,
+        "precision": 0.61,
+        "positive_on_main_endpoint": 44,
+        "positive_elsewhere": 17,
+        "unsupported_reviewed": 19,
+        "unsupported_positive_missed": 3
+      },
+      "candidate_sixth": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 61,
+        "precision": 0.61,
+        "positive_on_main_endpoint": 44,
+        "positive_elsewhere": 17,
+        "unsupported_reviewed": 19,
+        "unsupported_positive_missed": 3,
+        "reservation": {
+          "filled": 16,
+          "positive": 16,
+          "unsupported": 16,
+          "off_main_endpoint": 12
+        }
+      },
+      "control_sixth": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 62,
+        "precision": 0.62,
+        "positive_on_main_endpoint": 43,
+        "positive_elsewhere": 19,
+        "unsupported_reviewed": 23,
+        "unsupported_positive_missed": 1,
+        "reservation": {
+          "filled": 16,
+          "positive": 14,
+          "unsupported": 14,
+          "off_main_endpoint": 16
+        }
+      },
+      "candidate_third": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 63,
+        "precision": 0.63,
+        "positive_on_main_endpoint": 43,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 27,
+          "positive": 22,
+          "unsupported": 27,
+          "off_main_endpoint": 22
+        }
+      },
+      "control_third": {
+        "offered": 100,
+        "reviewed": 100,
+        "positive": 63,
+        "precision": 0.63,
+        "positive_on_main_endpoint": 43,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 26,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 33,
+          "positive": 29,
+          "unsupported": 23,
+          "off_main_endpoint": 24
+        }
+      },
+      "policy_separate": {
+        "offered": 100,
+        "reviewed": 74,
+        "positive": 47,
+        "precision": 0.6351351351351351,
+        "positive_on_main_endpoint": 27,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_missed": 0
+      },
+      "candidate_sixth_vs_score": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 61,
+        "two_sided_p": null
+      },
+      "candidate_sixth_vs_control_sixth": {
+        "left_only": 1,
+        "right_only": 2,
+        "both": 60,
+        "two_sided_p": 1.0
+      },
+      "control_sixth_vs_score": {
+        "left_only": 2,
+        "right_only": 1,
+        "both": 60,
+        "two_sided_p": 1.0
+      },
+      "reservation_overlap_sixth": 7,
+      "candidate_third_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 60,
+        "two_sided_p": 0.625
+      },
+      "candidate_third_vs_control_third": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 63,
+        "two_sided_p": null
+      },
+      "control_third_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 60,
+        "two_sided_p": 0.625
+      },
+      "reservation_overlap_third": 23,
+      "policy_separate_vs_score": {
+        "left_only": 4,
+        "right_only": 18,
+        "both": 43,
+        "two_sided_p": 0.004343509674072266
+      }
+    },
+    "200": {
+      "score": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 70,
+        "precision": 0.35,
+        "positive_on_main_endpoint": 53,
+        "positive_elsewhere": 17,
+        "unsupported_reviewed": 19,
+        "unsupported_positive_missed": 3
+      },
+      "candidate_sixth": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 72,
+        "precision": 0.36,
+        "positive_on_main_endpoint": 52,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 27,
+          "positive": 22,
+          "unsupported": 27,
+          "off_main_endpoint": 22
+        }
+      },
+      "control_sixth": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 72,
+        "precision": 0.36,
+        "positive_on_main_endpoint": 52,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 26,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 33,
+          "positive": 29,
+          "unsupported": 23,
+          "off_main_endpoint": 24
+        }
+      },
+      "candidate_third": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 72,
+        "precision": 0.36,
+        "positive_on_main_endpoint": 52,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 27,
+          "positive": 22,
+          "unsupported": 27,
+          "off_main_endpoint": 22
+        }
+      },
+      "control_third": {
+        "offered": 200,
+        "reviewed": 200,
+        "positive": 72,
+        "precision": 0.36,
+        "positive_on_main_endpoint": 52,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 26,
+        "unsupported_positive_missed": 0,
+        "reservation": {
+          "filled": 66,
+          "positive": 54,
+          "unsupported": 26,
+          "off_main_endpoint": 24
+        }
+      },
+      "policy_separate": {
+        "offered": 200,
+        "reviewed": 91,
+        "positive": 48,
+        "precision": 0.5274725274725275,
+        "positive_on_main_endpoint": 28,
+        "positive_elsewhere": 20,
+        "unsupported_reviewed": 27,
+        "unsupported_positive_missed": 0
+      },
+      "candidate_sixth_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 69,
+        "two_sided_p": 0.625
+      },
+      "candidate_sixth_vs_control_sixth": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 72,
+        "two_sided_p": null
+      },
+      "control_sixth_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 69,
+        "two_sided_p": 0.625
+      },
+      "reservation_overlap_sixth": 23,
+      "candidate_third_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 69,
+        "two_sided_p": 0.625
+      },
+      "candidate_third_vs_control_third": {
+        "left_only": 0,
+        "right_only": 0,
+        "both": 72,
+        "two_sided_p": null
+      },
+      "control_third_vs_score": {
+        "left_only": 3,
+        "right_only": 1,
+        "both": 69,
+        "two_sided_p": 0.625
+      },
+      "reservation_overlap_third": 26,
+      "policy_separate_vs_score": {
+        "left_only": 5,
+        "right_only": 27,
+        "both": 43,
+        "two_sided_p": 0.00011307420209050179
+      }
+    }
+  },
+  "replication": {
+    "bins": 40,
+    "whole_panel": {
+      "bins": [
+        {
+          "bin": 1,
+          "ranks": [
+            1,
+            25
+          ],
+          "supported": 14,
+          "supported_positive": 14,
+          "unsupported": 11,
+          "unsupported_positive": 11,
+          "used": true
+        },
+        {
+          "bin": 2,
+          "ranks": [
+            26,
+            50
+          ],
+          "supported": 20,
+          "supported_positive": 15,
+          "unsupported": 5,
+          "unsupported_positive": 5,
+          "used": true
+        },
+        {
+          "bin": 3,
+          "ranks": [
+            51,
+            75
+          ],
+          "supported": 23,
+          "supported_positive": 7,
+          "unsupported": 2,
+          "unsupported_positive": 2,
+          "used": true
+        },
+        {
+          "bin": 4,
+          "ranks": [
+            76,
+            100
+          ],
+          "supported": 24,
+          "supported_positive": 6,
+          "unsupported": 1,
+          "unsupported_positive": 1,
+          "used": true
+        },
+        {
+          "bin": 5,
+          "ranks": [
+            101,
+            125
+          ],
+          "supported": 25,
+          "supported_positive": 4,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 6,
+          "ranks": [
+            126,
+            150
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 7,
+          "ranks": [
+            151,
+            175
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 8,
+          "ranks": [
+            176,
+            200
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 9,
+          "ranks": [
+            201,
+            225
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 10,
+          "ranks": [
+            226,
+            250
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 1,
+          "unsupported_positive": 1,
+          "used": true
+        },
+        {
+          "bin": 11,
+          "ranks": [
+            251,
+            275
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 12,
+          "ranks": [
+            276,
+            300
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 13,
+          "ranks": [
+            301,
+            325
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 14,
+          "ranks": [
+            326,
+            350
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 15,
+          "ranks": [
+            351,
+            375
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 1,
+          "unsupported_positive": 1,
+          "used": true
+        },
+        {
+          "bin": 16,
+          "ranks": [
+            376,
+            400
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 17,
+          "ranks": [
+            401,
+            425
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 18,
+          "ranks": [
+            426,
+            450
+          ],
+          "supported": 25,
+          "supported_positive": 3,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 19,
+          "ranks": [
+            451,
+            475
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 20,
+          "ranks": [
+            476,
+            500
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 21,
+          "ranks": [
+            501,
+            525
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 22,
+          "ranks": [
+            526,
+            550
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 23,
+          "ranks": [
+            551,
+            575
+          ],
+          "supported": 25,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 24,
+          "ranks": [
+            576,
+            600
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 25,
+          "ranks": [
+            601,
+            625
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 26,
+          "ranks": [
+            626,
+            650
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 1,
+          "unsupported_positive": 1,
+          "used": true
+        },
+        {
+          "bin": 27,
+          "ranks": [
+            651,
+            675
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 28,
+          "ranks": [
+            676,
+            700
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 29,
+          "ranks": [
+            701,
+            725
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 30,
+          "ranks": [
+            726,
+            750
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 31,
+          "ranks": [
+            751,
+            775
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 1,
+          "unsupported_positive": 0,
+          "used": true
+        },
+        {
+          "bin": 32,
+          "ranks": [
+            776,
+            800
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 33,
+          "ranks": [
+            801,
+            825
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 34,
+          "ranks": [
+            826,
+            850
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 35,
+          "ranks": [
+            851,
+            875
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 1,
+          "unsupported_positive": 0,
+          "used": true
+        },
+        {
+          "bin": 36,
+          "ranks": [
+            876,
+            900
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 37,
+          "ranks": [
+            901,
+            925
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 38,
+          "ranks": [
+            926,
+            950
+          ],
+          "supported": 25,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 39,
+          "ranks": [
+            951,
+            975
+          ],
+          "supported": 25,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 40,
+          "ranks": [
+            976,
+            1000
+          ],
+          "supported": 22,
+          "supported_positive": 0,
+          "unsupported": 3,
+          "unsupported_positive": 0,
+          "used": true
+        }
+      ],
+      "unsupported_in_used_bins": 27,
+      "unsupported_outside_used_bins": 0,
+      "observed_positive": 22.0,
+      "expected_positive_from_supported_rate": 15.858695652173912,
+      "excess": 6.141304347826088,
+      "observed_rate": 0.8148148148148148,
+      "expected_rate": 0.5873590982286634,
+      "one_sided_p": 0.0002,
+      "permutations": 9999,
+      "seed": 225
+    },
+    "main_endpoint": {
+      "bins": [
+        {
+          "bin": 1,
+          "ranks": [
+            1,
+            24
+          ],
+          "supported": 20,
+          "supported_positive": 20,
+          "unsupported": 4,
+          "unsupported_positive": 4,
+          "used": true
+        },
+        {
+          "bin": 2,
+          "ranks": [
+            25,
+            48
+          ],
+          "supported": 24,
+          "supported_positive": 12,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 3,
+          "ranks": [
+            49,
+            72
+          ],
+          "supported": 24,
+          "supported_positive": 5,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 4,
+          "ranks": [
+            73,
+            96
+          ],
+          "supported": 24,
+          "supported_positive": 5,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 5,
+          "ranks": [
+            97,
+            120
+          ],
+          "supported": 24,
+          "supported_positive": 3,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 6,
+          "ranks": [
+            121,
+            144
+          ],
+          "supported": 24,
+          "supported_positive": 3,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 7,
+          "ranks": [
+            145,
+            168
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 8,
+          "ranks": [
+            169,
+            192
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 9,
+          "ranks": [
+            193,
+            216
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 10,
+          "ranks": [
+            217,
+            240
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 11,
+          "ranks": [
+            241,
+            264
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 12,
+          "ranks": [
+            265,
+            288
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 13,
+          "ranks": [
+            289,
+            312
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 14,
+          "ranks": [
+            313,
+            336
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 15,
+          "ranks": [
+            337,
+            360
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 16,
+          "ranks": [
+            361,
+            384
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 17,
+          "ranks": [
+            385,
+            408
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 18,
+          "ranks": [
+            409,
+            432
+          ],
+          "supported": 24,
+          "supported_positive": 3,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 19,
+          "ranks": [
+            433,
+            456
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 20,
+          "ranks": [
+            457,
+            480
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 21,
+          "ranks": [
+            481,
+            504
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 22,
+          "ranks": [
+            505,
+            528
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 23,
+          "ranks": [
+            529,
+            552
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 24,
+          "ranks": [
+            553,
+            576
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 25,
+          "ranks": [
+            577,
+            600
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 26,
+          "ranks": [
+            601,
+            624
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 27,
+          "ranks": [
+            625,
+            648
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 28,
+          "ranks": [
+            649,
+            672
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 29,
+          "ranks": [
+            673,
+            696
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 30,
+          "ranks": [
+            697,
+            720
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 31,
+          "ranks": [
+            721,
+            744
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 32,
+          "ranks": [
+            745,
+            768
+          ],
+          "supported": 23,
+          "supported_positive": 1,
+          "unsupported": 1,
+          "unsupported_positive": 0,
+          "used": true
+        },
+        {
+          "bin": 33,
+          "ranks": [
+            769,
+            792
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 34,
+          "ranks": [
+            793,
+            816
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 35,
+          "ranks": [
+            817,
+            840
+          ],
+          "supported": 24,
+          "supported_positive": 2,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 36,
+          "ranks": [
+            841,
+            864
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 37,
+          "ranks": [
+            865,
+            888
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 38,
+          "ranks": [
+            889,
+            912
+          ],
+          "supported": 24,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 39,
+          "ranks": [
+            913,
+            936
+          ],
+          "supported": 24,
+          "supported_positive": 1,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        },
+        {
+          "bin": 40,
+          "ranks": [
+            937,
+            976
+          ],
+          "supported": 40,
+          "supported_positive": 0,
+          "unsupported": 0,
+          "unsupported_positive": 0,
+          "used": false
+        }
+      ],
+      "unsupported_in_used_bins": 5,
+      "unsupported_outside_used_bins": 0,
+      "observed_positive": 4.0,
+      "expected_positive_from_supported_rate": 4.043478260869565,
+      "excess": -0.04347826086956541,
+      "observed_rate": 0.8,
+      "expected_rate": 0.808695652173913,
+      "one_sided_p": 1.0,
+      "permutations": 9999,
+      "seed": 225
+    },
+    "other_endpoints": {
+      "records": 24,
+      "positive": 20,
+      "unsupported": 22,
+      "unsupported_positive": 18,
+      "supported": 2,
+      "supported_positive": 2
+    }
+  },
+  "qualification": "exploratory; no operational targets, no pass/fail threshold, no final holdout"
+}

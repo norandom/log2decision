@@ -1,5 +1,9 @@
 # Handover: npu-log-decision
 
+## Task 2.25, 23 November
+
+Score order with reserved slots for unsupported records was not shown to help on the last fresh fold-zero panel, and the planned arm could have gained at most three positives. An encoder-free control was not distinguishable from it. Unsupported and off-endpoint records are nearly the same set, so whether the vectors add to ranking stays undecided on this fold. The policy was never ahead of score alone on either panel. Both first report drafts of 2.24 and 2.25 overstated their findings and were rejected in review: state what a test could have shown before reading its result. Fold zero is used up for low-share panels (180 fresh good records left); more ranking evidence needs data where endpoint and outcome are not tied, such as a second dataset or the protected cohort of 2.22. Automation stays parked. [Report](../docs/2026-11-23-score-with-unsupported-reserve.md) · evidence in `D:\BuildArtifacts\log2decision\task-2.25\`
+
 ## Task 2.24, 23 November
 
 The policy does not beat score alone on a 10 % positive panel of 1,000 fresh held fold-zero records, at any of five budgets, and ties at equal effort. It sent 53 of 100 positives to low priority. Unsupported records were 22 of 27 positive, but 18 of the 20 records off the dominant endpoint are unsupported and 17 of those 20 are positive, so the panel cannot separate the vector evidence from the endpoint. The first report draft overstated this and was rejected in review; read the published report, not earlier summaries. Automation stays parked. Task 2.25 is drafted and awaits owner approval: score order with reserved unsupported slots against an encoder-free control on the last fresh panel of this fold. [Report](../docs/2026-11-23-triage-low-share-comparison.md) · evidence in `D:\BuildArtifacts\log2decision\task-2.24\`

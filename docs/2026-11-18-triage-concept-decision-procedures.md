@@ -81,6 +81,8 @@ The yield stays at 11, as expected on a saturated panel: every reviewed unsuppor
 
 **Task 2.24 answered the open question with a no (2026-11-23).** On 1,000 fresh held records with 100 positives and budgets from 12 to 200, the policy found fewer positives than score alone at every budget offered, and no advantage at equal effort. Unsupported records were positive more often than their score rank predicts, but on that panel the flag nearly coincides with being off the one dominant endpoint, so the vector evidence is not shown to carry the signal. The condition in the order below is therefore not met, and the skill with an automated flow stays parked. [Report](2026-11-23-triage-low-share-comparison.md)
 
+**Task 2.25 left the follow-up open (2026-11-23).** On a second fresh panel, score order with reserved slots for unsupported records was not shown to help, and the planned test could have gained at most three positives. A control that fills the reservation from the rarest endpoints, without an encoder, was not distinguishable from it. Unsupported records and off-endpoint records are nearly the same set on this fold, so whether the vectors add to ranking is undecided. The policy was again never ahead of score alone. Fold zero is used up for panels of this shape. [Report](2026-11-23-score-with-unsupported-reserve.md)
+
 ## RAM: one process is bounded, the machine is not
 
 Checked against `crates/l2d-core/src/memory.rs` and `resource.rs`. A process has a budget from live free memory, re-reads it before every batch, spills or refuses, and one heavy job and one NPU job run at a time across processes.
