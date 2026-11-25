@@ -7,9 +7,14 @@
 //!
 //! The rows are written to the work directory while the source is read, so a scan
 //! keeps nothing per original in memory. Once the number of originals is known the
-//! relation is loaded into memory when the budget admits all of it, and stays on disk
-//! otherwise. Both placements run the same code over [`Bytes`], so a lookup gives the
-//! same answer in either.
+//! rows are put in the order of their positions, which is the order of the record IDs:
+//! a source that hands its originals out in another order (several entries read at
+//! once, deduplication on disk) has its rows sorted on disk within the memory the
+//! budget admits (`crate::extsort`). A row number therefore does not depend on batch
+//! sizes or spill, and a page of records is a run of rows. The relation is then loaded
+//! into memory when the budget admits all of it, and stays on disk otherwise. Both
+//! placements run the same code over [`Bytes`], so a lookup gives the same answer in
+//! either.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
@@ -21,10 +26,11 @@ use l2d_core::{L2dError, MemoryBudget};
 use sha2::{Digest, Sha256};
 
 use super::IndexPlacement;
+use crate::extsort::{sort_file, sort_memory};
 
 pub(super) const ID_BYTES: usize = 32;
 const POSITION_BYTES: u64 = 8;
-const KEY_BYTES: u64 = POSITION_BYTES + ID_BYTES as u64;
+pub(super) const KEY_BYTES: u64 = POSITION_BYTES + ID_BYTES as u64;
 const COUNT_BYTES: u64 = 4;
 const SLOT_BYTES: u64 = 8;
 /// The buffer of each of the two files written during a scan.
@@ -37,6 +43,10 @@ const KEYS: &str = "keys.bin";
 const COUNTS: &str = "counts.bin";
 const BY_POSITION: &str = "by-position.bin";
 const BY_ID: &str = "by-id.bin";
+/// The rows with their counts while they are put in order, and the ordered rows.
+const UNORDERED: &str = "rows-unordered.bin";
+const ORDERED: &str = "rows-ordered.bin";
+const ROW_BYTES: u64 = KEY_BYTES + COUNT_BYTES;
 
 fn failed(doing: &str, path: &Path, error: &dyn std::fmt::Display) -> L2dError {
     L2dError::Runtime {
@@ -100,7 +110,7 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
-        for name in [KEYS, COUNTS, BY_POSITION, BY_ID] {
+        for name in [KEYS, COUNTS, BY_POSITION, BY_ID, UNORDERED, ORDERED] {
             let _ = fs::remove_file(self.file(name));
         }
         self.dir.remove_created();
@@ -108,7 +118,7 @@ impl Drop for Work {
 }
 
 #[cfg(windows)]
-fn read_at(file: &File, mut at: u64, mut out: &mut [u8]) -> io::Result<()> {
+pub(crate) fn read_at(file: &File, mut at: u64, mut out: &mut [u8]) -> io::Result<()> {
     use std::os::windows::fs::FileExt;
     while !out.is_empty() {
         match file.seek_read(out, at) {
@@ -125,7 +135,7 @@ fn read_at(file: &File, mut at: u64, mut out: &mut [u8]) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn write_at(file: &File, mut at: u64, mut data: &[u8]) -> io::Result<()> {
+pub(crate) fn write_at(file: &File, mut at: u64, mut data: &[u8]) -> io::Result<()> {
     use std::os::windows::fs::FileExt;
     while !data.is_empty() {
         match file.seek_write(data, at) {
@@ -142,12 +152,12 @@ fn write_at(file: &File, mut at: u64, mut data: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn read_at(file: &File, at: u64, out: &mut [u8]) -> io::Result<()> {
+pub(crate) fn read_at(file: &File, at: u64, out: &mut [u8]) -> io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(file, out, at)
 }
 
 #[cfg(unix)]
-fn write_at(file: &File, at: u64, data: &[u8]) -> io::Result<()> {
+pub(crate) fn write_at(file: &File, at: u64, data: &[u8]) -> io::Result<()> {
     std::os::unix::fs::FileExt::write_all_at(file, data, at)
 }
 
@@ -193,12 +203,119 @@ impl Bytes {
     }
 }
 
+/// What putting the rows in order holds beside the memory of the sort: the rows it
+/// joins and splits at a time and the buffer it writes them through.
+const ORDER_BUFFER_BYTES: u64 = CHUNK_ROWS * ROW_BYTES * 2 + BUFFER_BYTES as u64 * 2;
+
+/// Puts the rows of the work directory in the order of their positions: the keys and
+/// the counts are joined, sorted by position within the memory `budget` admits, and
+/// split again.
+fn order_rows(work: &Work, rows: u64, budget: &MemoryBudget) -> Result<(), L2dError> {
+    let memory = sort_memory(
+        rows,
+        ROW_BYTES as usize,
+        budget.left_bytes().saturating_sub(ORDER_BUFFER_BYTES),
+    );
+    budget.require_whole(
+        memory + ORDER_BUFFER_BYTES,
+        "putting the originals of a scope in the order of their record IDs",
+    )?;
+    work.require_disk(
+        3 * rows * ROW_BYTES,
+        "its originals in the order of their record IDs",
+        &format!("{rows} originals were read, and nothing is kept"),
+    )?;
+    let (keys, counts) = (work.file(KEYS), work.file(COUNTS));
+    let (unordered, ordered) = (work.file(UNORDERED), work.file(ORDERED));
+    let open = |path: &Path| File::open(path).map_err(|error| failed("opening", path, &error));
+    let create = |path: &Path| {
+        File::create(path)
+            .map(|file| BufWriter::with_capacity(BUFFER_BYTES, file))
+            .map_err(|error| failed("creating", path, &error))
+    };
+    let end = |writer: BufWriter<File>, path: &Path| {
+        writer
+            .into_inner()
+            .map(drop)
+            .map_err(|error| failed("writing", path, &error.into_error()))
+    };
+    let remove =
+        |path: &Path| fs::remove_file(path).map_err(|error| failed("removing", path, &error));
+    let mut key_rows = vec![0u8; (CHUNK_ROWS * KEY_BYTES) as usize];
+    let mut count_rows = vec![0u8; (CHUNK_ROWS * COUNT_BYTES) as usize];
+    {
+        let (mut from_keys, mut from_counts) = (open(&keys)?, open(&counts)?);
+        let mut joined = create(&unordered)?;
+        let mut left = rows;
+        while left > 0 {
+            let now = CHUNK_ROWS.min(left) as usize;
+            let key_rows = &mut key_rows[..now * KEY_BYTES as usize];
+            let count_rows = &mut count_rows[..now * COUNT_BYTES as usize];
+            from_keys
+                .read_exact(key_rows)
+                .map_err(|error| failed("reading", &keys, &error))?;
+            from_counts
+                .read_exact(count_rows)
+                .map_err(|error| failed("reading", &counts, &error))?;
+            let (key_rows, _) = key_rows.as_chunks::<{ KEY_BYTES as usize }>();
+            let (count_rows, _) = count_rows.as_chunks::<{ COUNT_BYTES as usize }>();
+            for (key, count) in key_rows.iter().zip(count_rows) {
+                joined
+                    .write_all(key)
+                    .and_then(|()| joined.write_all(count))
+                    .map_err(|error| failed("writing", &unordered, &error))?;
+            }
+            left -= now as u64;
+        }
+        end(joined, &unordered)?;
+    }
+    remove(&keys)?;
+    remove(&counts)?;
+    sort_file(
+        &unordered,
+        &ordered,
+        work.path(),
+        ROW_BYTES as usize,
+        rows,
+        memory,
+    )?;
+    remove(&unordered)?;
+    {
+        let mut from = open(&ordered)?;
+        let (mut to_keys, mut to_counts) = (create(&keys)?, create(&counts)?);
+        let mut joined = vec![0u8; (CHUNK_ROWS * ROW_BYTES) as usize];
+        let mut left = rows;
+        while left > 0 {
+            let now = CHUNK_ROWS.min(left) as usize;
+            let joined = &mut joined[..now * ROW_BYTES as usize];
+            from.read_exact(joined)
+                .map_err(|error| failed("reading", &ordered, &error))?;
+            for row in joined.as_chunks::<{ ROW_BYTES as usize }>().0 {
+                let (key, count) = row.split_at(KEY_BYTES as usize);
+                to_keys
+                    .write_all(key)
+                    .map_err(|error| failed("writing", &keys, &error))?;
+                to_counts
+                    .write_all(count)
+                    .map_err(|error| failed("writing", &counts, &error))?;
+            }
+            left -= now as u64;
+        }
+        end(to_keys, &keys)?;
+        end(to_counts, &counts)?;
+    }
+    remove(&ordered)
+}
+
 /// The rows of a scan on their way to disk.
 pub(super) struct Spool {
     keys: BufWriter<File>,
     counts: BufWriter<File>,
     rows: u64,
     counted: u64,
+    /// Whether every position so far was above the one before it.
+    ordered: bool,
+    last: u64,
     work: Work,
 }
 
@@ -215,6 +332,8 @@ impl Spool {
             counts: open(COUNTS)?,
             rows: 0,
             counted: 0,
+            ordered: true,
+            last: 0,
             work,
         })
     }
@@ -237,6 +356,8 @@ impl Spool {
             .write_all(&position.to_le_bytes())
             .and_then(|()| self.keys.write_all(id))
             .map_err(|error| failed("writing", &path(), &error))?;
+        self.ordered &= self.rows == 0 || position > self.last;
+        self.last = position;
         self.rows += 1;
         self.work.written += KEY_BYTES;
         Ok(())
@@ -264,6 +385,8 @@ impl Spool {
             counts,
             rows,
             counted,
+            ordered,
+            last: _,
             mut work,
         } = self;
         if counted != rows {
@@ -275,6 +398,9 @@ impl Spool {
             writer
                 .into_inner()
                 .map_err(|error| failed("writing", &work.file(name), &error.into_error()))?;
+        }
+        if !ordered {
+            order_rows(&work, rows, budget)?;
         }
         let slots = rows.saturating_mul(2).next_power_of_two().max(16);
         let table = slots * SLOT_BYTES;
@@ -347,6 +473,10 @@ impl Spool {
             occurrences: 0,
             digest: String::new(),
             disk_bytes,
+            // The rows as they were written, and while they were put in order the
+            // joined rows, their runs and the ordered rows beside one another.
+            disk_peak: (rows * ROW_BYTES * if ordered { 1 } else { 3 }).max(disk_bytes),
+            sorted: !ordered,
             work,
         };
         index.build()?;
@@ -421,6 +551,10 @@ pub(super) struct Index {
     occurrences: u64,
     digest: String,
     disk_bytes: u64,
+    disk_peak: u64,
+    /// Whether the source handed its originals out in another order than their
+    /// positions, so that the rows were sorted.
+    sorted: bool,
     // Last, so that the files above are closed before they are removed.
     work: Work,
 }
@@ -523,6 +657,15 @@ impl Index {
         self.disk_bytes
     }
 
+    /// The most the relation took in the work directory while it was built.
+    pub(super) fn disk_peak(&self) -> u64 {
+        self.disk_peak
+    }
+
+    pub(super) fn sorted(&self) -> bool {
+        self.sorted
+    }
+
     pub(super) fn held_bytes(&self) -> u64 {
         self.keys.held() + self.counts.held() + self.by_position.held() + self.by_id.held()
     }
@@ -541,6 +684,25 @@ impl Index {
             id: id.try_into().expect("32 bytes"),
             count: u32::from_le_bytes(count),
         })
+    }
+
+    /// The counts, and with `keys` the positions and identities, of the rows from
+    /// `row` on: as many rows as `counts` holds counts of four bytes.
+    pub(super) fn read_rows(
+        &self,
+        row: u64,
+        keys: Option<&mut [u8]>,
+        counts: &mut [u8],
+    ) -> Result<(), L2dError> {
+        let rows = (counts.len() / COUNT_BYTES as usize) as u64;
+        if row.checked_add(rows).is_none_or(|end| end > self.rows) {
+            return Err(corrupt("a run of rows lies beyond the originals"));
+        }
+        if let Some(keys) = keys {
+            debug_assert_eq!(keys.len() as u64, rows * KEY_BYTES);
+            self.keys.read(row * KEY_BYTES, keys)?;
+        }
+        self.counts.read(row * COUNT_BYTES, counts)
     }
 
     /// The row of the original first read at `position`.
@@ -624,5 +786,112 @@ impl Seen {
         byte[0] |= bit;
         self.bits.write(row / 8, &byte)?;
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use l2d_core::MemorySettings;
+    use l2d_core::memory::PROCESS_BASELINE_BYTES;
+
+    use super::*;
+
+    fn budget(usable: u64) -> MemoryBudget {
+        let settings = MemorySettings {
+            memory_limit_bytes: Some(PROCESS_BASELINE_BYTES + usable),
+            ..MemorySettings::default()
+        };
+        MemoryBudget::observe_with(&settings, || Ok(64 << 30)).unwrap()
+    }
+
+    fn identity(position: u64) -> [u8; ID_BYTES] {
+        let mut id = [0u8; ID_BYTES];
+        id[..8].copy_from_slice(&mix(position).to_le_bytes());
+        id
+    }
+
+    /// Rows handed out in another order than their positions are ordered by position,
+    /// in memory and on disk, also when they are far more than one run of the sort.
+    #[test]
+    fn rows_are_in_the_order_of_their_positions_however_they_were_handed_out() {
+        const ROWS: u64 = 30_000;
+        for (placement, usable) in [
+            (IndexPlacement::MemoryWhenAdmitted, 64 << 20),
+            (IndexPlacement::Disk, 64 << 20),
+            // 600 KiB: the sort gets what is left beside its buffers, and merges runs.
+            (IndexPlacement::MemoryWhenAdmitted, 600 << 10),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let work = Work::create(&dir.path().join("work"), None).unwrap();
+            let mut spool = Spool::create(work).unwrap();
+            for at in 0..ROWS {
+                // A fixed permutation of the positions 10, 20, 30, ...
+                let position = ((at * 7_919 + 13) % ROWS + 1) * 10;
+                spool.push(position, &identity(position)).unwrap();
+                spool.count((position % 7 + 1) as u32).unwrap();
+            }
+            let budget = budget(usable);
+            // Ordering and placing the rows allocates no more than the budget has
+            // left: 30,000 rows are 1.3 MB, and the tightest budget leaves 600 KiB.
+            let (index, peak) =
+                crate::test_heap::measure(|| spool.finish(placement, &budget).unwrap());
+            assert!(
+                peak <= usable,
+                "{placement:?}: the heap peaked at {peak} bytes with {usable} left"
+            );
+            assert!(index.sorted());
+            assert_eq!(index.rows(), ROWS);
+            assert_eq!(
+                index.on_disk(),
+                usable < (1 << 20) || placement == IndexPlacement::Disk
+            );
+            for row in [0, 1, 4_095, 4_096, ROWS / 2, ROWS - 1] {
+                let entry = index.entry(row).unwrap();
+                assert_eq!(entry.position, (row + 1) * 10, "{placement:?} {usable}");
+                assert_eq!(entry.id, identity(entry.position));
+                assert_eq!(u64::from(entry.count), entry.position % 7 + 1);
+                assert_eq!(index.find_position(entry.position).unwrap(), Some(row));
+                assert_eq!(index.find_id(&entry.id).unwrap(), Some(row));
+            }
+            let mut counts = [0u8; 12];
+            let mut keys = [0u8; 120];
+            index
+                .read_rows(ROWS - 3, Some(&mut keys), &mut counts)
+                .unwrap();
+            assert_eq!(keys[..8], ((ROWS - 2) * 10).to_le_bytes());
+            assert!(index.read_rows(ROWS - 2, None, &mut counts).is_err());
+            // Only the relation's own files are left beside it.
+            let left: Vec<String> = fs::read_dir(dir.path().join("work"))
+                .unwrap()
+                .map(|file| file.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                left.iter()
+                    .all(|name| [KEYS, COUNTS, BY_POSITION, BY_ID].contains(&name.as_str())),
+                "{left:?}"
+            );
+            drop(index);
+            assert!(!dir.path().join("work").exists());
+        }
+    }
+
+    /// The digest of the relation does not depend on the order of the hand-out.
+    #[test]
+    fn the_digest_is_the_same_for_every_order_of_the_hand_out() {
+        let digest = |reversed: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let work = Work::create(&dir.path().join("work"), None).unwrap();
+            let mut spool = Spool::create(work).unwrap();
+            for at in 0..500u64 {
+                let position = if reversed { 500 - at } else { at + 1 };
+                spool.push(position, &identity(position)).unwrap();
+                spool.count(3).unwrap();
+            }
+            let index = spool
+                .finish(IndexPlacement::MemoryWhenAdmitted, &budget(64 << 20))
+                .unwrap();
+            index.digest().to_string()
+        };
+        assert_eq!(digest(false), digest(true));
     }
 }

@@ -21,17 +21,34 @@
 //! [`MAX_ROWS`] rows of a page, and the table of at most 64 jobs with their results.
 //! What a committed artifact keeps is held in the budget from its commit on.
 //!
+//! # Tables, reuse and cost
+//!
+//! The membership and the scores of a set are kept in memory when the budget admits
+//! them and in files of the work directory otherwise, or always there when the host
+//! says so ([`TablePlacement`]); intersections, differences, region counts and pages
+//! read either placement in blocks (requirement 6.2). A prepared set is not computed
+//! twice: another rule of a scorer revision is derived from the scores a set keeps,
+//! and a filter or membership over a part of a snapshot from the set over the whole
+//! of it. Regions, pages and evidence read committed tables only, so they inflate
+//! nothing and score nothing (requirement 6.3); the overview states the server's work
+//! counters, which such calls leave unchanged, and what the session was returned.
+//! Every job states its cost in the counters of the scale gate (requirement 6.4).
+//!
 //! # Scope of this revision
 //!
-//! Sources are ZIP archives. Saved receipts, `triager_refine`, `triager_save`,
-//! recommendation producers, allocation and occurrence projections are refused by
-//! name (`unsupported_operation`); they belong to later tasks of the plan.
+//! Sources are ZIP archives. A selection is a score, a filter or a membership file
+//! the host registered ([`MembershipRef`]). Saved receipts, `triager_refine`,
+//! `triager_save`, recommendation producers, allocation and occurrence projections
+//! are refused by name (`unsupported_operation`); they belong to later tasks of the
+//! plan.
 
 mod inspect;
 mod membership;
 mod ops;
+mod process;
 mod schema;
 mod state;
+mod tables;
 mod wire;
 
 use std::path::PathBuf;
@@ -55,6 +72,7 @@ use ops::{ComposeTask, OpenTask, Rule, SelectProducer, SelectTask, Worker};
 use state::{Activity, JobState, Jobs, Keyed, MAX_KEY_BYTES, Registry, Shared, Task};
 use wire::{CANCELLED, Fault, MAX_REGION_SETS, MAX_SETS, VERSION};
 
+pub use tables::TablePlacement;
 pub use wire::{
     DEFAULT_ROWS, MAX_EXCERPT_BYTES, MAX_MESSAGE_BYTES, MAX_RESULT_BYTES, MAX_ROWS, transport_bytes,
 };
@@ -62,6 +80,9 @@ pub use wire::{
 /// What the service holds in the budget for the threads that call it: see the module
 /// description.
 pub const ADAPTER_FIXED_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The blocks a call reads committed tables through are a small part of that share.
+const _: () = assert!(inspect::READ_BLOCK_BYTES * 16 <= ADAPTER_FIXED_BYTES);
 
 /// The most bytes the entry patterns of one open take together.
 pub const MAX_ENTRY_PATTERN_BYTES: usize = 1024;
@@ -117,6 +138,16 @@ pub struct SourceRef {
     pub public_fixture: bool,
 }
 
+/// A membership file the host registered under a name: one line per assessed record
+/// with its record handle, a tab and `in`, `out` or `abstain`. A record the file does
+/// not name was not assessed. A selection names it as
+/// `{"kind": "membership", "ref": NAME}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipRef {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 /// What the host configures; nothing of it can be changed through a tool argument.
 #[derive(Debug, Clone)]
 pub struct HostConfig {
@@ -142,6 +173,10 @@ pub struct HostConfig {
     /// disk; `None` leaves that to the memory limit.
     pub dedup_set_texts: Option<u64>,
     pub index: IndexPlacement,
+    /// Where selections and views keep their membership and scores.
+    pub tables: TablePlacement,
+    /// The membership files a selection may name.
+    pub memberships: Vec<MembershipRef>,
     /// The free disk space to compare with in place of the operating system's figure.
     pub free_disk_bytes: Option<u64>,
 }
@@ -227,27 +262,35 @@ impl Service {
         if config.project.is_empty() {
             return Err(invalid("the project identity is empty".into()));
         }
-        for (at, source) in config.sources.iter().enumerate() {
-            let usable = (1..=64).contains(&source.name.len())
-                && source
-                    .name
+        let names = config
+            .sources
+            .iter()
+            .map(|source| ("source", &source.name))
+            .chain(
+                config
+                    .memberships
+                    .iter()
+                    .map(|membership| ("membership", &membership.name)),
+            );
+        let mut seen: Vec<(&str, &String)> = Vec::new();
+        for (kind, name) in names {
+            let usable = (1..=64).contains(&name.len())
+                && name
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
             if !usable {
-                return Err(invalid(
-                    "a source name is 1 to 64 letters, digits, '.', '_' or '-'".into(),
-                ));
-            }
-            if config.sources[..at]
-                .iter()
-                .any(|other| other.name == source.name)
-            {
                 return Err(invalid(format!(
-                    "the source name '{}' is registered twice",
-                    source.name
+                    "a {kind} name is 1 to 64 letters, digits, '.', '_' or '-'"
                 )));
             }
+            if seen.contains(&(kind, name)) {
+                return Err(invalid(format!(
+                    "the {kind} name '{name}' is registered twice"
+                )));
+            }
+            seen.push((kind, name));
         }
+        drop(seen);
         budget.require_whole(
             ADAPTER_FIXED_BYTES,
             "serving triager requests, their responses and the table of jobs",
@@ -321,10 +364,22 @@ impl Service {
     /// Runs one tool call. The arguments are validated before anything is scheduled;
     /// a call that starts a job waits for it as long as the host configured.
     pub fn call(&self, tool: &str, args: &Value) -> Reply {
-        match self.dispatch(tool, args) {
+        let activity = &self.shared.activity;
+        let reply = match self.dispatch(tool, args) {
             Ok(reply) => reply,
-            Err(fault) => Reply::fault(&fault),
-        }
+            Err(fault) => {
+                if fault.code == "unsupported_operation" {
+                    activity.unsupported.fetch_add(1, Ordering::Relaxed);
+                }
+                Reply::fault(&fault)
+            }
+        };
+        // What the session was returned, counted the way the response limit is.
+        activity.calls.fetch_add(1, Ordering::Relaxed);
+        activity
+            .bytes_returned
+            .fetch_add(transport_bytes(&reply.json) as u64, Ordering::Relaxed);
+        reply
     }
 
     fn dispatch(&self, tool: &str, args: &Value) -> Result<Reply, Fault> {
@@ -621,14 +676,40 @@ impl Service {
                 };
                 SelectProducer::Filter { syntax, query }
             }
+            "membership" => {
+                producer.only(&["kind", "version", "ref"])?;
+                let name = producer.required_text("ref")?;
+                let found = self
+                    .shared
+                    .config
+                    .memberships
+                    .iter()
+                    .find(|known| known.name == name)
+                    .ok_or_else(|| {
+                        Fault::new(
+                            "unknown_membership",
+                            format!(
+                                "the host registered no membership `{}`",
+                                wire::clip(name, 64).0
+                            ),
+                        )
+                    })?;
+                SelectProducer::Membership {
+                    name: found.name.clone(),
+                    path: found.path.clone(),
+                }
+            }
             "recommend" => {
                 return Err(Fault::unsupported(
                     "the producer `recommend` (Venn policy, local model, issued batches) is \
-                     not served by this revision (task 2.1); use `score` or `filter`",
+                     not served by this revision (task 2.1); use `score`, `filter` or a \
+                     registered `membership`",
                 ));
             }
             _ => {
-                return Err(Fault::invalid("`producer.kind` is `score` or `filter`"));
+                return Err(Fault::invalid(
+                    "`producer.kind` is `score`, `filter` or `membership`",
+                ));
             }
         };
         let scope = self
@@ -1021,7 +1102,7 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
     let mut dirs = 0u64;
     loop {
         // The next job that was not cancelled while it waited.
-        let (id, task, cancel, progress) = {
+        let (id, task, cancel, progress, queued) = {
             let mut jobs = lock(&shared.jobs);
             loop {
                 if jobs.shutdown {
@@ -1048,6 +1129,7 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                         task.expect("checked above"),
                         job.cancel.clone(),
                         job.progress.clone(),
+                        job.queued,
                     );
                     break taken;
                 }
@@ -1083,6 +1165,7 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
         }
         shared.changed.notify_all();
         shared.activity.jobs_started.fetch_add(1, Ordering::Relaxed);
+        let queue_ms = queued.elapsed().as_millis() as u64;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut worker = Worker {
                 shared,
@@ -1092,6 +1175,7 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 progress: &progress,
                 base,
                 dirs: &mut dirs,
+                queue_ms,
             };
             match &task {
                 Task::Open(task) => ops::open(&mut worker, task),

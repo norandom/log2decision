@@ -19,7 +19,8 @@ use l2d_core::{L2dError, LogsFrame, MemoryBudget, ProjectPaths};
 use l2d_triager::mcp;
 use l2d_triager::scope::IndexPlacement;
 use l2d_triager::service::{
-    DisclosureProfile, FrozenScorer, HostConfig, ScorerIdentity, ScorerSource, Service, SourceRef,
+    DisclosureProfile, FrozenScorer, HostConfig, MembershipRef, ScorerIdentity, ScorerSource,
+    Service, SourceRef, TablePlacement,
 };
 
 use super::common::{Context, find_model, load_scorer, model_name};
@@ -60,6 +61,15 @@ pub struct McpArgs {
     /// [default: what the memory limit allows]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
     dedup_set_texts: Option<u64>,
+    /// Keep the locator index of a snapshot and the membership and scores of every set
+    /// in files of the work directory, also when the memory limit admits them
+    #[arg(long)]
+    tables_on_disk: bool,
+    /// Register a membership file under a name: one `<record handle><TAB>in|out|abstain`
+    /// per assessed record. A selection names it as producer `membership`. May be given
+    /// several times
+    #[arg(long = "membership", value_name = "NAME=PATH")]
+    memberships: Vec<String>,
     /// Run the tool calls of this file, one JSON object {"tool","args","bind"} per line,
     /// write one {"tool","result"} per line and end; every call waits for its job
     #[arg(long, value_name = "FILE")]
@@ -182,7 +192,29 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
         },
         busy: l2d_core::resource::busy_choice(),
         dedup_set_texts: args.dedup_set_texts,
-        index: IndexPlacement::MemoryWhenAdmitted,
+        index: if args.tables_on_disk {
+            IndexPlacement::Disk
+        } else {
+            IndexPlacement::MemoryWhenAdmitted
+        },
+        tables: if args.tables_on_disk {
+            TablePlacement::Disk
+        } else {
+            TablePlacement::MemoryWhenAdmitted
+        },
+        memberships: args
+            .memberships
+            .iter()
+            .map(|text| match text.split_once('=') {
+                Some((name, path)) if !name.is_empty() && !path.is_empty() => Ok(MembershipRef {
+                    name: name.to_string(),
+                    path: PathBuf::from(path),
+                }),
+                _ => Err(invalid(format!(
+                    "a membership is given as NAME=PATH, and `{text}` is not"
+                ))),
+            })
+            .collect::<Result<_, _>>()?,
         free_disk_bytes: None,
     };
     let service = Service::start(config, budget, Box::new(ProjectScorers { paths }))?;

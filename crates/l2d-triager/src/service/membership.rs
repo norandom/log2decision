@@ -2,8 +2,12 @@
 //! not evaluated, and the three-valued expressions over such sets (design.md,
 //! "Membership, cost and evidence").
 
+use std::sync::Arc;
+
+use l2d_core::L2dError;
 use serde_json::{Value, json};
 
+use super::tables::{BLOCK_ROWS, SetDir, Table};
 use super::wire::{Fault, MAX_SETS, share};
 
 /// The membership of one original in one set.
@@ -24,7 +28,8 @@ impl State {
         }
     }
 
-    fn of(bits: u8) -> Self {
+    /// The state a code of [`States`] stands for.
+    pub fn of(bits: u8) -> Self {
         match bits & 3 {
             0 => State::Out,
             1 => State::In,
@@ -58,46 +63,107 @@ impl State {
     }
 }
 
-/// Two bits per row of a snapshot's relation.
+/// The code of a row that was not evaluated because its producer abstained on it. It
+/// reads as [`State::Unknown`]; only a reason tells it from [`State::Unknown`]'s own
+/// code, which stands for a row outside what the producer assessed.
+pub(crate) const ABSTAINED: u8 = 3;
+
+/// Two bits per row of a snapshot's relation, in memory or in a file of the work
+/// directory: the code of a [`State`], or [`ABSTAINED`].
 pub(crate) struct States {
-    bits: Vec<u8>,
+    table: Table,
     rows: u64,
 }
 
 impl States {
-    /// What the states of `rows` rows take in memory.
+    /// The bytes of one block of states.
+    pub const BLOCK_BYTES: usize = BLOCK_ROWS as usize / 4;
+
+    /// What the states of `rows` rows take, in memory or on disk.
     pub fn bytes_for(rows: u64) -> u64 {
         rows.div_ceil(4).max(1)
     }
 
-    /// Every row in `fill`. The caller has asked the budget for [`States::bytes_for`].
-    pub fn new(rows: u64, fill: State) -> Self {
+    /// Every row in `fill`, in memory. The caller has asked the budget for
+    /// [`States::bytes_for`].
+    pub fn in_memory(rows: u64, fill: State) -> Self {
         let pattern = (fill as u8) * 0b0101_0101;
         Self {
-            bits: vec![pattern; Self::bytes_for(rows) as usize],
+            table: Table::in_memory(Self::bytes_for(rows), pattern),
             rows,
         }
+    }
+
+    /// A file for the states of `rows` rows, every row out, to be written block by
+    /// block.
+    pub fn on_disk(dir: &Arc<SetDir>, rows: u64) -> Result<Self, L2dError> {
+        Ok(Self {
+            table: Table::on_disk(dir, "states.bin", Self::bytes_for(rows))?,
+            rows,
+        })
     }
 
     pub fn rows(&self) -> u64 {
         self.rows
     }
 
+    pub fn is_on_disk(&self) -> bool {
+        self.table.is_on_disk()
+    }
+
     pub fn held_bytes(&self) -> u64 {
-        self.bits.capacity() as u64
+        self.table.held_bytes()
     }
 
-    pub fn get(&self, row: u64) -> State {
-        debug_assert!(row < self.rows);
-        State::of(self.bits[(row / 4) as usize] >> ((row % 4) * 2))
+    pub fn disk_bytes(&self) -> u64 {
+        self.table.disk_bytes()
     }
 
-    pub fn set(&mut self, row: u64, state: State) {
-        debug_assert!(row < self.rows);
+    /// The code of `row`: one cell read, without a buffer.
+    pub fn code(&self, row: u64) -> Result<u8, L2dError> {
+        let mut byte = [0u8];
+        self.table.read(row / 4, &mut byte)?;
+        Ok((byte[0] >> ((row % 4) * 2)) & 3)
+    }
+
+    pub fn get(&self, row: u64) -> Result<State, L2dError> {
+        self.code(row).map(State::of)
+    }
+
+    pub fn set(&mut self, row: u64, code: u8) -> Result<(), L2dError> {
+        let mut byte = [0u8];
+        self.table.read(row / 4, &mut byte)?;
         let shift = (row % 4) * 2;
-        let byte = &mut self.bits[(row / 4) as usize];
-        *byte = (*byte & !(3 << shift)) | ((state as u8) << shift);
+        byte[0] = (byte[0] & !(3 << shift)) | ((code & 3) << shift);
+        self.table.write(row / 4, &byte)
     }
+
+    /// Reads the codes of the block that starts at `first`, a multiple of
+    /// [`BLOCK_ROWS`], into `out`, which holds [`States::BLOCK_BYTES`], and returns how
+    /// many rows the block has. [`code_in`] reads one of them.
+    pub fn read_block(&self, first: u64, out: &mut [u8]) -> Result<usize, L2dError> {
+        debug_assert!(first.is_multiple_of(BLOCK_ROWS));
+        let rows = BLOCK_ROWS.min(self.rows.saturating_sub(first)) as usize;
+        self.table.read(first / 4, &mut out[..rows.div_ceil(4)])?;
+        Ok(rows)
+    }
+
+    /// Writes the first `rows` codes of `block` as the block that starts at `first`.
+    pub fn write_block(&mut self, first: u64, block: &[u8], rows: usize) -> Result<(), L2dError> {
+        debug_assert!(first.is_multiple_of(BLOCK_ROWS));
+        self.table.write(first / 4, &block[..rows.div_ceil(4)])
+    }
+}
+
+/// The code at `at` of a block read with [`States::read_block`].
+pub(crate) fn code_in(block: &[u8], at: usize) -> u8 {
+    (block[at / 4] >> ((at % 4) * 2)) & 3
+}
+
+/// Sets the code at `at` of a block to be written with [`States::write_block`].
+pub(crate) fn put_code(block: &mut [u8], at: usize, code: u8) {
+    let shift = (at % 4) * 2;
+    block[at / 4] = (block[at / 4] & !(3 << shift)) | ((code & 3) << shift);
 }
 
 /// A set expression over named operands, by their index in the request's `sets`.
@@ -269,12 +335,23 @@ pub(crate) fn check_names<'a>(
 pub(crate) struct Tally {
     pub originals: [u64; 3],
     pub occurrences: [u64; 3],
+    /// Of what is unknown: the originals and occurrences the producer abstained on.
+    pub abstained: (u64, u64),
 }
 
 impl Tally {
     pub fn add(&mut self, state: State, occurrences: u64) {
         self.originals[state as usize] += 1;
         self.occurrences[state as usize] += occurrences;
+    }
+
+    /// Adds a row by its code: as [`Tally::add`], with an abstention counted apart.
+    pub fn add_code(&mut self, code: u8, occurrences: u64) {
+        self.add(State::of(code), occurrences);
+        if code == ABSTAINED {
+            self.abstained.0 += 1;
+            self.abstained.1 += occurrences;
+        }
     }
 
     pub fn parent(&self) -> (u64, u64) {
@@ -318,26 +395,48 @@ mod tests {
     const ALL: [State; 3] = [State::Out, State::In, State::Unknown];
 
     #[test]
-    fn states_keep_two_bits_a_row() {
-        let mut states = States::new(11, State::Unknown);
-        assert_eq!(states.held_bytes(), 3);
-        assert!((0..11).all(|row| states.get(row) == State::Unknown));
-        states.set(0, State::In);
-        states.set(5, State::Out);
-        states.set(10, State::In);
-        states.set(10, State::Out);
-        let found: Vec<State> = (0..11).map(|row| states.get(row)).collect();
-        assert_eq!(found[0], State::In);
-        assert_eq!(found[5], State::Out);
-        assert_eq!(found[10], State::Out);
-        assert_eq!(
-            found
-                .iter()
-                .filter(|state| **state == State::Unknown)
-                .count(),
-            8
-        );
-        assert_eq!(States::new(0, State::Out).held_bytes(), 1);
+    fn states_keep_two_bits_a_row_in_memory_and_on_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = SetDir::create(root.path().join("set-1")).unwrap();
+        let rows = BLOCK_ROWS + 11;
+        let mut on_disk = States::on_disk(&dir, rows).unwrap();
+        // A file starts with every row out; the first block is written as unknown.
+        on_disk
+            .write_block(0, &[0b1010_1010; States::BLOCK_BYTES], BLOCK_ROWS as usize)
+            .unwrap();
+        on_disk
+            .write_block(BLOCK_ROWS, &[0b1010_1010; 3], 11)
+            .unwrap();
+        for mut states in [States::in_memory(rows, State::Unknown), on_disk] {
+            assert_eq!(states.rows(), rows);
+            assert!((0..11).all(|row| states.get(row).unwrap() == State::Unknown));
+            states.set(0, State::In as u8).unwrap();
+            states.set(5, State::Out as u8).unwrap();
+            states.set(rows - 1, State::In as u8).unwrap();
+            states.set(rows - 1, ABSTAINED).unwrap();
+            assert_eq!(states.get(0).unwrap(), State::In);
+            assert_eq!(states.get(5).unwrap(), State::Out);
+            assert_eq!(states.code(rows - 1).unwrap(), ABSTAINED);
+            assert_eq!(states.get(rows - 1).unwrap(), State::Unknown);
+            assert!(states.get(rows + 5).is_err());
+            let mut block = [0u8; States::BLOCK_BYTES];
+            assert_eq!(
+                states.read_block(0, &mut block).unwrap(),
+                BLOCK_ROWS as usize
+            );
+            assert_eq!(code_in(&block, 0), 1);
+            assert_eq!(code_in(&block, 5), 0);
+            assert_eq!(code_in(&block, 6), 2);
+            assert_eq!(states.read_block(BLOCK_ROWS, &mut block).unwrap(), 11);
+            assert_eq!(code_in(&block, 10), ABSTAINED);
+            put_code(&mut block, 9, 1);
+            states.write_block(BLOCK_ROWS, &block, 11).unwrap();
+            assert_eq!(states.get(BLOCK_ROWS + 9).unwrap(), State::In);
+            let bytes = States::bytes_for(rows);
+            assert_eq!(states.held_bytes() + states.disk_bytes(), bytes);
+            assert_eq!(states.is_on_disk(), states.held_bytes() == 0);
+        }
+        assert_eq!(States::in_memory(0, State::Out).held_bytes(), 1);
     }
 
     #[test]
@@ -433,6 +532,9 @@ mod tests {
                    "unknown": 1, "retained_share": 0.5})
         );
         assert_eq!(tally.occurrence_counts()["in"], 4);
+        tally.add_code(ABSTAINED, 7);
+        assert_eq!(tally.of(State::Unknown), (2, 9));
+        assert_eq!(tally.abstained, (1, 7));
         assert_eq!(Tally::default().counts()["retained_share"], Value::Null);
     }
 }

@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use l2d_core::memory::MemoryUsage;
-use l2d_core::{ArchiveSummary, ZipInputSettings};
+use l2d_core::{ArchiveSummary, L2dError, ZipInputSettings};
 use serde_json::{Value, json};
 
 use super::membership::{State, States, Tally};
+use super::tables::{BLOCK_ROWS, Scores};
 use super::wire::{Fault, VERSION};
 use super::{HostConfig, ScorerIdentity};
 use crate::scope::Scope;
@@ -58,6 +59,12 @@ pub(crate) enum Producer {
     },
     Expression {
         expr: Value,
+    },
+    /// A membership file the host registered, bound to its content.
+    Membership {
+        name: String,
+        content_sha256: String,
+        bytes: u64,
     },
 }
 
@@ -108,6 +115,17 @@ impl Producer {
                 })
             }
             Producer::Expression { expr } => json!({"kind": "expression", "expr": expr}),
+            Producer::Membership {
+                name,
+                content_sha256,
+                bytes,
+            } => json!({
+                "kind": "membership",
+                "version": 1,
+                "ref": name,
+                "content_sha256": content_sha256,
+                "bytes": bytes,
+            }),
         }
     }
 
@@ -122,6 +140,11 @@ impl Producer {
             Producer::Filter { query, .. } => query.capacity(),
             // A parsed tree takes several times its text.
             Producer::Expression { expr } => 16 * expr.to_string().len(),
+            Producer::Membership {
+                name,
+                content_sha256,
+                ..
+            } => name.capacity() + content_sha256.capacity(),
         }) as u64
     }
 }
@@ -151,8 +174,12 @@ pub(crate) struct Set {
     pub parent: Option<Arc<Set>>,
     pub states: States,
     /// For a score set: the score of every evaluated row of the relation; NaN where
-    /// there is none.
-    pub scores: Option<Vec<f32>>,
+    /// there is none. A set derived from the scores of another set of the same scorer
+    /// revision shares its table, which then also holds scores outside this set's
+    /// parent; they are read only for members of the parent.
+    pub scores: Option<Arc<Scores>>,
+    /// Whether this set made its scores, and so holds them.
+    pub owns_scores: bool,
     pub producer: Producer,
     /// Originals and occurrences by state, among the members of the parent.
     pub tally: Tally,
@@ -161,6 +188,19 @@ pub(crate) struct Set {
     /// The result of the call that made it, as it was returned.
     pub result: String,
     pub held: u64,
+}
+
+impl Set {
+    /// What the set's own tables take in the work directory; a table it shares with
+    /// the set it was derived from is that set's.
+    pub fn disk_bytes(&self) -> u64 {
+        self.states.disk_bytes()
+            + self
+                .scores
+                .as_ref()
+                .filter(|_| self.owns_scores)
+                .map_or(0, |scores| scores.disk_bytes())
+    }
 }
 
 /// A population a producer or an expression is evaluated in.
@@ -199,10 +239,23 @@ impl Population {
         }
     }
 
-    pub fn state(&self, row: u64) -> State {
+    pub fn state(&self, row: u64) -> Result<State, L2dError> {
         match self {
-            Population::All(_) => State::In,
+            Population::All(_) => Ok(State::In),
             Population::Of(set) => set.states.get(row),
+        }
+    }
+
+    /// The codes of the block of rows that starts at `first`, as
+    /// [`States::read_block`] gives them: every row in for a whole snapshot.
+    pub fn read_block(&self, first: u64, out: &mut [u8]) -> Result<usize, L2dError> {
+        match self {
+            Population::All(snapshot) => {
+                let rows = BLOCK_ROWS.min(snapshot.scope.originals().saturating_sub(first));
+                out[..(rows as usize).div_ceil(4)].fill(0b0101_0101);
+                Ok(rows as usize)
+            }
+            Population::Of(set) => set.states.read_block(first, out),
         }
     }
 
@@ -243,6 +296,11 @@ impl Registry {
 
     pub fn insert_set(&mut self, set: Arc<Set>) {
         self.sets.insert(set.handle.clone(), set);
+    }
+
+    /// Every committed selection and view, in no stated order.
+    pub fn sets(&self) -> impl Iterator<Item = &Arc<Set>> {
+        self.sets.values()
     }
 
     /// Lets every artifact go: sets first, since they keep their snapshot.
@@ -353,6 +411,8 @@ pub(crate) struct Job {
     /// The committed result, or why there is none.
     pub outcome: Option<Result<String, Fault>>,
     pub task: Option<Task>,
+    /// When the job was queued: what it waited is part of its cost.
+    pub queued: std::time::Instant,
     key: Option<String>,
 }
 
@@ -491,6 +551,7 @@ impl Jobs {
                 progress: Arc::new(Progress::default()),
                 outcome: None,
                 task: Some(task),
+                queued: std::time::Instant::now(),
                 key: key.map(|(key, _)| key),
             },
         );
@@ -514,8 +575,18 @@ impl Jobs {
 #[derive(Default)]
 pub(crate) struct Activity {
     pub archive_scans: AtomicU64,
+    /// The unpacked bytes of the entries whose inflation a read of a source started.
+    pub bytes_unpacked: AtomicU64,
+    pub rows_scored: AtomicU64,
+    pub scorer_loads: AtomicU64,
+    pub membership_reads: AtomicU64,
     pub jobs_started: AtomicU64,
     pub evidence_bytes: AtomicU64,
+    /// Tool calls answered, and the bytes of their MCP tool results.
+    pub calls: AtomicU64,
+    pub bytes_returned: AtomicU64,
+    /// Calls refused as not served by this revision.
+    pub unsupported: AtomicU64,
 }
 
 /// What the adapter threads and the worker share.
@@ -537,8 +608,24 @@ impl Shared {
     pub fn activity(&self) -> Value {
         json!({
             "archive_scans": self.activity.archive_scans.load(Ordering::Relaxed),
+            "bytes_unpacked": self.activity.bytes_unpacked.load(Ordering::Relaxed),
+            "rows_scored": self.activity.rows_scored.load(Ordering::Relaxed),
+            "scorer_loads": self.activity.scorer_loads.load(Ordering::Relaxed),
+            "membership_reads": self.activity.membership_reads.load(Ordering::Relaxed),
+            "rows_encoded": 0,
+            "genai_rows_submitted": 0,
             "jobs_started": self.activity.jobs_started.load(Ordering::Relaxed),
             "evidence_bytes_disclosed": self.activity.evidence_bytes.load(Ordering::Relaxed),
+        })
+    }
+
+    /// What the session was answered so far: tool calls, the bytes of their MCP tool
+    /// results, and the calls refused as not served by this revision.
+    pub fn session(&self) -> Value {
+        json!({
+            "calls": self.activity.calls.load(Ordering::Relaxed),
+            "bytes_returned": self.activity.bytes_returned.load(Ordering::Relaxed),
+            "unsupported_refusals": self.activity.unsupported.load(Ordering::Relaxed),
         })
     }
 

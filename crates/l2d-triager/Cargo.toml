@@ -27,4 +27,6 @@ zip.workspace = true
 rusqlite.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Console"] }
+# `Win32_System_Threading` and `Win32_System_ProcessStatus` read the peak working set
+# of the process for the cost a job reports; `l2d-encoder` enables them already.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_ProcessStatus"] }

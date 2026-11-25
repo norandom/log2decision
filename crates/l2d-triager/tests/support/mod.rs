@@ -13,8 +13,8 @@ use l2d_core::resource::BusyChoice;
 use l2d_core::{ArchivePosition, L2dError, LogsFrame, MemoryBudget, MemorySettings};
 use l2d_triager::scope::IndexPlacement;
 use l2d_triager::service::{
-    DisclosureProfile, FrozenScorer, HostConfig, Reply, ScorerIdentity, ScorerSource, Service,
-    SourceRef,
+    DisclosureProfile, FrozenScorer, HostConfig, MembershipRef, Reply, ScorerIdentity,
+    ScorerSource, Service, SourceRef, TablePlacement,
 };
 use serde_json::{Value, json};
 
@@ -227,6 +227,10 @@ pub struct HostOptions {
     pub batch_rows: Option<u64>,
     pub dedup_set_texts: Option<u64>,
     pub index: IndexPlacement,
+    /// Where selections and views keep their membership and scores.
+    pub tables: TablePlacement,
+    /// Membership files the host registers: a name and the lines of the file.
+    pub memberships: Vec<(String, String)>,
     pub profile: DisclosureProfile,
     pub inline_wait: Option<Duration>,
     pub busy: BusyChoice,
@@ -241,6 +245,8 @@ impl Default for HostOptions {
             batch_rows: None,
             dedup_set_texts: None,
             index: IndexPlacement::MemoryWhenAdmitted,
+            tables: TablePlacement::MemoryWhenAdmitted,
+            memberships: Vec::new(),
             profile: DisclosureProfile::PrivateLocal,
             inline_wait: None,
             busy: BusyChoice::Wait,
@@ -398,6 +404,18 @@ pub fn budget(options: &HostOptions) -> MemoryBudget {
 }
 
 pub fn config(dir: &Path, project: &str, options: &HostOptions) -> HostConfig {
+    let memberships = options
+        .memberships
+        .iter()
+        .map(|(name, lines)| {
+            let path = dir.join(format!("membership-{name}.tsv"));
+            std::fs::write(&path, lines).unwrap();
+            MembershipRef {
+                name: name.clone(),
+                path,
+            }
+        })
+        .collect();
     HostConfig {
         project: project.into(),
         work_root: dir.join("work"),
@@ -420,6 +438,8 @@ pub fn config(dir: &Path, project: &str, options: &HostOptions) -> HostConfig {
         busy: options.busy,
         dedup_set_texts: options.dedup_set_texts,
         index: options.index,
+        tables: options.tables,
+        memberships,
         free_disk_bytes: None,
     }
 }

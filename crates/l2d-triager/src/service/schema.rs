@@ -152,8 +152,11 @@ pub(crate) fn tools() -> Value {
         "Derive an immutable set inside a snapshot, a selection or a view. `score` takes a \
          frozen scorer with `top_k` and the tie rule `record_id_ascending`, or a \
          `threshold`. `filter` takes a `literal`, a whole-record `glob` or a `regex`. \
-         Outside its scope a set is not evaluated. Returns member counts in both units, \
-         coverage and the producer revision; reads the source once, as a job.",
+         `membership` takes a membership file the host registered: assessed in, assessed \
+         out, abstained, and not assessed for every record it does not name. Outside its \
+         scope a set is not evaluated. Returns member counts in both units, coverage, the \
+         producer revision and the cost. A job: it reads the source once, unless a \
+         prepared set of the same scorer revision, filter or membership supplies it.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -186,6 +189,16 @@ pub(crate) fn tools() -> Value {
                                 "syntax": {"enum": ["literal", "glob", "regex"]},
                                 "query": {"type": "string", "minLength": 1},
                                 "case_insensitive": {"type": "boolean"}
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "ref"],
+                            "properties": {
+                                "kind": {"const": "membership"},
+                                "version": {"const": 1},
+                                "ref": {"type": "string", "description": "A membership file the host registered."}
                             }
                         }
                     ]
@@ -319,9 +332,28 @@ pub(crate) fn tools() -> Value {
                 "membership": {"type": "object"},
                 "explanation": {"type": "array"},
                 "excerpt": {"type": "object"},
+                "excerpt_estimate": {
+                    "type": "object",
+                    "description": "evidence without an excerpt: what reading one takes at most."
+                },
                 "disclosure": {"type": "object"},
                 "artifact": {"type": "object"},
-                "activity": {"type": "object"},
+                "activity": {
+                    "type": "object",
+                    "description": "overview: the work the server did so far. Reads of \
+                                    prepared sets leave archive_scans, bytes_unpacked and \
+                                    rows_scored unchanged."
+                },
+                "session": {
+                    "type": "object",
+                    "description": "overview: calls answered, bytes returned, calls refused \
+                                    as not served."
+                },
+                "tables": {
+                    "type": "object",
+                    "description": "overview of a set: whether its membership and scores \
+                                    are kept on disk, and what they take."
+                },
                 "cost": {"type": "object"}
             }),
         ),

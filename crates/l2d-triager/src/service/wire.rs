@@ -48,6 +48,33 @@ pub fn transport_bytes(payload: &str) -> usize {
     RESULT_ENVELOPE_BYTES + 2 * payload.len() + escape_bytes(payload)
 }
 
+/// Serializes `result` with `cost.response_bytes` set to [`transport_bytes`] of the
+/// serialized result itself: what the client is returned, counted the way the limit
+/// is. The figure is part of what it counts, so it is settled in a few rounds.
+pub(crate) fn with_response_bytes(mut result: Value) -> String {
+    settle_response_bytes(&mut result, &|written| written)
+}
+
+/// [`with_response_bytes`] for a result that `finish` completes once it is
+/// serialized, for what is spliced into it unparsed.
+pub(crate) fn settle_response_bytes(
+    result: &mut Value,
+    finish: &dyn Fn(String) -> String,
+) -> String {
+    let mut bytes = 0;
+    let mut written = String::new();
+    for _ in 0..8 {
+        result["cost"]["response_bytes"] = json!(bytes);
+        written = finish(result.to_string());
+        let counted = transport_bytes(&written);
+        if counted == bytes {
+            break;
+        }
+        bytes = counted;
+    }
+    written
+}
+
 /// Why a call ends without a result. `code` is one of a fixed list a client can
 /// branch on; `message` says what was observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +307,33 @@ mod tests {
             assert!(written <= transport_bytes(&payload), "{written}");
             assert!(transport_bytes(&payload) - written <= RESULT_ENVELOPE_BYTES);
         }
+    }
+
+    #[test]
+    fn the_response_bytes_of_a_result_count_the_result_that_states_them() {
+        // Sizes on both sides of a change in the number of digits.
+        for filler in [0, 4_380, 4_420, 49_000] {
+            let written = with_response_bytes(
+                json!({"v": 1, "pad": "p".repeat(filler), "cost": {"archive_scans": 0}}),
+            );
+            let value: Value = serde_json::from_str(&written).unwrap();
+            assert_eq!(
+                value["cost"]["response_bytes"],
+                transport_bytes(&written) as u64,
+                "{filler}"
+            );
+        }
+        let spliced = settle_response_bytes(&mut json!({"cost": {}}), &|mut written| {
+            written.pop();
+            written.push_str(",\"artifact\":{\"x\":\"y\"}}");
+            written
+        });
+        let value: Value = serde_json::from_str(&spliced).unwrap();
+        assert_eq!(value["artifact"]["x"], "y");
+        assert_eq!(
+            value["cost"]["response_bytes"],
+            transport_bytes(&spliced) as u64
+        );
     }
 
     #[test]
