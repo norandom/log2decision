@@ -146,6 +146,71 @@ pub(crate) fn tools() -> Value {
             }),
         ),
     );
+    let pattern_producer = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "syntax", "refinement", "pattern"],
+        "description": "The exact members of one pattern of a refinement revision: in for its members, out for the other members of the refined selection, not evaluated elsewhere.",
+        "properties": {
+            "kind": {"const": "filter"},
+            "version": {"const": 1},
+            "syntax": {"const": "pattern"},
+            "refinement": {"type": "string"},
+            "pattern": {"type": "integer", "minimum": 0}
+        }
+    });
+    let venn_producer = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "method", "policy", "membership"],
+        "description": "The routes of a saved Venn policy report the host registered. A route is a suggestion, never a review.",
+        "properties": {
+            "kind": {"const": "recommend"},
+            "version": {"const": 1},
+            "method": {"const": "venn"},
+            "policy": {"type": "string"},
+            "membership": {"enum": ["investigate_or_review", "investigate"]}
+        }
+    });
+    let issued_producer = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "method", "action"],
+        "description": "Issued batches for a model client. `issue` returns the next batch of the run over `scope` (a selection or view); `submit` takes judgments for the records of one batch under the revision the client saw and returns the set collected so far; `collect` returns the set of everything submitted for the run. A foreign or repeated ID, an unknown outcome, another model or prompt, or a stale revision refuses the whole submission.",
+        "properties": {
+            "kind": {"const": "recommend"},
+            "version": {"const": 1},
+            "method": {"const": "issued_batch"},
+            "action": {"enum": ["issue", "submit", "collect"]},
+            "run": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$",
+                    "description": "issue, collect: the run within the scope; `default` when absent."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
+                      "default": DEFAULT_ROWS},
+            "projection": {"type": "array", "uniqueItems": true, "minItems": 1,
+                           "items": {"enum": ["id", "excerpt"]}},
+            "batch": {"type": "string"},
+            "expected_revision": {"type": "integer", "minimum": 1},
+            "model": {"type": "string", "minLength": 1, "maxLength": 128,
+                      "description": "Recorded as caller-reported."},
+            "prompt_revision": {"type": "string", "minLength": 1, "maxLength": 64},
+            "items": {
+                "type": "array", "minItems": 1, "maxItems": MAX_ROWS,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["id", "outcome"],
+                    "properties": {
+                        "id": {"type": "string", "pattern": "^r-[0-9a-f]{16}$"},
+                        "outcome": {"enum": ["recommend", "pass", "abstain"]},
+                        "reason": {"type": "string", "maxLength": 200}
+                    }
+                }
+            },
+            "membership": {"const": "recommend"},
+            "submissions_ref": {"type": "string",
+                                "description": "collect: the submissions the client expects the run to hold."}
+        }
+    });
     let select = tool(
         "triager_select",
         "Derive a named set",
@@ -153,7 +218,10 @@ pub(crate) fn tools() -> Value {
          frozen scorer with `top_k` and the tie rule `record_id_ascending`, or a \
          `threshold`. `filter` takes a `literal`, a whole-record `glob` or a `regex`. \
          `membership` takes a membership file the host registered: assessed in, assessed \
-         out, abstained, and not assessed for every record it does not name. Outside its \
+         out, abstained, and not assessed for every record it does not name. `filter` \
+         with the syntax `pattern` takes one pattern of a refinement. `recommend` takes a \
+         saved Venn policy report (`venn`) or the issued-batch protocol for a model client \
+         (`issued_batch`); a recommendation is a suggestion and never a review. Outside its \
          scope a set is not evaluated. Returns member counts in both units, coverage, the \
          producer revision and the cost. A job: it reads the source once, unless a \
          prepared set of the same scorer revision, filter or membership supplies it.",
@@ -200,7 +268,10 @@ pub(crate) fn tools() -> Value {
                                 "version": {"const": 1},
                                 "ref": {"type": "string", "description": "A membership file the host registered."}
                             }
-                        }
+                        },
+                        pattern_producer,
+                        venn_producer,
+                        issued_producer
                     ]
                 },
                 "idempotency_key": key()
@@ -220,6 +291,91 @@ pub(crate) fn tools() -> Value {
                 "outside_scope": {"type": "object"},
                 "complete": {"type": "boolean"},
                 "evidence": {"type": "object"},
+                "policy": {"type": "object"},
+                "batch": {"type": "string"},
+                "run": {"type": "object"},
+                "records": {"type": "array", "maxItems": MAX_ROWS},
+                "issued": {"type": "object"},
+                "run_coverage": {"type": "object"},
+                "disclosure": {"type": "object"},
+                "cost": {"type": "object"}
+            }),
+        ),
+    );
+    let refine = tool(
+        "triager_refine",
+        "Drill into patterns and neighbours",
+        "Group the members of a filter selection into patterns and refine them. `patterns` \
+         (with `set`) builds the project's pattern catalogue for a literal, glob or regex \
+         selection over a whole snapshot and returns a refinement revision with its groups. \
+         The other actions take `refinement`: `list` pages the patterns, with templates when \
+         projected; `split` (by a regex) and `merge` return a new revision with its parent \
+         and the changed counts; `preview` counts what a proposed or given regex matches \
+         among the members of a pattern and among the other members; `neighbours` returns \
+         the selection of the members nearest to an exemplar, within its refinement or, \
+         with `target`, also within the refinement of a wider selection. A pattern becomes a \
+         set through `triager_select` with the filter syntax `pattern`.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["v", "action"],
+            "properties": {
+                "v": version(),
+                "set": handle("patterns: the filter selection to group."),
+                "refinement": handle("Every other action: a refinement revision."),
+                "action": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {"enum": ["patterns", "list", "split", "merge", "preview",
+                                          "neighbours"]},
+                        "after": {"type": "integer", "minimum": 0,
+                                  "description": "list: from `page.next_after`."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
+                                  "default": DEFAULT_ROWS},
+                        "projection": {"const": ["template"],
+                                       "description": "list: show templates; they count as evidence."},
+                        "pattern": {"type": "integer", "minimum": 0},
+                        "patterns": {"type": "array", "minItems": 2, "maxItems": 256,
+                                     "items": {"type": "integer", "minimum": 0}},
+                        "regex": {"type": "string", "minLength": 1},
+                        "exemplar": {"type": "string", "pattern": "^r-[0-9a-f]{16}$"},
+                        "method": {"enum": ["character_trigram", "vector"]},
+                        "within": {"enum": ["pattern", "other_patterns", "all"], "default": "all"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "radius": {"type": "number", "minimum": 0, "maximum": 2},
+                        "target": {"type": "string",
+                                   "description": "neighbours: the refinement of a wider selection to search as well."}
+                    }
+                },
+                "idempotency_key": key()
+            }
+        }),
+        output(
+            &job_statuses,
+            json!({
+                "refinement": {"type": "string"},
+                "set": {"type": "string"},
+                "snapshot": {"type": "string"},
+                "revision": {"type": "string"},
+                "parent": {"type": ["string", "null"]},
+                "action": {"type": "string"},
+                "groups": {"type": "integer"},
+                "members": {"type": "object"},
+                "ungrouped": {"type": "object"},
+                "method": {"type": "object"},
+                "patterns": {"type": "array", "maxItems": MAX_ROWS},
+                "page": {"type": "object"},
+                "changed": {"type": ["object", "null"]},
+                "preview": {"type": "object"},
+                "neighbours": {"type": "object"},
+                "producer": {"type": "object"},
+                "counts": counts("distinct_originals"),
+                "occurrence_counts": counts("occurrences"),
+                "coverage": {"type": "object"},
+                "clipping": {"type": "object"},
+                "disclosure": {"type": "object"},
                 "cost": {"type": "object"}
             }),
         ),
@@ -338,6 +494,10 @@ pub(crate) fn tools() -> Value {
                 },
                 "disclosure": {"type": "object"},
                 "artifact": {"type": "object"},
+                "dependencies_total": {"type": "integer",
+                                       "description": "overview of a Venn selection: how many score sets it depends on; at most eight are listed, and clipping says when fewer are."},
+                "dependencies": {"type": "array",
+                                 "description": "regions, evidence and the overview of a Venn selection: the score sets made by the scorer revision the policy scored with."},
                 "activity": {
                     "type": "object",
                     "description": "overview: the work the server did so far. Reads of \
@@ -394,7 +554,7 @@ pub(crate) fn tools() -> Value {
             }),
         ),
     );
-    json!([open, select, compose, inspect, job])
+    json!([open, select, refine, compose, inspect, job])
 }
 
 #[cfg(test)]

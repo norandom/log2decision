@@ -13,8 +13,8 @@ use l2d_core::resource::BusyChoice;
 use l2d_core::{ArchivePosition, L2dError, LogsFrame, MemoryBudget, MemorySettings};
 use l2d_triager::scope::IndexPlacement;
 use l2d_triager::service::{
-    DisclosureProfile, FrozenScorer, HostConfig, MembershipRef, Reply, ScorerIdentity,
-    ScorerSource, Service, SourceRef, TablePlacement,
+    DisclosureProfile, Encoders, FrozenScorer, HostConfig, MembershipRef, PolicyRef, Reply,
+    ScorerIdentity, ScorerSource, Service, SourceRef, TablePlacement,
 };
 use serde_json::{Value, json};
 
@@ -236,6 +236,13 @@ pub struct HostOptions {
     pub busy: BusyChoice,
     pub delay: Duration,
     pub evidence_allowance_bytes: u64,
+    /// Policy reports the host registers: `NAME` is read from `policy-NAME.json` in
+    /// the host's directory, which a test writes before it selects from it.
+    pub policies: Vec<String>,
+    /// The encoder of the neighbour method `vector`.
+    pub encoder: Option<Encoders>,
+    /// The limits of a pattern catalogue.
+    pub patterns: l2d_triager::service::PatternLimits,
 }
 
 impl Default for HostOptions {
@@ -252,6 +259,9 @@ impl Default for HostOptions {
             busy: BusyChoice::Wait,
             delay: Duration::ZERO,
             evidence_allowance_bytes: 64 * 1024,
+            policies: Vec::new(),
+            encoder: None,
+            patterns: Default::default(),
         }
     }
 }
@@ -441,6 +451,16 @@ pub fn config(dir: &Path, project: &str, options: &HostOptions) -> HostConfig {
         tables: options.tables,
         memberships,
         free_disk_bytes: None,
+        policies: options
+            .policies
+            .iter()
+            .map(|name| PolicyRef {
+                name: name.clone(),
+                path: dir.join(format!("policy-{name}.json")),
+            })
+            .collect(),
+        encoder: options.encoder.clone(),
+        patterns: options.patterns,
     }
 }
 

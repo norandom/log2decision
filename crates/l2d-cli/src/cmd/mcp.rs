@@ -19,8 +19,8 @@ use l2d_core::{L2dError, LogsFrame, MemoryBudget, ProjectPaths};
 use l2d_triager::mcp;
 use l2d_triager::scope::IndexPlacement;
 use l2d_triager::service::{
-    DisclosureProfile, FrozenScorer, HostConfig, MembershipRef, ScorerIdentity, ScorerSource,
-    Service, SourceRef, TablePlacement,
+    DisclosureProfile, EncoderSource, Encoders, FrozenScorer, HostConfig, MembershipRef, PolicyRef,
+    ScorerIdentity, ScorerSource, Service, SourceRef, TablePlacement,
 };
 
 use super::common::{Context, find_model, load_scorer, model_name};
@@ -70,6 +70,23 @@ pub struct McpArgs {
     /// several times
     #[arg(long = "membership", value_name = "NAME=PATH")]
     memberships: Vec<String>,
+    /// Register a policy report `l2d triage --out` saved under a name. A selection names
+    /// it as producer `recommend` with the method `venn`. May be given several times
+    #[arg(long = "policy", value_name = "NAME=PATH")]
+    policies: Vec<String>,
+    /// The verified NPU encoder profile of the neighbour method `vector`, as
+    /// `l2d discover explore --method npu --profile-dir` takes it [default: that method
+    /// is refused by name]
+    #[arg(long, value_name = "DIR")]
+    npu_profile_dir: Option<PathBuf>,
+    /// The most patterns of a catalogue `triager_refine` builds, as
+    /// `l2d discover search --max-patterns`
+    #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u64).range(1..=4096))]
+    max_patterns: u64,
+    /// The most bytes of a text such a catalogue groups, as
+    /// `l2d discover search --max-text-bytes`
+    #[arg(long, value_name = "BYTES", default_value_t = 4096, value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
+    max_text_bytes: u64,
     /// Run the tool calls of this file, one JSON object {"tool","args","bind"} per line,
     /// write one {"tool","result"} per line and end; every call waits for its job
     #[arg(long, value_name = "FILE")]
@@ -144,6 +161,51 @@ impl ScorerSource for ProjectScorers {
     }
 }
 
+/// The project's hierarchical NPU encoder, opened for one neighbour search.
+struct NpuEncoder {
+    profile: PathBuf,
+    runtime: PathBuf,
+    cache: PathBuf,
+}
+
+impl EncoderSource for NpuEncoder {
+    fn session_bytes(&self) -> u64 {
+        l2d_encoder::hierarchy::SESSION_BYTES
+    }
+
+    fn profile(&self) -> &str {
+        l2d_encoder::hierarchy::PROFILE
+    }
+
+    fn open(
+        &self,
+        budget: &mut MemoryBudget,
+    ) -> Result<Box<dyn l2d_decide::exploration::ExplorationEncoder>, L2dError> {
+        let session = l2d_encoder::hierarchy::HierarchicalSession::open(
+            &self.profile,
+            &self.runtime,
+            &self.cache,
+            budget,
+        )?;
+        Ok(Box::new(session))
+    }
+}
+
+/// `NAME=PATH` options as pairs.
+fn named(given: &[String], what: &str) -> Result<Vec<(String, PathBuf)>, L2dError> {
+    given
+        .iter()
+        .map(|text| match text.split_once('=') {
+            Some((name, path)) if !name.is_empty() && !path.is_empty() => {
+                Ok((name.to_string(), PathBuf::from(path)))
+            }
+            _ => Err(invalid(format!(
+                "a {what} is given as NAME=PATH, and `{text}` is not"
+            ))),
+        })
+        .collect()
+}
+
 fn sources(given: &[String], public_fixture: bool) -> Result<Vec<SourceRef>, L2dError> {
     given
         .iter()
@@ -216,6 +278,25 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
             })
             .collect::<Result<_, _>>()?,
         free_disk_bytes: None,
+        policies: named(&args.policies, "policy")?
+            .into_iter()
+            .map(|(name, path)| PolicyRef { name, path })
+            .collect(),
+        patterns: l2d_triager::service::PatternLimits {
+            max_patterns: args.max_patterns as usize,
+            max_text_bytes: args.max_text_bytes as usize,
+        },
+        encoder: args.npu_profile_dir.as_ref().map(|profile| {
+            Encoders(std::sync::Arc::new(NpuEncoder {
+                profile: profile.clone(),
+                runtime: paths
+                    .runtime_files_dir(l2d_core::paths::runtime_dir_from_environment().as_deref()),
+                cache: std::env::var_os("L2D_NPU_WORK_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| std::env::temp_dir().join("l2d-hierarchy"))
+                    .join("cache"),
+            }))
+        }),
     };
     let service = Service::start(config, budget, Box::new(ProjectScorers { paths }))?;
     let output = io::stdout().lock();

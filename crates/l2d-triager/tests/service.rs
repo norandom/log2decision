@@ -663,14 +663,23 @@ fn requests_are_validated_before_anything_is_scheduled() {
         (
             "triager_select",
             score(json!({"kind": "filter", "syntax": "pattern", "query": "P1"})),
-            "unsupported_operation",
-            "pattern",
+            "invalid_arguments",
+            "producer.query",
         ),
         (
             "triager_select",
-            score(json!({"kind": "recommend", "method": "venn", "policy": "V1"})),
+            score(
+                json!({"kind": "recommend", "method": "venn", "policy": "V1",
+                         "membership": "investigate"}),
+            ),
+            "unknown_policy",
+            "V1",
+        ),
+        (
+            "triager_select",
+            score(json!({"kind": "recommend", "method": "local_model"})),
             "unsupported_operation",
-            "recommend",
+            "local_model",
         ),
         (
             "triager_select",
@@ -756,9 +765,9 @@ fn requests_are_validated_before_anything_is_scheduled() {
         ),
         (
             "triager_refine",
-            json!({"v": 1, "set": handle, "action": {"kind": "patterns"}}),
+            json!({"v": 1, "set": handle, "action": {"kind": "field"}}),
             "unsupported_operation",
-            "triager_refine",
+            "field",
         ),
         (
             "triager_save",
