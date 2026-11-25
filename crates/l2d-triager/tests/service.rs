@@ -603,8 +603,20 @@ fn requests_are_validated_before_anything_is_scheduled() {
         (
             "triager_open",
             json!({"v": 1, "receipt": "H1"}),
-            "unsupported_operation",
-            "receipt",
+            "invalid_arguments",
+            "rcpt-",
+        ),
+        (
+            "triager_open",
+            json!({"v": 1, "receipt": format!("rcpt-{}", "0".repeat(32))}),
+            "unknown_receipt",
+            "rcpt-",
+        ),
+        (
+            "triager_open",
+            json!({"v": 1, "receipt": format!("rcpt-{}", "0".repeat(32)), "source": {"ref": "private"}}),
+            "invalid_arguments",
+            "source",
         ),
         (
             "triager_open",
@@ -691,8 +703,35 @@ fn requests_are_validated_before_anything_is_scheduled() {
             "triager_compose",
             json!({"v": 1, "mode": "allocate", "snapshot": snapshot, "sets": {"a": handle},
                 "expr": "a", "budget": {"total": 3}}),
-            "unsupported_operation",
-            "allocate",
+            "invalid_arguments",
+            "duplicate_rule",
+        ),
+        (
+            "triager_compose",
+            json!({"v": 1, "mode": "allocate", "snapshot": snapshot, "sets": {"a": handle},
+                "expr": "a", "budget": {"total": 3, "duplicate_rule": "first_pool_wins",
+                "shortfall": "leave_unfilled", "pools": [
+                    {"name": "general", "limit": 2, "from": "a", "order": ["record_id_ascending"]}]}}),
+            "invalid_arguments",
+            "add up to 2",
+        ),
+        (
+            "triager_compose",
+            json!({"v": 1, "mode": "allocate", "snapshot": snapshot, "sets": {"a": handle},
+                "expr": "a", "budget": {"total": 2, "duplicate_rule": "first_pool_wins",
+                "shortfall": "leave_unfilled", "pools": [
+                    {"name": "audit", "limit": 2, "from": "a", "order": ["seeded_hash", "record_id_ascending"]}]}}),
+            "invalid_arguments",
+            "seed",
+        ),
+        (
+            "triager_compose",
+            json!({"v": 1, "mode": "allocate", "snapshot": snapshot, "sets": {"a": handle},
+                "expr": "a", "budget": {"total": 2, "duplicate_rule": "first_pool_wins",
+                "shortfall": "leave_unfilled", "pools": [
+                    {"name": "general", "limit": 2, "from": "a", "order": ["record_id_ascending", "seeded_hash"], "seed": 1}]}}),
+            "invalid_arguments",
+            "ends with",
         ),
         (
             "triager_compose",
@@ -717,8 +756,8 @@ fn requests_are_validated_before_anything_is_scheduled() {
         (
             "triager_compose",
             json!({"v": 1, "mode": "view", "snapshot": snapshot, "sets": {"a": handle},
-                "expr": {"state": {"set": "a", "is": "not_evaluated"}}}),
-            "unsupported_operation",
+                "expr": {"state": {"set": "a", "is": "maybe"}}}),
+            "invalid_arguments",
             "state",
         ),
         (
@@ -772,8 +811,14 @@ fn requests_are_validated_before_anything_is_scheduled() {
         (
             "triager_save",
             json!({"v": 1, "handle": handle, "idempotency_key": "k"}),
-            "unsupported_operation",
+            "wrong_handle_kind",
+            "selection",
+        ),
+        (
             "triager_save",
+            json!({"v": 1, "handle": snapshot}),
+            "wrong_handle_kind",
+            "snapshot",
         ),
     ] {
         let (found, message) = host.err(tool, args.clone());

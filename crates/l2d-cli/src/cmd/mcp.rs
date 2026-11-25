@@ -1,6 +1,8 @@
 //! `l2d mcp`: the triager operations as a local MCP server on standard input and
 //! output, or, with `--requests`, as a recipe of tool calls read from a file (triager
-//! task 1.2, requirement 4.1). Both go through `l2d_triager::service::Service`.
+//! task 1.2, requirement 4.1), or, with `--replay`, as the recipe a saved receipt
+//! retains (task 2.2, requirement 3.3). All go through `l2d_triager::service::Service`
+//! and save receipts in `--receipts`.
 //!
 //! Standard output carries JSON-RPC messages (or the result lines of a recipe) and
 //! nothing else; diagnostics go to standard error. The sources, the allowed
@@ -65,8 +67,9 @@ pub struct McpArgs {
     /// in files of the work directory, also when the memory limit admits them
     #[arg(long)]
     tables_on_disk: bool,
-    /// Register a membership file under a name: one `<record handle><TAB>in|out|abstain`
-    /// per assessed record. A selection names it as producer `membership`. May be given
+    /// Register a membership file under a name: JSON lines, one
+    /// {"id": "<record handle>", "state": "in"|"out"|"abstain"} per assessed record, at most
+    /// 128 bytes a line. A selection names it as producer `membership`. May be given
     /// several times
     #[arg(long = "membership", value_name = "NAME=PATH")]
     memberships: Vec<String>,
@@ -89,8 +92,16 @@ pub struct McpArgs {
     max_text_bytes: u64,
     /// Run the tool calls of this file, one JSON object {"tool","args","bind"} per line,
     /// write one {"tool","result"} per line and end; every call waits for its job
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "replay")]
     requests: Option<PathBuf>,
+    /// The directory receipts are saved in and reopened from; it outlives the work
+    /// directory [default: receipts/ below the project]
+    #[arg(long, value_name = "DIR")]
+    receipts: Option<PathBuf>,
+    /// Run the recipe a saved receipt retains, as --requests runs a file, against the
+    /// sources registered now; the receipt it saves names this one as its parent
+    #[arg(long, value_name = "RECEIPT")]
+    replay: Option<String>,
 }
 
 fn invalid(detail: String) -> L2dError {
@@ -248,9 +259,9 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
         },
         evidence_allowance_bytes: args.evidence_allowance_bytes,
         // A recipe has nobody to poll: every call waits for its job.
-        inline_wait: match args.requests {
-            Some(_) => None,
-            None => Some(Duration::from_millis(args.inline_wait_ms)),
+        inline_wait: match (&args.requests, &args.replay) {
+            (None, None) => Some(Duration::from_millis(args.inline_wait_ms)),
+            _ => None,
         },
         busy: l2d_core::resource::busy_choice(),
         dedup_set_texts: args.dedup_set_texts,
@@ -297,9 +308,17 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
                     .join("cache"),
             }))
         }),
+        receipts: Some(
+            args.receipts
+                .clone()
+                .unwrap_or_else(|| project.join("receipts")),
+        ),
     };
     let service = Service::start(config, budget, Box::new(ProjectScorers { paths }))?;
     let output = io::stdout().lock();
+    if let Some(receipt) = &args.replay {
+        return mcp::run_recipe(&service, receipt, output);
+    }
     match &args.requests {
         Some(path) => {
             let recipe = std::fs::File::open(path).map_err(|_| L2dError::Missing {

@@ -90,6 +90,7 @@ fn the_server_initializes_lists_typed_tools_and_answers_only_requests() {
             "triager_refine",
             "triager_compose",
             "triager_inspect",
+            "triager_save",
             "triager_job"
         ]
     );

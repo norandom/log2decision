@@ -22,6 +22,7 @@
 //! the same operation, and writes `{"tool", "result"}` per line. `bind` names
 //! fields of the result (`{"S": "snapshot"}`); a later argument string `"$S"` is
 //! replaced by the bound value, so a recipe can be written before its handles exist.
+//! [`run_recipe`] runs the recipe a saved receipt retains in the same way.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -211,8 +212,10 @@ fn reply(service: &Service, line: &[u8]) -> Option<String> {
                     },
                     "instructions": "Reduce a local log archive by comparing named sets: \
                         open, select A and B, inspect counts and regions, compose a view, \
-                        then read bounded pages and one record's evidence. Counts come \
-                        first; every result states its denominators and limits.",
+                        then read bounded pages and one record's evidence. Allocate one \
+                        review budget once over named pools, save a candidate or a final \
+                        work set as a receipt and reopen it in another session. Counts \
+                        come first; every result states its denominators and limits.",
                 }),
             )
         }
@@ -322,18 +325,43 @@ fn substitute(value: &mut Value, bound: &BTreeMap<String, Value>) -> Result<(), 
 pub fn run_requests(
     service: &Service,
     input: impl Read,
+    output: impl Write,
+) -> Result<(), L2dError> {
+    let mut input = BufReader::with_capacity(8 * 1024, input);
+    run_calls(service, &mut input, None, None, output)
+}
+
+/// Replays the recipe of the receipt `receipt` (task 2.2, requirement 3.3): its tool
+/// calls run as [`run_requests`] runs a file, against the sources the host registers
+/// now, and the receipt that the last call saves names `receipt` as its parent. On
+/// the same input the new receipt has the content of the old one; on a changed
+/// source it is a new revision with that lineage.
+pub fn run_recipe(service: &Service, receipt: &str, output: impl Write) -> Result<(), L2dError> {
+    let (mut input, steps) = service.recipe(receipt)?;
+    run_calls(service, &mut input, Some(steps), Some(receipt), output)
+}
+
+/// The calls of `input`, at most `most` of them; with `parent`, a `triager_save`
+/// names it as `parent_receipt`.
+fn run_calls(
+    service: &Service,
+    input: &mut impl BufRead,
+    most: Option<usize>,
+    parent: Option<&str>,
     mut output: impl Write,
 ) -> Result<(), L2dError> {
     let failed = |error: io::Error| L2dError::Runtime {
         detail: format!("the recipe's input or output failed: {error}"),
     };
-    let mut input = BufReader::with_capacity(8 * 1024, input);
     let mut line = Vec::new();
     let mut bound: BTreeMap<String, Value> = BTreeMap::new();
     let mut number = 0u64;
     loop {
+        if most.is_some_and(|most| number as usize >= most) {
+            return Ok(());
+        }
         number += 1;
-        match read_line(&mut input, &mut line).map_err(failed)? {
+        match read_line(input, &mut line).map_err(failed)? {
             Line::End => return Ok(()),
             Line::TooLong => {
                 return Err(invalid(format!(
@@ -392,6 +420,12 @@ pub fn run_requests(
             .unwrap_or_else(|| json!({}));
         substitute(&mut args, &bound)
             .map_err(|error| invalid(format!("line {number}: {error}")))?;
+        if let Some(parent) = parent
+            && tool == "triager_save"
+            && let Some(fields) = args.as_object_mut()
+        {
+            fields.insert("parent_receipt".into(), json!(parent));
+        }
         let reply = service.call(&tool, &args);
         if reply.is_error {
             writeln!(output, "{{\"tool\":\"{tool}\",\"error\":{}}}", reply.json).map_err(failed)?;

@@ -172,8 +172,10 @@ def main() -> int:
         state["keys"] += 1
         physical[names[bins + 2]] = write_entry(archive, names[bins + 2], late)
 
-    # The stand-in for C, keyed by record handle, in descending order of the keys.
-    membership_path = args.out / "membership-c.tsv"
+    # The stand-in for C, keyed by record handle, in descending order of the keys:
+    # JSON lines, one {"id", "state"} object a line (task 2.2; the tab-separated form
+    # of task 1.3 is no longer read).
+    membership_path = args.out / "membership-c.jsonl"
     assessed = {"in": 0, "out": 0, "abstain": 0}
     with membership_path.open("w", newline="\n") as out:
         for key in range(state["keys"] - 1, -1, -1):
@@ -181,7 +183,7 @@ def main() -> int:
             if outcome is None:
                 continue
             assessed[outcome] += 1
-            out.write(f"r-{state['first'][key]:016x}\t{outcome}\n")
+            out.write(f'{{"id":"r-{state["first"][key]:016x}","state":"{outcome}"}}\n')
 
     # What a baseline scorer is fitted on: texts of keys the archive does not hold.
     labelled_path = args.out / "labelled.csv"

@@ -48,9 +48,9 @@
       "bytes": 76880103,
       "sha256": "1ce49d127ed45d08cf4affe124a86f30d6d641230c1d337b8fee11ced6b07371"
     },
-    "membership-c.tsv": {
-      "bytes": 25771453,
-      "sha256": "7346f51e94d1c628f6d398e7f4b5ce9316f8e03fec4bfc2ac0b7bc4d148611bf"
+    "membership-c.jsonl": {
+      "bytes": 46671472,
+      "sha256": "9ca676083699d7e017a11a422be5a38c00153c41b60170494268fa33941613a4"
     },
     "labelled.csv": {
       "bytes": 110426,

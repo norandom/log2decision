@@ -116,6 +116,11 @@ impl SourceKind {
     }
 }
 
+/// What [`Scope::from_retained`] hands its feed: takes one retained original, its
+/// record ID, its native identity and its occurrences.
+pub(crate) type RetainedPush<'a> =
+    &'a mut dyn FnMut(u64, &[u8; ID_BYTES], u32) -> Result<(), L2dError>;
+
 /// The scope-local record ID of a distinct original: its first native position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OriginalId(pub u64);
@@ -808,6 +813,65 @@ impl Scope {
         })();
         budget.hold(before);
         finish(guard, result)
+    }
+
+    /// A scope over originals a saved receipt retained, without its source: `feed`
+    /// gives every retained original, by record ID ascending, to the pusher it is
+    /// handed (its record ID, its native identity and its occurrences). The relation is
+    /// built as for an open source, in memory when `settings` and `budget` allow it and
+    /// on disk otherwise; `source` and `completeness` are what the receipt states, and
+    /// the handle binds them with the retained relation.
+    ///
+    /// [`L2dError::Refused`] when the fixed share or the disk space does not fit, with
+    /// the figures; nothing is left in the work directory.
+    pub(crate) fn from_retained(
+        kind: SourceKind,
+        source: MarkedSource,
+        complete: bool,
+        settings: &ScopeSettings,
+        budget: &mut MemoryBudget,
+        feed: &mut dyn FnMut(RetainedPush<'_>) -> Result<(), L2dError>,
+    ) -> Result<Self, L2dError> {
+        let before = budget.held_bytes();
+        let result = (|| {
+            budget.require_whole(
+                SCOPE_FIXED_BYTES,
+                "opening the originals a receipt retained as a triager scope",
+            )?;
+            let held = before.saturating_add(SCOPE_FIXED_BYTES);
+            budget.hold(held);
+            let work = Work::create(&settings.work_dir, settings.free_disk_bytes)?;
+            let mut spool = Spool::create(work)?;
+            let mut last: Option<u64> = None;
+            feed(&mut |position, id, count| {
+                if last.is_some_and(|last| position <= last) {
+                    return Err(refused(
+                        "the originals of the receipt are not in the order of their record IDs; \
+                         the receipt is damaged",
+                    ));
+                }
+                last = Some(position);
+                spool.push(position, id)?;
+                spool.count(count)
+            })?;
+            budget.hold(held);
+            let index = spool.finish(settings.index, budget)?;
+            let completeness = ScopeCompleteness {
+                complete,
+                records_scanned: index.occurrences(),
+                occurrences: index.occurrences(),
+                originals: index.rows(),
+                skipped_records: 0,
+                entries_read: 0,
+                entries_incomplete: 0,
+                entries_unsupported: 0,
+                entries_excluded: 0,
+                reasons: Vec::new(),
+            };
+            Self::new(kind, source, None, completeness, index)
+        })();
+        budget.hold(before);
+        result
     }
 
     /// The immutable handle: the SHA-256 of [`Scope::binding`].

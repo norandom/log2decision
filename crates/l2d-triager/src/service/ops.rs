@@ -77,7 +77,7 @@ pub(crate) const ARTIFACT_FIXED_BYTES: u64 = 2 * 1024;
 const MAX_REASONS: usize = 24;
 /// What counting the members of a set reads at a time: a block of its codes, a block
 /// of its parent's and a run of rows of the relation.
-const TALLY_BYTES: u64 = 2 * States::BLOCK_BYTES as u64 + RowBlock::BYTES;
+pub(crate) const TALLY_BYTES: u64 = 2 * States::BLOCK_BYTES as u64 + RowBlock::BYTES;
 /// What deriving a set from a prepared one reads and writes at a time: a block of the
 /// population, of the prepared codes, of the new codes and of the prepared scores.
 const DERIVE_BYTES: u64 = 3 * States::BLOCK_BYTES as u64 + Scores::BLOCK_BYTES as u64;
@@ -95,8 +95,9 @@ const PLACE_BYTES: u64 = (PLACE_RECORDS * SPOOL_RECORD_BYTES) as u64
 /// What reading a registered membership holds: the buffer it is read through, a line
 /// and the hash of the file.
 const MEMBERSHIP_READ_BYTES: u64 = 64 * 1024 + 1024;
-/// The most bytes of a line of a membership file.
-const MAX_MEMBERSHIP_LINE: usize = 64;
+/// The most bytes of a line of a membership file, its line end not counted: one
+/// object `{"id","state"}` takes 46 at its longest without spaces.
+pub(crate) const MAX_MEMBERSHIP_LINE: usize = 128;
 
 /// What an operation works with on the worker.
 pub(crate) struct Worker<'a> {
@@ -247,6 +248,11 @@ pub(crate) enum Commit {
         grown: u64,
         set: Option<Arc<Set>>,
     },
+    /// A snapshot reopened from a receipt with every set it retained, committed as one.
+    Reopened {
+        snapshot: Arc<Snapshot>,
+        sets: Vec<Arc<Set>>,
+    },
 }
 
 impl Commit {
@@ -259,6 +265,9 @@ impl Commit {
             Commit::Run { grown, set, .. } => {
                 grown.saturating_add(set.as_ref().map_or(0, |set| set.held))
             }
+            Commit::Reopened { snapshot, sets } => sets
+                .iter()
+                .fold(snapshot.held, |held, set| held.saturating_add(set.held)),
         }
     }
 
@@ -267,6 +276,12 @@ impl Commit {
         match self {
             Commit::Snapshot(snapshot) => registry.insert_snapshot(snapshot),
             Commit::Set(set) => registry.insert_set(set),
+            Commit::Reopened { snapshot, sets } => {
+                registry.insert_snapshot(snapshot);
+                for set in sets {
+                    registry.insert_set(set);
+                }
+            }
             Commit::Refinement(refinement) => registry.insert_refinement(refinement),
             Commit::Run {
                 run, handles, set, ..
@@ -405,6 +420,7 @@ pub(crate) fn open(worker: &mut Worker<'_>, task: &OpenTask) -> Result<Done, Fau
         held: kept,
         summary,
         scope,
+        retained: None,
     };
     let mut source = task.named.clone();
     source["class"] = json!(if task.public {
@@ -492,16 +508,17 @@ pub(crate) fn open(worker: &mut Worker<'_>, task: &OpenTask) -> Result<Done, Fau
             "recommend_methods": ["venn", "issued_batch"],
             "refine_actions": ["patterns", "list", "split", "merge", "preview", "neighbours"],
             "neighbour_methods": worker.shared.config.neighbour_methods(),
-            "compose_modes": ["view"],
-            "operators": ["union", "intersection", "difference", "complement"],
+            "compose_modes": ["view", "allocate"],
+            "operators": ["union", "intersection", "difference", "complement", "state"],
+            "allocation_rule": super::allocate::ALLOCATION_RULE,
             "inspect_views": ["overview", "regions", "records", "evidence"],
-            "sort": ["record_id_ascending"],
+            "sort": ["record_id_ascending", "allocation"],
             "job_actions": ["status", "cancel"],
+            "receipts": worker.shared.config.receipts.is_some(),
             "occurrence_locators": "first_only",
             "not_supported": [
-                "triager_save", "open receipt", "recommend method local_model",
+                "recommend method local_model",
                 "refine region", "refine field", "refine time",
-                "compose mode allocate", "expression state",
                 "inspect histogram", "inspect fields", "inspect lineage",
             ],
         },
@@ -692,7 +709,7 @@ pub(crate) fn rows_of(
 /// Whether the tables of a new set go to disk: when the host placed them there, or
 /// when `in_memory` bytes are more than the budget has left beside what the operation
 /// holds.
-fn tables_on_disk(worker: &Worker<'_>, in_memory: u64) -> bool {
+pub(crate) fn tables_on_disk(worker: &Worker<'_>, in_memory: u64) -> bool {
     place_on_disk(worker.shared.config.tables, worker.budget, in_memory)
 }
 
@@ -704,7 +721,11 @@ fn place_on_disk(placement: TablePlacement, budget: &MemoryBudget, in_memory: u6
 }
 
 /// The directory of a new set's tables, after the disk was asked for `bytes`.
-fn set_dir(worker: &mut Worker<'_>, bytes: u64, what: &str) -> Result<Arc<SetDir>, L2dError> {
+pub(crate) fn set_dir(
+    worker: &mut Worker<'_>,
+    bytes: u64,
+    what: &str,
+) -> Result<Arc<SetDir>, L2dError> {
     let config = &worker.shared.config;
     std::fs::create_dir_all(&config.work_root)
         .map_err(|error| io_failed("creating", &config.work_root, &error))?;
@@ -1068,7 +1089,7 @@ impl Best {
 /// Counts the members of `parent` by their state in `states`, in both units, and
 /// digests the membership. Also returns what lies outside the parent. The caller
 /// holds [`TALLY_BYTES`] for the blocks this reads.
-fn tally(
+pub(crate) fn tally(
     snapshot: &Snapshot,
     parent: &Population,
     states: &States,
@@ -1117,7 +1138,7 @@ fn tally(
 
 /// The coverage block of a reduction: what was evaluated and what was not, with the
 /// reasons. What a producer abstained on is told apart from what it did not assess.
-fn coverage(tally: &Tally, reason: &str) -> Value {
+pub(crate) fn coverage(tally: &Tally, reason: &str) -> Value {
     let (unknown, unknown_occurrences) = tally.of(State::Unknown);
     let (parent, _) = tally.parent();
     let mut reasons = Vec::new();
@@ -1836,6 +1857,8 @@ pub(crate) fn seal(
         revision,
         result: result.clone(),
         held: kept,
+        inputs: Vec::new(),
+        allocation: None,
     };
     Ok((result, Arc::new(set)))
 }
@@ -1991,8 +2014,11 @@ pub(crate) fn select_listed(
 /// SHA-256 and the length of what was read. The caller holds
 /// [`MEMBERSHIP_READ_BYTES`].
 ///
-/// A line is a record handle as the records view returns it, a tab and one of `in`,
-/// `out` and `abstain`. A record the file does not name was not assessed.
+/// The file is JSON lines: a line is one object `{"id": ..., "state": ...}` with the
+/// record handle as the records view returns it and one of `in`, `out` and `abstain`,
+/// and nothing else, at most [`MAX_MEMBERSHIP_LINE`] bytes. A record the file does not
+/// name was not assessed. The tab-separated form of task 1.3 is refused like any line
+/// that is no such object.
 fn read_membership(
     path: &Path,
     name: &str,
@@ -2018,31 +2044,51 @@ fn read_membership(
         hash.update(&line);
         let refused = |what: &str| L2dError::Refused {
             reason: format!(
-                "line {number} of the membership `{name}` {what}; a line is a record handle \
-                 (`r-` and 16 hexadecimal digits), a tab and `in`, `out` or `abstain`. \
-                 Nothing was committed"
+                "line {number} of the membership `{name}` {what}; a membership file is JSON \
+                 lines, one object {{\"id\": a record handle (`r-` and 16 hexadecimal \
+                 digits), \"state\": \"in\", \"out\" or \"abstain\"}} per line (the \
+                 tab-separated form is not read). Nothing was committed"
             ),
         };
         let Some(text) = line.strip_suffix(b"\n").or_else(|| {
             // The last line may end without a line feed; any other is too long.
             (line.len() <= MAX_MEMBERSHIP_LINE).then_some(&line[..])
         }) else {
-            return Err(refused("is longer than 64 bytes"));
+            return Err(refused(&format!(
+                "is longer than {MAX_MEMBERSHIP_LINE} bytes"
+            )));
         };
         let text = text.strip_suffix(b"\r").unwrap_or(text);
-        let parsed = std::str::from_utf8(text).ok().and_then(|text| {
-            let (record, state) = text.split_once('\t')?;
-            let code = match state {
-                "in" => State::In as u8,
-                "out" => State::Out as u8,
-                "abstain" => ABSTAINED,
-                _ => return None,
-            };
-            Some((wire::record_position(record)?, code))
-        });
-        let (position, code) = parsed.ok_or_else(|| refused("is no membership line"))?;
+        let (position, code) =
+            membership_line(text).ok_or_else(|| refused("is no membership line"))?;
         each(number, position, code)?;
     }
+}
+
+/// One line of a membership file as it is read: both fields are borrowed from the
+/// line, so parsing it allocates nothing, and a field that needs an escape is refused.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MembershipLine<'a> {
+    id: &'a str,
+    state: &'a str,
+}
+
+/// The position and the code of one line of a membership file; `None` when the line
+/// is no such object.
+fn membership_line(text: &[u8]) -> Option<(u64, u8)> {
+    // A struct also reads from a list of its fields: only an object is a line.
+    if text.trim_ascii_start().first() != Some(&b'{') {
+        return None;
+    }
+    let line: MembershipLine<'_> = serde_json::from_slice(text).ok()?;
+    let code = match line.state {
+        "in" => State::In as u8,
+        "out" => State::Out as u8,
+        "abstain" => ABSTAINED,
+        _ => return None,
+    };
+    Some((wire::record_position(line.id)?, code))
 }
 
 // --- Compose -------------------------------------------------------------------------------
@@ -2201,6 +2247,8 @@ pub(crate) fn compose(worker: &mut Worker<'_>, task: &ComposeTask) -> Result<Don
         revision,
         result: result.clone(),
         held: kept,
+        inputs: task.sets.iter().map(|(_, set)| set.clone()).collect(),
+        allocation: None,
     };
     worker.budget.hold(worker.base.saturating_add(kept));
     Ok(Done {
@@ -2209,7 +2257,7 @@ pub(crate) fn compose(worker: &mut Worker<'_>, task: &ComposeTask) -> Result<Don
     })
 }
 
-fn share_of(part: u64, parent: u64) -> Value {
+pub(crate) fn share_of(part: u64, parent: u64) -> Value {
     share(part, parent)
 }
 
@@ -2386,7 +2434,7 @@ mod tests {
     #[test]
     fn a_membership_file_is_read_line_by_line_and_refused_where_it_is_none() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("membership.tsv");
+        let path = root.path().join("membership.jsonl");
         let read = |content: &[u8]| {
             std::fs::write(&path, content).unwrap();
             let mut lines = Vec::new();
@@ -2396,8 +2444,9 @@ mod tests {
             });
             hashed.map(|hashed| (lines, hashed))
         };
-        let content =
-            b"r-0000000000000007\tin\r\nr-00000100000000ff\tabstain\nr-0000000000000009\tout";
+        let content = b"{\"id\":\"r-0000000000000007\",\"state\":\"in\"}\r\n\
+                        { \"state\": \"abstain\", \"id\": \"r-00000100000000ff\" }\n\
+                        {\"id\":\"r-0000000000000009\",\"state\":\"out\"}";
         let (lines, hashed) = read(content).unwrap();
         assert_eq!(
             lines,
@@ -2410,19 +2459,70 @@ mod tests {
         assert_eq!(hashed, hash_membership(&path, "c").unwrap());
         assert_eq!(hashed.1, content.len() as u64);
         assert_eq!(read(b"").unwrap().0, []);
-        let refused: [(&[u8], &str); 6] = [
-            (b"r-0000000000000007\tin\n\n", "line 2"),
-            (b"r-0000000000000007 in\n", "line 1"),
-            (b"r-0000000000000007\tIN\n", "line 1"),
-            (b"r-7\tin\n", "line 1"),
-            (b"r-0000000000000007\tin\nr-0000000000000008\tin and a line that goes on far beyond what a line holds\n", "line 2"),
-            (b"r-0000000000000007\t\xff\n", "line 1"),
+        // The longest line that is taken, and one byte more.
+        let padded = |pad: usize| {
+            let mut line = format!(
+                "{{\"id\":\"r-0000000000000007\",\"state\":\"in\"{}}}",
+                " ".repeat(pad)
+            );
+            line.push('\n');
+            line
+        };
+        let longest = padded(MAX_MEMBERSHIP_LINE - padded(0).len() + 1);
+        assert_eq!(longest.len(), MAX_MEMBERSHIP_LINE + 1);
+        assert_eq!(
+            read(longest.as_bytes()).unwrap().0,
+            [(1, 7, State::In as u8)]
+        );
+        let too_long = padded(MAX_MEMBERSHIP_LINE - padded(0).len() + 2);
+        let good = "{\"id\":\"r-0000000000000007\",\"state\":\"in\"}\n";
+        let refused: Vec<(Vec<u8>, &str)> = vec![
+            (format!("{good}\n").into_bytes(), "line 2"),
+            // The tab-separated form of task 1.3 is no longer read.
+            (b"r-0000000000000007\tin\n".to_vec(), "JSON lines"),
+            (
+                b"{\"id\":\"r-0000000000000007\",\"state\":\"IN\"}\n".to_vec(),
+                "line 1",
+            ),
+            (b"{\"id\":\"r-7\",\"state\":\"in\"}\n".to_vec(), "line 1"),
+            (b"{\"id\":\"r-0000000000000007\"}\n".to_vec(), "line 1"),
+            (
+                b"{\"id\":\"r-0000000000000007\",\"state\":\"in\",\"why\":1}\n".to_vec(),
+                "line 1",
+            ),
+            (
+                b"{\"id\":\"r-0000000000000007\",\"state\":\"in\",\"state\":\"out\"}\n".to_vec(),
+                "line 1",
+            ),
+            (b"[\"r-0000000000000007\",\"in\"]\n".to_vec(), "line 1"),
+            (
+                b"{\"id\":\"r-000000000000000\\u0037\",\"state\":\"in\"}\n".to_vec(),
+                "line 1",
+            ),
+            (format!("{good}{too_long}").into_bytes(), "line 2"),
+            (
+                b"{\"id\":\"r-0000000000000007\",\"state\":\"\xff\"}\n".to_vec(),
+                "line 1",
+            ),
         ];
-        for (content, line) in refused {
-            match read(content) {
-                Err(L2dError::Refused { reason }) => assert!(reason.contains(line), "{reason}"),
-                other => panic!("{other:?}"),
+        for (content, needle) in refused {
+            match read(&content) {
+                Err(L2dError::Refused { reason }) => {
+                    assert!(reason.contains(needle), "{reason}");
+                    assert!(reason.contains("`c`"), "{reason}");
+                }
+                other => panic!("{}: {other:?}", String::from_utf8_lossy(&content)),
             }
         }
+    }
+
+    /// Reading a membership line allocates nothing: the line buffer is the reader's,
+    /// and the fields are borrowed from it.
+    #[test]
+    fn a_membership_line_is_parsed_without_an_allocation() {
+        let line = b"{\"id\":\"r-00000100000000ff\",\"state\":\"abstain\"}";
+        let (parsed, peak) = crate::test_heap::measure(|| membership_line(line));
+        assert_eq!(parsed, Some(((1 << 40) | 0xff, ABSTAINED)));
+        assert_eq!(peak, 0, "parsing a line allocated {peak} bytes");
     }
 }

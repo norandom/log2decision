@@ -175,6 +175,10 @@ pub(crate) enum Expr {
     Difference(Box<Expr>, Box<Expr>),
     /// What the parent holds and the operand does not; unknown stays unknown.
     Complement(Box<Expr>),
+    /// Whether the persisted state of the named set is the given one: known in or
+    /// out for every original, so that an expression can select what a producer did
+    /// not evaluate (interface.md, "The `state` selector").
+    Is(usize, State),
 }
 
 /// The most nodes of an expression, and how deep it may nest.
@@ -216,12 +220,7 @@ impl Expr {
             Value::Object(fields) if fields.len() == 1 => {
                 let (operator, operands) = fields.iter().next().expect("one field");
                 if operator == "state" {
-                    return Err(Fault::unsupported(
-                        "the `state` selector of an expression selects by persisted \
-                         membership state for the pools of an allocation; it comes with \
-                         `mode=allocate` (task 2.2). Use `union`, `intersection` and \
-                         `difference` over named sets",
-                    ));
+                    return Self::parse_state(operands, names);
                 }
                 let operands = operands.as_array().ok_or_else(|| {
                     Fault::invalid(format!("`{operator}` in `expr` takes a list of operands"))
@@ -263,9 +262,41 @@ impl Expr {
             }
             _ => Err(Fault::invalid(
                 "`expr` is a set name or an object with one of `union`, `intersection`, \
-                 `difference` and `complement`",
+                 `difference`, `complement` and `state`",
             )),
         }
+    }
+
+    /// `{"state": {"set": NAME, "is": "in" | "out" | "not_evaluated"}}`.
+    fn parse_state(selector: &Value, names: &[&str]) -> Result<Self, Fault> {
+        let refused = || {
+            Fault::invalid(
+                "`state` in `expr` is an object {\"set\": a name of `sets`, \"is\": \"in\", \
+                 \"out\" or \"not_evaluated\"}",
+            )
+        };
+        let fields = selector
+            .as_object()
+            .filter(|fields| fields.len() == 2)
+            .ok_or_else(refused)?;
+        let (Some(Value::String(set)), Some(Value::String(is))) =
+            (fields.get("set"), fields.get("is"))
+        else {
+            return Err(refused());
+        };
+        let index = names.iter().position(|known| known == set).ok_or_else(|| {
+            Fault::invalid(format!(
+                "`state` in `expr` names the set `{}`, which `sets` does not define",
+                super::wire::clip(set, 64).0
+            ))
+        })?;
+        let state = match is.as_str() {
+            "in" => State::In,
+            "out" => State::Out,
+            "not_evaluated" => State::Unknown,
+            _ => return Err(refused()),
+        };
+        Ok(Expr::Is(index, state))
     }
 
     /// The membership of one original, given its membership in every operand.
@@ -280,6 +311,13 @@ impl Expr {
                 .fold(State::In, |state, part| state.and(part.eval(operand))),
             Expr::Difference(left, right) => left.eval(operand).and(right.eval(operand).not()),
             Expr::Complement(inner) => inner.eval(operand).not(),
+            Expr::Is(index, state) => {
+                if operand(*index) == *state {
+                    State::In
+                } else {
+                    State::Out
+                }
+            }
         }
     }
 
@@ -297,6 +335,7 @@ impl Expr {
                 json!({"difference": [left.describe(named), right.describe(named)]})
             }
             Expr::Complement(inner) => json!({"complement": [inner.describe(named)]}),
+            Expr::Is(index, state) => json!({"state": {"set": named(*index), "is": state.name()}}),
         }
     }
 }
@@ -510,11 +549,56 @@ mod tests {
             deep = json!({"union": [deep, "b"]});
         }
         assert!(Expr::parse(&deep, &names).is_err());
+        for bad in [
+            json!({"state": {"set": "a"}}),
+            json!({"state": {"set": "a", "is": "unknown"}}),
+            json!({"state": {"set": "z", "is": "in"}}),
+            json!({"state": {"set": "a", "is": "in", "or": 1}}),
+            json!({"state": ["a", "in"]}),
+        ] {
+            assert_eq!(
+                Expr::parse(&bad, &names).unwrap_err().code,
+                "invalid_arguments",
+                "{bad}"
+            );
+        }
+    }
+
+    /// The `state` selector reads the persisted state: it is known for every original,
+    /// so it selects what a producer did not evaluate (abstentions included) and never
+    /// leaves an unknown of its own.
+    #[test]
+    fn the_state_selector_tests_the_persisted_state() {
+        use State::{In, Out, Unknown};
+        let names = ["d", "c"];
+        let unfamiliar = Expr::parse(
+            &json!({"intersection": ["d", {"state": {"set": "c", "is": "not_evaluated"}}]}),
+            &names,
+        )
+        .unwrap();
+        let of = |d: State, c: State| unfamiliar.eval(&|index| [d, c][index]);
+        assert_eq!(of(In, Unknown), In);
+        assert_eq!(of(In, In), Out);
+        assert_eq!(of(In, Out), Out);
+        assert_eq!(of(Out, Unknown), Out);
+        assert_eq!(of(Unknown, Unknown), Unknown);
+        for is in ["in", "out", "not_evaluated"] {
+            let selector = Expr::parse(&json!({"state": {"set": "c", "is": is}}), &names).unwrap();
+            let picked: Vec<State> = ALL
+                .iter()
+                .filter(|state| selector.eval(&|_| **state) == In)
+                .copied()
+                .collect();
+            assert_eq!(picked.len(), 1, "{is}");
+            assert_eq!(picked[0].name(), is);
+            assert!(
+                ALL.iter()
+                    .all(|state| selector.eval(&|_| *state) != Unknown)
+            );
+        }
         assert_eq!(
-            Expr::parse(&json!({"state": {"set": "a", "is": "in"}}), &names)
-                .unwrap_err()
-                .code,
-            "unsupported_operation"
+            unfamiliar.describe(&|index| json!(["set-d", "set-c"][index])),
+            json!({"intersection": ["set-d", {"state": {"set": "set-c", "is": "not_evaluated"}}]})
         );
     }
 
