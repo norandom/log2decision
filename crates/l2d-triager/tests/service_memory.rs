@@ -413,7 +413,7 @@ fn fixture(universe: &[Orig]) -> String {
     let mut lines = String::new();
     for (index, original) in universe.iter().enumerate().rev().step_by(4) {
         let state = ["in", "out", "abstain"][index % 3];
-        lines.push_str(&format!("{}\t{state}\n", original.id()));
+        lines.push_str(&support::membership_line(&original.id(), state));
     }
     lines
 }

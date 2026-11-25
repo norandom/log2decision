@@ -30,6 +30,36 @@ pub(crate) struct Snapshot {
     pub result: String,
     /// What the snapshot keeps in memory; held in the budget while it lives.
     pub held: u64,
+    /// For a snapshot reopened from a receipt: the receipt and what it retained. Its
+    /// relation holds the retained originals only and its source is not read.
+    pub retained: Option<Retained>,
+}
+
+/// What a snapshot reopened from a receipt is: the receipt, the snapshot it was
+/// saved from and that snapshot's denominators.
+pub(crate) struct Retained {
+    pub receipt: String,
+    pub origin: String,
+    pub origin_originals: u64,
+    pub origin_occurrences: u64,
+}
+
+/// The refusal of an operation that reads the source or a host file of a snapshot
+/// reopened from a receipt: the receipt retains no source text.
+pub(crate) fn source_not_retained(snapshot: &Snapshot, what: &str) -> Result<(), Fault> {
+    match &snapshot.retained {
+        None => Ok(()),
+        Some(retained) => Err(Fault::new(
+            "source_not_retained",
+            format!(
+                "{what} reads the source or a file of the host, and `{}` was reopened from the \
+                 receipt `{}`, which retains record IDs, memberships, scores and allocations \
+                 but no source text; compose, allocate, inspect and save it, or open the source \
+                 and replay the receipt's recipe",
+                snapshot.handle, retained.receipt
+            ),
+        )),
+    }
 }
 
 impl Snapshot {
@@ -96,6 +126,136 @@ pub(crate) enum Producer {
         batches: usize,
         described: Value,
     },
+    /// One review budget allocated once over named pools (`mode=allocate`): the
+    /// canonical request with every name replaced by its handle.
+    Allocation {
+        spec: Value,
+    },
+    /// A set reopened from a receipt: the producer as the receipt states it, and what
+    /// kind of producer that was.
+    Retained {
+        described: Value,
+        origin: Origin,
+        /// For an issued-batch set: the judgments the receipt retained.
+        judged: Option<Arc<Judged>>,
+    },
+}
+
+/// The judgments a receipt retained of an issued-batch set: the run as it states it
+/// (name, caller-reported model and prompt revision, the batches with their revisions
+/// and input digests, the submissions covered) and, per retained record by record ID
+/// ascending, what the set's explanation said of it, as JSON text.
+pub(crate) struct Judged {
+    pub run: Value,
+    pub records: Vec<(u64, Box<str>)>,
+}
+
+impl Judged {
+    /// What the judgments keep in memory: the list, the text of every detail and the
+    /// parsed run block (a parsed value takes several times its text).
+    pub fn held_bytes(&self) -> u64 {
+        (self.records.capacity() * std::mem::size_of::<(u64, Box<str>)>()
+            + self
+                .records
+                .iter()
+                .map(|(_, detail)| detail.len())
+                .sum::<usize>()) as u64
+            + 16 * self.run.to_string().len() as u64
+    }
+
+    /// The detail of the record with the record ID `position`.
+    pub fn detail(&self, position: u64) -> Option<&str> {
+        self.records
+            .binary_search_by_key(&position, |(at, _)| *at)
+            .ok()
+            .map(|at| &*self.records[at].1)
+    }
+}
+
+/// What kind of producer made a set a receipt retained: what its explanation reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Origin {
+    Score { scorer_revision: String },
+    Filter,
+    Membership,
+    Pattern { pattern: u64 },
+    Neighbours,
+    Venn { scorer_revision: String },
+    Issued,
+    Expression,
+    Allocation,
+}
+
+impl Origin {
+    /// The kind of the producer a receipt names, and what of it the explanation reads.
+    pub fn of(producer: &Producer) -> Self {
+        match producer {
+            Producer::Score { scorer, .. } => Origin::Score {
+                scorer_revision: scorer.revision.clone(),
+            },
+            Producer::Filter { .. } => Origin::Filter,
+            Producer::Membership { .. } => Origin::Membership,
+            Producer::Pattern { pattern, .. } => Origin::Pattern { pattern: *pattern },
+            Producer::Neighbours { .. } => Origin::Neighbours,
+            Producer::Venn {
+                scorer_revision, ..
+            } => Origin::Venn {
+                scorer_revision: scorer_revision.clone(),
+            },
+            Producer::Issued { .. } => Origin::Issued,
+            Producer::Expression { .. } => Origin::Expression,
+            Producer::Allocation { .. } => Origin::Allocation,
+            Producer::Retained { origin, .. } => origin.clone(),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Origin::Score { .. } => "score",
+            Origin::Filter => "filter",
+            Origin::Membership => "membership",
+            Origin::Pattern { .. } => "pattern",
+            Origin::Neighbours => "neighbours",
+            Origin::Venn { .. } => "venn",
+            Origin::Issued => "issued_batch",
+            Origin::Expression => "expression",
+            Origin::Allocation => "allocation",
+        }
+    }
+
+    /// The kind as a receipt writes it, with what the explanation reads.
+    pub fn describe(&self) -> Value {
+        match self {
+            Origin::Score { scorer_revision } | Origin::Venn { scorer_revision } => {
+                json!({"kind": self.name(), "scorer_revision": scorer_revision})
+            }
+            Origin::Pattern { pattern } => json!({"kind": self.name(), "pattern": pattern}),
+            _ => json!({"kind": self.name()}),
+        }
+    }
+
+    /// The kind a receipt names; `None` for one this revision does not know.
+    pub fn parse(value: &Value) -> Option<Self> {
+        let revision = || value.get("scorer_revision")?.as_str().map(str::to_string);
+        Some(match value.get("kind")?.as_str()? {
+            "score" => Origin::Score {
+                scorer_revision: revision()?,
+            },
+            "venn" => Origin::Venn {
+                scorer_revision: revision()?,
+            },
+            "filter" => Origin::Filter,
+            "membership" => Origin::Membership,
+            "pattern" => Origin::Pattern {
+                pattern: value.get("pattern")?.as_u64()?,
+            },
+            "neighbours" => Origin::Neighbours,
+            "issued_batch" => Origin::Issued,
+            "expression" => Origin::Expression,
+            "allocation" => Origin::Allocation,
+            _ => return None,
+        })
+    }
 }
 
 impl Producer {
@@ -171,6 +331,12 @@ impl Producer {
             Producer::Neighbours { described }
             | Producer::Venn { described, .. }
             | Producer::Issued { described, .. } => described.clone(),
+            Producer::Allocation { spec } => {
+                let mut described = spec.clone();
+                described["kind"] = json!("allocation");
+                described
+            }
+            Producer::Retained { described, .. } => described.clone(),
         }
     }
 
@@ -203,6 +369,18 @@ impl Producer {
                 described,
                 scorer_revision,
             } => 16 * described.to_string().len() + scorer_revision.capacity(),
+            Producer::Allocation { spec } => 16 * spec.to_string().len(),
+            Producer::Retained {
+                described,
+                origin,
+                judged,
+            } => {
+                16 * described.to_string().len()
+                    + 16 * origin.describe().to_string().len()
+                    + judged
+                        .as_ref()
+                        .map_or(0, |judged| judged.held_bytes() as usize)
+            }
         }) as u64
     }
 }
@@ -211,6 +389,8 @@ impl Producer {
 pub(crate) enum SetKind {
     Selection,
     View,
+    /// A final work set: one review budget allocated once.
+    Final,
 }
 
 impl SetKind {
@@ -218,6 +398,16 @@ impl SetKind {
         match self {
             SetKind::Selection => "selection",
             SetKind::View => "view",
+            SetKind::Final => "final",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "selection" => Some(SetKind::Selection),
+            "view" => Some(SetKind::View),
+            "final" => Some(SetKind::Final),
+            _ => None,
         }
     }
 }
@@ -246,6 +436,12 @@ pub(crate) struct Set {
     /// The result of the call that made it, as it was returned.
     pub result: String,
     pub held: u64,
+    /// The sets it was composed or allocated from: the named sets of a view's
+    /// expression, and those of an allocation with the score sets its pools order by.
+    /// Empty for a selection, whose scope is `parent`.
+    pub inputs: Vec<Arc<Set>>,
+    /// For a final work set: the allocation.
+    pub allocation: Option<Arc<super::allocate::Allocation>>,
 }
 
 impl Set {
@@ -572,15 +768,19 @@ pub(crate) enum Task {
     Evidence(super::inspect::EvidenceTask),
     Refine(super::refine::RefineTask),
     Recommend(super::recommend::RecommendTask),
+    Allocate(super::allocate::AllocateTask),
+    Save(super::receipt::SaveTask),
+    Reopen(super::receipt::ReopenTask),
 }
 
 impl Task {
     /// Whether the task reads a source or runs one of the project's heavy operations
-    /// and so takes the host lease. Composing a view and taking or collecting the
-    /// submissions of a run read committed state only.
+    /// and so takes the host lease. Composing a view, allocating, saving or reopening a
+    /// receipt and taking or collecting the submissions of a run read committed state
+    /// or a receipt only.
     pub fn reads_source(&self) -> bool {
         match self {
-            Task::Compose(_) => false,
+            Task::Compose(_) | Task::Allocate(_) | Task::Save(_) | Task::Reopen(_) => false,
             Task::Recommend(task) => task.reads_source(),
             _ => true,
         }
@@ -797,6 +997,9 @@ pub(crate) struct Activity {
     pub genai_rows_issued: AtomicU64,
     pub jobs_started: AtomicU64,
     pub evidence_bytes: AtomicU64,
+    /// Receipts written, and receipts reopened.
+    pub receipts_saved: AtomicU64,
+    pub receipts_opened: AtomicU64,
     /// Tool calls answered, and the bytes of their MCP tool results.
     pub calls: AtomicU64,
     pub bytes_returned: AtomicU64,
@@ -859,6 +1062,8 @@ impl Shared {
             "genai_rows_submitted": self.activity.genai_rows_submitted.load(Ordering::Relaxed),
             "jobs_started": self.activity.jobs_started.load(Ordering::Relaxed),
             "evidence_bytes_disclosed": self.activity.evidence_bytes.load(Ordering::Relaxed),
+            "receipts_saved": self.activity.receipts_saved.load(Ordering::Relaxed),
+            "receipts_opened": self.activity.receipts_opened.load(Ordering::Relaxed),
         })
     }
 
@@ -943,6 +1148,9 @@ impl Shared {
             hidden.push((given, what));
         };
         hide(&config.work_root, "<work directory>");
+        if let Some(receipts) = &config.receipts {
+            hide(receipts, "<receipt directory>");
+        }
         for source in &config.sources {
             hide(&source.path, "<source>");
         }

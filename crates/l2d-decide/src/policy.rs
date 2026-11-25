@@ -275,7 +275,11 @@ fn priority(reason: Reason) -> u8 {
     }
 }
 
-fn audit_key(id: &str, seed: u64) -> u64 {
+/// The seeded FNV-1a key the low-priority audit is ordered by: 64-bit, the offset
+/// basis XOR `seed`, over the bytes of `id`; the ID breaks a tie. A reproducible
+/// sample, not a cryptographic or statistical randomness claim. The triager's
+/// `seeded_hash` pool order is this key over the record handle.
+pub fn audit_key(id: &str, seed: u64) -> u64 {
     id.as_bytes()
         .iter()
         .fold(0xcbf29ce484222325 ^ seed, |h, b| {

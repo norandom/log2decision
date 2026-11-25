@@ -7,7 +7,10 @@ accepted and skipped records, distinct originals, the membership of the filter s
 the membership file that stands in for C with its unknown states, the eight regions
 of A, B and C with the unknown combinations, the reductions D = A - B, E = D and C
 within D and "what C missed", their ordered record IDs, and the digest (`revision`)
-the service states for each membership.
+the service states for each membership. Triager task 2.2 adds the final allocation of
+one budget (`BUDGET`) over the candidate D ∩ C: the record IDs of its slots in order
+with their pool, and the counts of every pool and of the deferrals in originals and
+occurrences.
 
 A is a score rule. The scores are not recomputed here: they are read from the parts
 the existing command `l2d baseline score` wrote (`--scores`), and the top-k rule with
@@ -16,7 +19,7 @@ computed here from those scores. Without `--scores` everything that needs A is l
 out.
 
     uv run --no-project --with-requirements requirements.txt python oracle.py \\
-        --zip fixture.zip --membership membership-c.tsv --scores scored --out oracle.json
+        --zip fixture.zip --membership membership-c.jsonl --scores scored --out oracle.json
 
 `polars` is used for one thing: reading the Parquet parts of `--scores`.
 
@@ -31,6 +34,7 @@ import hashlib
 import json
 import math
 import re
+import struct
 import sys
 import time
 import zipfile
@@ -151,10 +155,14 @@ def read_scores(directory: Path, first):
 
 
 def read_membership(path: Path, first):
+    """JSON lines: one {"id": record handle, "state": in|out|abstain} object a line."""
     codes = bytearray([UNKNOWN]) * len(first)
     with path.open("rb") as lines:
         for number, raw in enumerate(lines, start=1):
-            handle, _, outcome = raw.rstrip(b"\r\n").decode().partition("\t")
+            line = json.loads(raw)
+            if not isinstance(line, dict) or set(line) != {"id", "state"}:
+                raise SystemExit(f"line {number} of {path} is no membership line")
+            handle, outcome = line["id"], line["state"]
             code = {"in": IN, "out": OUT, "abstain": ABSTAINED}[outcome]
             row = row_of(first, int(handle[2:], 16))
             if codes[row] != UNKNOWN and codes[row] != code:
@@ -258,6 +266,111 @@ def regions(names, sets, parent, count):
         cell[0] += 1
         cell[1] += count[row]
     return table
+
+
+def audit_key(handle: str, seed: int) -> int:
+    """`l2d_decide::policy::audit_key`: 64-bit FNV-1a whose basis is XOR `seed`."""
+    value = 0xCBF29CE484222325 ^ seed
+    for byte in handle.encode():
+        value = ((value ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return value
+
+
+def as_f32(value: float) -> float:
+    """The score as the server keeps it: rounded to the nearest f32."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+# The budget the allocation leg submits: three named pools over D and C, the seed of
+# the fixture for the audit. `run.py` reads it from the oracle.
+ALLOCATION_SEED = 20261125
+BUDGET = {
+    "total": 200, "duplicate_rule": "first_pool_wins", "shortfall": "leave_unfilled",
+    "pools": [
+        {"name": "general", "limit": 120, "from": {"intersection": ["d", "c"]},
+         "order": ["score_desc", "record_id_ascending"]},
+        {"name": "unfamiliar", "limit": 40,
+         "from": {"intersection": ["d", {"state": {"set": "c", "is": "not_evaluated"}}]},
+         "order": ["record_id_ascending"]},
+        {"name": "audit", "limit": 40, "from": {"difference": ["d", "c"]},
+         "order": ["seeded_hash", "record_id_ascending"], "seed": ALLOCATION_SEED},
+    ],
+}
+
+
+def allocation(sets, scores, first, count):
+    """The final work set of BUDGET over the candidate D ∩ C, from the codes alone:
+    every pool in order takes its first `limit` members in its own order that no
+    pool before it took (first pool wins; a shortfall stays unfilled)."""
+    d = [state(code) for code in sets["d"]]
+    c = [state(code) for code in sets["c"]]
+    candidate = [both(x, y) for x, y in zip(d, c)]
+    populations = [
+        [both(x, y) for x, y in zip(d, c)],
+        [both(x, IN if y == UNKNOWN else OUT) for x, y in zip(d, c)],
+        [both(x, negate(y)) for x, y in zip(d, c)],
+    ]
+    keys = [
+        lambda row: (-as_f32(scores[row]), first[row]),
+        lambda row: first[row],
+        lambda row: (audit_key(record_id(first[row]), ALLOCATION_SEED), first[row]),
+    ]
+    taken = {}
+    slots = []
+    pools = []
+    for index, (pool, population, key) in enumerate(zip(BUDGET["pools"], populations, keys)):
+        members = sorted((row for row, code in enumerate(population) if code == IN), key=key)
+        picked = []
+        for row in members:
+            if len(picked) == pool["limit"]:
+                break
+            if row not in taken:
+                taken[row] = index
+                picked.append(row)
+        slots.extend((row, pool["name"]) for row in picked)
+        pools.append({"name": pool["name"], "members": members, "picked": picked})
+    outcomes = []
+    for index, pool in enumerate(pools):
+        members = pool["members"]
+        deferred = [row for row in members if row not in taken]
+        outcomes.append({
+            "name": pool["name"], "limit": BUDGET["pools"][index]["limit"],
+            "selected": len(pool["picked"]),
+            "eligible": {"distinct_originals": len(members),
+                         "occurrences": sum(count[row] for row in members)},
+            "taken_by_other_pools": sum(1 for row in members if taken.get(row, index) != index),
+            "deferred": {"distinct_originals": len(deferred),
+                         "occurrences": sum(count[row] for row in deferred)},
+            "outside_candidate": sum(1 for row in pool["picked"] if candidate[row] != IN),
+        })
+    eligible = [row for row in range(len(first))
+                if candidate[row] == IN or any(p[row] == IN for p in populations)]
+    deferred = [row for row in eligible if row not in taken]
+    final = bytearray(OUT for _ in first)
+    for row, _ in slots:
+        final[row] = IN
+    digest = hashlib.sha256()
+    for row, pool in slots:
+        digest.update(f"{record_id(first[row])} {pool}\n".encode())
+    unknown = [row for row in range(len(first)) if candidate[row] == UNKNOWN]
+    found = {
+        "budget": BUDGET,
+        "capacity": BUDGET["total"], "selected": len(slots),
+        "unused": BUDGET["total"] - len(slots),
+        "pools": outcomes,
+        "candidate": {"distinct_originals": candidate.count(IN),
+                      "occurrences": sum(count[row] for row, code in enumerate(candidate)
+                                         if code == IN),
+                      "not_evaluated": {"distinct_originals": len(unknown),
+                                        "occurrences": sum(count[row] for row in unknown)}},
+        "deferred": {"distinct_originals": len(deferred),
+                     "occurrences": sum(count[row] for row in deferred)},
+        "outside_candidate": sum(outcome["outside_candidate"] for outcome in outcomes),
+        "slots": {"listed": len(slots), "sha256": digest.hexdigest(),
+                  "first": [[record_id(first[row]), pool] for row, pool in slots[:3]],
+                  "last": [[record_id(first[row]), pool] for row, pool in slots[-3:]]},
+    }
+    return found, final
 
 
 def main() -> int:
@@ -367,6 +480,9 @@ def main() -> int:
         ]
         oracle["ordered"] = {name: ordered(sets[name], first)
                              for name in ("a", "d", "e", "m", "a_in_b", "g")}
+        # The allocation of one budget over D and C: the final set, ordered by slot.
+        oracle["allocation"], sets["f"] = allocation(sets, scores, first, count)
+        parents["f"] = None
     oracle.setdefault("ordered", {})["b_first"] = ordered(sets["b"], first, 2500)
     oracle["ordered"]["c"] = ordered(sets["c"], first)
     oracle["sets"] = {

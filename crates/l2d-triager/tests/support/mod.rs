@@ -167,6 +167,12 @@ pub fn record_id(position: u64) -> String {
     format!("r-{position:016x}")
 }
 
+/// One line of a registered membership file: a JSON object with the record handle
+/// and its state, and a line feed.
+pub fn membership_line(id: &str, state: &str) -> String {
+    format!("{}\n", json!({"id": id, "state": state}))
+}
+
 /// The distinct originals of the entries whose name ends in one of `suffixes`, by
 /// first position, computed without any code of the product beyond the packing of a
 /// position.
@@ -222,6 +228,7 @@ pub fn ids(originals: &[Orig]) -> Vec<String> {
     originals.iter().map(Orig::id).collect()
 }
 
+#[derive(Clone)]
 pub struct HostOptions {
     pub usable: u64,
     pub batch_rows: Option<u64>,
@@ -418,7 +425,7 @@ pub fn config(dir: &Path, project: &str, options: &HostOptions) -> HostConfig {
         .memberships
         .iter()
         .map(|(name, lines)| {
-            let path = dir.join(format!("membership-{name}.tsv"));
+            let path = dir.join(format!("membership-{name}.jsonl"));
             std::fs::write(&path, lines).unwrap();
             MembershipRef {
                 name: name.clone(),
@@ -461,6 +468,7 @@ pub fn config(dir: &Path, project: &str, options: &HostOptions) -> HostConfig {
             .collect(),
         encoder: options.encoder.clone(),
         patterns: options.patterns,
+        receipts: Some(dir.join("receipts")),
     }
 }
 

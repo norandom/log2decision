@@ -46,20 +46,31 @@
 //! a model client submits for issued batches. A recommendation is a suggestion: the
 //! service keeps no analyst mark.
 //!
+//! # Allocation and receipts (task 2.2)
+//!
+//! `triager_compose` with `mode=allocate` spends one review budget once over named
+//! pools and returns a final work set ([`allocate`]); the `state` selector of an
+//! expression selects by persisted membership, unknowns included. `triager_save`
+//! writes a candidate view or a final work set as a receipt in the host's receipt
+//! directory, atomically, and `triager_open` with `receipt` reopens it in this or
+//! another server without its source ([`receipt`]).
+//!
 //! # Scope of this revision
 //!
 //! Sources are ZIP archives. A selection is a score, a filter, a membership file the
 //! host registered ([`MembershipRef`]), a pattern, a neighbourhood or a
-//! recommendation. Saved receipts, `triager_save`, allocation, occurrence projections
-//! (field and time drill-down) and inference by a generative model on the host
-//! (`recommend` with the method `local_model`) are refused by name
-//! (`unsupported_operation`); they belong to later tasks of the plan or need a
-//! provider this build does not have.
+//! recommendation. Occurrence projections (field and time drill-down), lineage views
+//! and inference by a generative model on the host (`recommend` with the method
+//! `local_model`) are refused by name (`unsupported_operation`); they belong to later
+//! tasks of the plan or need a provider this build does not have. A snapshot reopened
+//! from a receipt has no source: what reads one is refused (`source_not_retained`).
 
+mod allocate;
 mod inspect;
 mod membership;
 mod ops;
 mod process;
+mod receipt;
 mod recommend;
 mod refine;
 mod schema;
@@ -82,7 +93,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::scope::IndexPlacement;
-use inspect::{EVIDENCE_DEFAULT, EVIDENCE_FIELDS, EvidenceTask, Named, RECORD_FIELDS};
+use inspect::{
+    EVIDENCE_DEFAULT, EVIDENCE_FIELDS, EvidenceTask, FINAL_FIELDS, Named, RECORD_FIELDS,
+};
 use membership::{Expr, check_names};
 use ops::{ComposeTask, OpenTask, Rule, SelectProducer, SelectTask, Worker};
 use recommend::{RecommendTask, Submitted, VennMembership};
@@ -110,16 +123,17 @@ pub const MAX_ENTRY_PATTERN_BYTES: usize = 1024;
 const ENTRY_ECHO_TRANSPORT_BYTES: usize = 4 * 1024;
 
 /// The tools this revision serves, in the order they are listed.
-pub const TOOLS: [&str; 6] = [
+pub const TOOLS: [&str; 7] = [
     "triager_open",
     "triager_select",
     "triager_refine",
     "triager_compose",
     "triager_inspect",
+    "triager_save",
     "triager_job",
 ];
-/// Tools of the interface contract that later tasks deliver.
-const LATER_TOOLS: [(&str, &str); 1] = [("triager_save", "saved receipts (task 2.2)")];
+/// Tools of the interface contract that later tasks deliver: none are left.
+const LATER_TOOLS: [(&str, &str); 0] = [];
 
 /// Who may be shown raw evidence. It belongs to the host: no tool argument names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,10 +165,10 @@ pub struct SourceRef {
     pub public_fixture: bool,
 }
 
-/// A membership file the host registered under a name: one line per assessed record
-/// with its record handle, a tab and `in`, `out` or `abstain`. A record the file does
-/// not name was not assessed. A selection names it as
-/// `{"kind": "membership", "ref": NAME}`.
+/// A membership file the host registered under a name: JSON lines, one object
+/// `{"id": RECORD, "state": "in" | "out" | "abstain"}` per assessed record, at most 128
+/// bytes a line. A record the file does not name was not assessed. A selection names
+/// it as `{"kind": "membership", "ref": NAME}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipRef {
     pub name: String,
@@ -199,6 +213,9 @@ pub struct HostConfig {
     /// The encoder of the neighbour method `vector`; without one that method is
     /// refused by name.
     pub encoder: Option<Encoders>,
+    /// The directory receipts are saved in and reopened from; without one,
+    /// `triager_save` and reopening a receipt are refused.
+    pub receipts: Option<PathBuf>,
 }
 
 impl HostConfig {
@@ -383,6 +400,15 @@ impl Service {
             seen.push((kind, name));
         }
         drop(seen);
+        if let Some(receipts) = &config.receipts
+            && (receipts.starts_with(&config.work_root) || config.work_root.starts_with(receipts))
+        {
+            return Err(invalid(
+                "the receipt directory and the work directory are separate: the work \
+                 directory is emptied with the service, and receipts outlive it"
+                    .into(),
+            ));
+        }
         budget.require_whole(
             ADAPTER_FIXED_BYTES,
             "serving triager requests, their responses and the table of jobs",
@@ -448,6 +474,17 @@ impl Service {
         schema::tools()
     }
 
+    /// The recipe of the receipt `receipt` in the host's receipt directory: a reader
+    /// at its first tool call and the number of calls, which are request lines as
+    /// [`crate::mcp::run_requests`] takes them. What precedes them is passed over
+    /// without being kept beyond one buffer.
+    pub fn recipe(
+        &self,
+        receipt: &str,
+    ) -> Result<(std::io::BufReader<std::fs::File>, usize), L2dError> {
+        receipt::recipe_of(&self.shared.config, receipt).map_err(L2dError::from)
+    }
+
     /// Whether `tool` is a tool of the interface contract, served or refused by name.
     pub fn knows(tool: &str) -> bool {
         TOOLS.contains(&tool) || LATER_TOOLS.iter().any(|(name, _)| *name == tool)
@@ -490,7 +527,11 @@ impl Service {
         match tool {
             "triager_open" => {
                 let (task, key) = self.parse_open(&args)?;
-                self.start_job("triager_open", Task::Open(task), key)
+                self.start_job("triager_open", task, key)
+            }
+            "triager_save" => {
+                let (task, key) = self.parse_save(&args)?;
+                self.start_job("triager_save", Task::Save(task), key)
             }
             "triager_select" => {
                 let (task, key) = self.parse_select(&args)?;
@@ -502,7 +543,7 @@ impl Service {
             }
             "triager_compose" => {
                 let (task, key) = self.parse_compose(&args)?;
-                self.start_job("triager_compose", Task::Compose(task), key)
+                self.start_job("triager_compose", task, key)
             }
             "triager_inspect" => self.inspect(&args),
             _ => self.job(&args),
@@ -515,13 +556,87 @@ impl Service {
 
     // --- Requests --------------------------------------------------------------------
 
-    fn parse_open(&self, args: &Args<'_>) -> Result<(OpenTask, Option<(String, String)>), Fault> {
+    fn parse_open(&self, args: &Args<'_>) -> Result<(Task, Option<(String, String)>), Fault> {
         if args.has("receipt") {
-            return Err(Fault::unsupported(
-                "opening a saved receipt is not served by this revision (task 2.2); open a \
-                 `source`",
+            args.only(&["v", "receipt", "idempotency_key"])?;
+            let name = args.required_text("receipt")?;
+            let path = receipt::receipt_path(&self.shared.config, name)?;
+            if !path.is_file() {
+                return Err(Fault::new(
+                    "unknown_receipt",
+                    format!("the receipt directory holds no receipt `{name}`"),
+                ));
+            }
+            let task = receipt::ReopenTask {
+                receipt: name.to_string(),
+                path,
+            };
+            return Ok((Task::Reopen(task), args.key("triager_open")?));
+        }
+        let (task, key) = self.parse_source(args)?;
+        Ok((Task::Open(task), key))
+    }
+
+    /// `triager_save`: a candidate view or a final work set, with an optional
+    /// `parent_receipt` when the saved set replays the recipe of another receipt.
+    fn parse_save(
+        &self,
+        args: &Args<'_>,
+    ) -> Result<(receipt::SaveTask, Option<(String, String)>), Fault> {
+        args.only(&["v", "handle", "sets", "idempotency_key", "parent_receipt"])?;
+        if self.shared.config.receipts.is_none() {
+            return Err(Fault::new(
+                "receipts_not_configured",
+                "the host configured no receipt directory; nothing is saved",
             ));
         }
+        let set = self.registry().require_set(args.required_text("handle")?)?;
+        if set.kind == state::SetKind::Selection {
+            return Err(Fault::new(
+                "wrong_handle_kind",
+                format!(
+                    "`{}` is a selection; a receipt retains a candidate view or a final work \
+                     set: compose a view of it with `triager_compose` and save that",
+                    set.handle
+                ),
+            ));
+        }
+        let parent_receipt = match args.text("parent_receipt")? {
+            None => None,
+            Some(parent) => {
+                let path = receipt::receipt_path(&self.shared.config, parent)?;
+                if !path.is_file() {
+                    return Err(Fault::new(
+                        "unknown_receipt",
+                        format!("the receipt directory holds no receipt `{parent}`"),
+                    ));
+                }
+                Some(parent.to_string())
+            }
+        };
+        // The sets the hunt goes on with beside the saved one, such as a C that was not
+        // used to make it: retained with it, over its originals.
+        let beside = self.named_sets(args, &set.snapshot.handle, MAX_SETS)?;
+        let lineage = receipt::lineage(
+            &set,
+            &beside
+                .iter()
+                .map(|(_, set)| set.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        let task = receipt::SaveTask {
+            set,
+            lineage,
+            named: beside
+                .iter()
+                .map(|(name, set)| (name.clone(), set.handle.clone()))
+                .collect(),
+            parent_receipt,
+        };
+        Ok((task, args.key("triager_save")?))
+    }
+
+    fn parse_source(&self, args: &Args<'_>) -> Result<(OpenTask, Option<(String, String)>), Fault> {
         args.only(&["v", "source", "idempotency_key"])?;
         let source = Args::of(args.required("source")?, "source")?;
         if let Some(adapter) = source.text("adapter")?
@@ -803,6 +918,10 @@ impl Service {
         let scope = self
             .registry()
             .require_population(args.required_text("scope")?)?;
+        state::source_not_retained(
+            scope.snapshot(),
+            "a selection by a score, a filter or a membership file",
+        )?;
         Ok((
             Task::Select(SelectTask {
                 scope,
@@ -837,6 +956,9 @@ impl Service {
         producer: &Args<'_>,
     ) -> Result<RecommendTask, Fault> {
         let scope = args.required_text("scope")?;
+        if let Ok(population) = self.registry().require_population(scope) {
+            state::source_not_retained(population.snapshot(), "a recommendation")?;
+        }
         match producer.required_text("method")? {
             "venn" => {
                 producer.only(&["kind", "version", "method", "policy", "membership"])?;
@@ -1128,6 +1250,7 @@ impl Service {
                 ));
             }
             let set = self.registry().require_set(args.required_text("set")?)?;
+            state::source_not_retained(&set.snapshot, "a pattern catalogue")?;
             return Ok((RefineTask::Patterns { set }, key));
         }
         if args.has("set") {
@@ -1320,29 +1443,34 @@ impl Service {
         Ok(named)
     }
 
-    fn parse_compose(
-        &self,
-        args: &Args<'_>,
-    ) -> Result<(ComposeTask, Option<(String, String)>), Fault> {
-        match args.required_text("mode")? {
-            "view" => {}
-            "allocate" => {
-                return Err(Fault::unsupported(
-                    "`mode=allocate` (one review budget, reserves, audit and deferrals) is \
-                     not served by this revision (task 2.2); compose with `mode=view`",
-                ));
-            }
-            _ => return Err(Fault::invalid("`mode` is `view`")),
+    fn parse_compose(&self, args: &Args<'_>) -> Result<(Task, Option<(String, String)>), Fault> {
+        let allocating = match args.required_text("mode")? {
+            "view" => false,
+            "allocate" => true,
+            _ => return Err(Fault::invalid("`mode` is `view` or `allocate`")),
+        };
+        if allocating {
+            args.only(&[
+                "v",
+                "mode",
+                "snapshot",
+                "scope",
+                "sets",
+                "expr",
+                "budget",
+                "idempotency_key",
+            ])?;
+        } else {
+            args.only(&[
+                "v",
+                "mode",
+                "snapshot",
+                "scope",
+                "sets",
+                "expr",
+                "idempotency_key",
+            ])?;
         }
-        args.only(&[
-            "v",
-            "mode",
-            "snapshot",
-            "scope",
-            "sets",
-            "expr",
-            "idempotency_key",
-        ])?;
         let snapshot = self
             .registry()
             .require_snapshot(args.required_text("snapshot")?)?;
@@ -1368,13 +1496,27 @@ impl Service {
         }
         let names: Vec<&str> = sets.iter().map(|(name, _)| name.as_str()).collect();
         let expr = Expr::parse(args.required("expr")?, &names)?;
-        Ok((
-            ComposeTask {
+        if allocating {
+            let (total, pools, scores) =
+                allocate::parse_budget(args.required("budget")?, &names, &sets)?;
+            let task = allocate::AllocateTask {
                 snapshot,
                 scope,
                 sets,
                 expr,
-            },
+                total,
+                pools,
+                scores,
+            };
+            return Ok((Task::Allocate(task), args.key("triager_compose")?));
+        }
+        Ok((
+            Task::Compose(ComposeTask {
+                snapshot,
+                scope,
+                sets,
+                expr,
+            }),
             args.key("triager_compose")?,
         ))
     }
@@ -1422,8 +1564,8 @@ impl Service {
         {
             return Err(Fault::unsupported(format!(
                 "the view `{later}` is not served by this revision (occurrence projections \
-                 are task 3.1, lineage across saved receipts task 2.2); the views are \
-                 `overview`, `regions`, `records` and `evidence`"
+                 and lineage are task 3.1; a receipt states its lineage when it is reopened); \
+                 the views are `overview`, `regions`, `records` and `evidence`"
             )));
         }
         let population = self
@@ -1451,15 +1593,22 @@ impl Service {
                     "cursor",
                     "sort",
                 ])?;
-                if let Some(sort) = args.get("sort")
-                    && *sort != json!(["record_id_ascending"])
-                {
-                    return Err(Fault::unsupported(format!(
-                        "the order {} is not served by this revision; records are paged by \
-                         `[\"record_id_ascending\"]`",
-                        wire::clip(&sort.to_string(), 120).0
-                    )));
-                }
+                let allocation = population.as_set().and_then(|set| set.allocation.clone());
+                // A final work set is paged in the order of its slots unless the
+                // request asks for record IDs.
+                let by_allocation = match args.get("sort") {
+                    None => allocation.is_some(),
+                    Some(sort) if *sort == json!(["record_id_ascending"]) => false,
+                    Some(sort) if *sort == json!(["allocation"]) && allocation.is_some() => true,
+                    Some(sort) => {
+                        return Err(Fault::unsupported(format!(
+                            "the order {} is not served by this revision; records are paged \
+                             by `[\"record_id_ascending\"]`, and the members of a final work \
+                             set also by `[\"allocation\"]`",
+                            wire::clip(&sort.to_string(), 120).0
+                        )));
+                    }
+                };
                 let limit = match args.get("limit") {
                     None => DEFAULT_ROWS,
                     Some(limit) => limit
@@ -1472,14 +1621,23 @@ impl Service {
                         })? as usize,
                 };
                 let sets = self.named_sets(args, &snapshot, MAX_SETS)?;
+                let projection = match &allocation {
+                    Some(_) => Self::projection(args, &FINAL_FIELDS, &FINAL_FIELDS)?,
+                    None => Self::projection(args, &RECORD_FIELDS, &RECORD_FIELDS)?,
+                };
                 let request = inspect::RecordsRequest {
                     population: &population,
                     sets: &sets,
-                    projection: Self::projection(args, &RECORD_FIELDS, &RECORD_FIELDS)?,
+                    projection,
                     limit,
                     cursor: args.text("cursor")?,
                 };
-                inspect::records(&self.shared, &request).map(Reply::ok)
+                match allocation {
+                    Some(allocation) if by_allocation => {
+                        inspect::final_records(&self.shared, &request, &allocation).map(Reply::ok)
+                    }
+                    _ => inspect::records(&self.shared, &request).map(Reply::ok),
+                }
             }
             "evidence" => {
                 args.only(&[
@@ -1512,6 +1670,7 @@ impl Service {
                     }
                     return Ok(Reply::ok(retained));
                 }
+                state::source_not_retained(task.population.snapshot(), "an excerpt")?;
                 if transport_bytes(&retained) + inspect::EXCERPT_TRANSPORT_BYTES
                     > wire::PAYLOAD_TRANSPORT_BYTES
                 {
@@ -1728,6 +1887,9 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Evidence(_) => "reading one record",
                 Task::Refine(_) => "refining patterns or neighbours",
                 Task::Recommend(_) => "making a recommendation",
+                Task::Allocate(_) => "allocating a review budget",
+                Task::Save(_) => "saving a receipt",
+                Task::Reopen(_) => "reopening a receipt",
             };
         }
         shared.changed.notify_all();
@@ -1750,6 +1912,9 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Compose(task) => ops::compose(&mut worker, task),
                 Task::Refine(task) => refine::run(&mut worker, task),
                 Task::Recommend(task) => recommend::run(&mut worker, task),
+                Task::Allocate(task) => allocate::allocate(&mut worker, task),
+                Task::Save(task) => receipt::save(&mut worker, task),
+                Task::Reopen(task) => receipt::reopen(&mut worker, task),
                 Task::Evidence(task) => {
                     inspect::evidence_with_excerpt(&mut worker, task).map(|result| ops::Done {
                         result,
@@ -1760,7 +1925,14 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
         }));
         // A drill-down or a recommendation works with files of the host: its errors
         // are shown without the host's paths.
-        let scrubbed = matches!(task, Task::Refine(_) | Task::Recommend(_));
+        let scrubbed = matches!(
+            task,
+            Task::Refine(_)
+                | Task::Recommend(_)
+                | Task::Allocate(_)
+                | Task::Save(_)
+                | Task::Reopen(_)
+        );
         let ran = match ran {
             Ok(Err(mut fault)) if scrubbed => {
                 fault.message = shared.scrub(fault.message);

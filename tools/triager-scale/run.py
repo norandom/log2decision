@@ -7,6 +7,13 @@ oracle (`oracle.py`). It records what each job cost as the service states it, th
 time of every call as this client saw it, the bytes it was returned and the peak
 working set of the server.
 
+Triager task 2.2 adds two parts to every leg: the allocation of the oracle's budget over
+D and C (the slots of the final set in order with their pool, the counts of every pool
+and the deferrals in originals and occurrences), then the save of D (with C) and of
+the final set F as receipts and a second server that reopens both from the receipts
+alone, pages the same slots, allocates the same work set again from the reopened D
+and C, and reads no source, scores nothing and reads no membership file.
+
     python run.py native   --l2d L2D --project P --fixture F --out O
     python run.py leg NAME --l2d L2D --project P --fixture F --oracle O/oracle.json --out O
 
@@ -446,17 +453,12 @@ def warm(server, handles, oracle):
 def refusals(server, handles):
     """The optional operations this revision refuses, each with its code."""
     snapshot, d = handles["snapshot"], handles["d"]
+    # Saving, reopening, allocating and the `state` selector are served since task 2.2.
     asked = [
         ("triager_refine", {"v": 1, "set": handles["b"], "action": {"kind": "field"}}),
-        ("triager_save", {"v": 1, "handle": d, "idempotency_key": "scale"}),
-        ("triager_open", {"v": 1, "receipt": "H1"}),
         ("triager_select", {"v": 1, "scope": snapshot, "producer": {
             "kind": "recommend", "method": "local_model"}}),
         ("triager_refine", {"v": 1, "set": handles["b"], "action": {"kind": "time"}}),
-        ("triager_compose", {"v": 1, "mode": "allocate", "snapshot": snapshot,
-                             "sets": {"d": d}, "expr": "d"}),
-        ("triager_compose", {"v": 1, "mode": "view", "snapshot": snapshot, "sets": {"d": d},
-                             "expr": {"state": {"set": "d", "is": "not_evaluated"}}}),
         ("triager_inspect", {"v": 1, "handle": d, "view": "histogram"}),
         ("triager_inspect", {"v": 1, "handle": d, "view": "fields"}),
         ("triager_inspect", {"v": 1, "handle": d, "view": "lineage"}),
@@ -495,6 +497,137 @@ def excerpts(server, handles, oracle):
     return found
 
 
+ALLOCATION_FIELDS = ("capacity", "selected", "unused", "candidate", "deferred")
+POOL_FIELDS = ("name", "limit", "selected", "eligible", "taken_by_other_pools", "deferred",
+               "outside_candidate")
+
+
+def check_allocation(found, expected, what):
+    """The counts of an allocation against the oracle's, pool by pool."""
+    check({key: found[key] for key in ALLOCATION_FIELDS},
+          {key: expected[key] for key in ALLOCATION_FIELDS}, what)
+    check([{key: pool[key] for key in POOL_FIELDS} for pool in found["pools"]],
+          expected["pools"], f"the pools of {what}")
+    check(found["outside_candidate"]["distinct_originals"], expected["outside_candidate"],
+          f"what {what} drew outside the candidate")
+
+
+def slots_of(server, handle, label):
+    """The slots of a final set in order: record ID and pool, as a digest with its ends."""
+    digest = hashlib.sha256()
+    slots, cursor, pages = [], None, 0
+    outside = 0
+    while True:
+        arguments = {"v": 1, "handle": handle, "view": "records", "limit": 100,
+                     "projection": ["id", "allocation"]}
+        if cursor:
+            arguments["cursor"] = cursor
+        page = server.ok("triager_inspect", arguments, label)
+        for row in page["rows"]:
+            pool = row["allocation"]["pool"]
+            check(row["allocation"]["slot"], len(slots) + 1, "the slots are paged in order")
+            digest.update(f"{row['id']} {pool}\n".encode())
+            slots.append([row["id"], pool])
+            outside += bool(row["allocation"]["outside_candidate"])
+        pages += 1
+        cursor = page["page"]["next_cursor"]
+        if not cursor:
+            break
+    return {"listed": len(slots), "sha256": digest.hexdigest(), "first": slots[:3],
+            "last": slots[-3:]}, {"pages": pages, "outside_candidate": outside}
+
+
+def unchanged(server, snapshot, before, what):
+    after = server.overview(snapshot)["activity"]
+    check({key: after[key] for key in WORK_COUNTERS},
+          {key: before[key] for key in WORK_COUNTERS}, what)
+
+
+def allocate(server, handles, oracle, costs):
+    """Triager task 2.2: one budget over D and C, checked against the oracle, and the
+    candidate D and the final set F saved as receipts."""
+    expected = oracle["allocation"]
+    snapshot = handles["snapshot"]
+    before = server.overview(snapshot)["activity"]
+    f = server.ok("triager_compose", {
+        "v": 1, "mode": "allocate", "snapshot": snapshot,
+        "sets": {"d": handles["d"], "c": handles["c"]},
+        "expr": {"intersection": ["d", "c"]}, "budget": expected["budget"]}, "compose f")
+    costs["compose f"] = f["cost"]
+    check(f["kind"], "final", "the kind of F")
+    check_allocation(f["allocation"], expected, "the allocation")
+    check(tally_of(f), expected_tally(oracle, "f"), "the final set")
+    slots, paged = slots_of(server, f["set"], "slots")
+    check(slots, expected["slots"], "the slots of F in order")
+    check(paged["outside_candidate"], expected["outside_candidate"],
+          "the slots marked outside the candidate")
+    handles["f"] = f["set"]
+    saved = {}
+    for name, arguments in (("d", {"handle": handles["d"], "sets": {"c": handles["c"]}}),
+                            ("f", {"handle": handles["f"]})):
+        result = server.ok("triager_save", {"v": 1, **arguments}, f"save {name}")
+        costs[f"save {name}"] = result["cost"]
+        saved[name] = {key: result[key] for key in (
+            "receipt", "kind", "content_sha256", "retained", "recipe")}
+    unchanged(server, snapshot, before, "allocating and saving read no source")
+    saved["c_handle"] = handles["c"]
+    return {"allocation": {key: f["allocation"][key] for key in ALLOCATION_FIELDS},
+            "outside_candidate": f["allocation"]["outside_candidate"]["distinct_originals"],
+            "slots": slots, "pages": paged["pages"], "saved": saved}
+
+
+def reopen(args, global_args, mcp_args, out, oracle, saved, receipts):
+    """A second server reopens both receipts: the final set pages the same slots, and
+    the candidate allocates the same work set again; neither reads the source, scores
+    or reads a membership file."""
+    expected = oracle["allocation"]
+    server = Server(args.l2d, args.project, global_args, [
+        "--source", f"fixture={args.fixture / 'fixture.zip'}",
+        "--membership", f"fixture-c={args.fixture / 'membership-c.jsonl'}",
+        "--work-dir", str(out / "work-reopen"), "--receipts", str(receipts),
+        "--inline-wait-ms", "200", *mcp_args], out / "server-reopen-stderr.txt")
+    found = {"passed": False}
+    try:
+        ms = {}
+        opened_f = server.ok("triager_open", {"v": 1, "receipt": saved["f"]["receipt"]},
+                             "reopen f")
+        ms["reopen f"] = server.last.get("ms_to_result")
+        check(opened_f["kind"], "final", "the kind of the reopened F")
+        slots, paged = slots_of(server, opened_f["set"], "slots reopened")
+        check(slots, expected["slots"], "the slots of the reopened F")
+        allocated = server.overview(opened_f["set"])["artifact"]["allocation"]
+        check_allocation(allocated, expected, "the reopened allocation")
+        for counter in WORK_COUNTERS:
+            check(server.overview(opened_f["snapshot"])["activity"][counter], 0,
+                  f"reopening F: {counter}")
+        opened_d = server.ok("triager_open", {"v": 1, "receipt": saved["d"]["receipt"]},
+                             "reopen d")
+        ms["reopen d"] = server.last.get("ms_to_result")
+        handle = {set_["saved_as"]: set_["handle"] for set_ in opened_d["sets"]}
+        again = server.ok("triager_compose", {
+            "v": 1, "mode": "allocate", "snapshot": opened_d["snapshot"],
+            "sets": {"d": opened_d["set"], "c": handle[saved["c_handle"]]},
+            "expr": {"intersection": ["d", "c"]}, "budget": expected["budget"]},
+            "allocate reopened")
+        ms["allocate reopened"] = server.last.get("ms_to_result")
+        check_allocation(again["allocation"], expected, "the allocation after reopening D")
+        slots_again, _ = slots_of(server, again["set"], "slots again")
+        check(slots_again, expected["slots"], "the slots allocated after reopening D")
+        activity = server.overview(opened_d["snapshot"])["activity"]
+        for counter in WORK_COUNTERS:
+            check(activity[counter], 0, f"reopening D and allocating: {counter}")
+        found.update(passed=True, retained_f=opened_f["counts"], retained_d=opened_d["counts"],
+                     pages=paged["pages"], ms=ms, activity=activity)
+    except Failed as failure:
+        found["failure"] = str(failure)
+    finally:
+        try:
+            found["server_peak_working_set_bytes"] = server.close()
+        except Exception as error:  # noqa: BLE001 - the report says how the server ended
+            found["server_end"] = str(error)
+    return found
+
+
 def leg(args):
     fixture = {"model": args.model}
     oracle = json.loads(args.oracle.read_text())
@@ -513,10 +646,12 @@ def leg(args):
               "l2d": str(args.l2d), "l2d_sha256": sha256_of(args.l2d),
               "harness_sha256": harness, "oracle_sha256": sha256_of(args.oracle),
               "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "passed": False}
+    receipts = out / "receipts"
     server = Server(args.l2d, args.project, global_args, [
         "--source", f"fixture={args.fixture / 'fixture.zip'}",
-        "--membership", f"fixture-c={args.fixture / 'membership-c.tsv'}",
-        "--work-dir", str(work), "--inline-wait-ms", "200", *mcp_args],
+        "--membership", f"fixture-c={args.fixture / 'membership-c.jsonl'}",
+        "--work-dir", str(work), "--receipts", str(receipts),
+        "--inline-wait-ms", "200", *mcp_args],
         out / "server-stderr.txt")
     costs = {}
     started = time.perf_counter()
@@ -528,6 +663,7 @@ def leg(args):
         report["warm"] = warm(server, handles, oracle)
         report["refused"] = refusals(server, handles)
         report["excerpts"] = excerpts(server, handles, oracle)
+        report["allocate"] = allocate(server, handles, oracle, costs)
         final = server.overview(handles["snapshot"])
         report["activity"] = final["activity"]
         report["session"] = final["session"]
@@ -548,6 +684,16 @@ def leg(args):
         except Exception as error:  # noqa: BLE001 - the report says how the server ended
             report["server_end"] = str(error)
         report["work_dir_left"] = sorted(path.name for path in work.iterdir()) if work.exists() else []
+        if report["passed"]:
+            # The save and reopen leg: another server, the receipts alone.
+            report["reopen"] = reopen(args, global_args, mcp_args, out, oracle,
+                                      report["allocate"]["saved"], receipts)
+            report["receipt_files"] = {path.name: sha256_of(path)
+                                       for path in sorted(receipts.glob("*.receipt"))}
+            if not report["reopen"]["passed"]:
+                report["passed"] = False
+                report["failure"] = report["reopen"].get("failure") or report["reopen"].get(
+                    "server_end")
         report["ended"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         report["harness_unchanged"] = harness_hashes() == harness
         if not report["harness_unchanged"]:

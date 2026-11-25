@@ -19,9 +19,10 @@ use l2d_core::L2dError;
 use serde_json::{Map, Value, json};
 
 use super::DisclosureProfile;
+use super::allocate::Allocation;
 use super::membership::{ABSTAINED, State, States, code_in};
 use super::ops::{SCAN_FIXED_BYTES, Worker, rows_of, scan};
-use super::state::{Population, Producer, Set, Shared, Snapshot};
+use super::state::{Origin, Population, Producer, Set, Shared, Snapshot};
 use super::tables::{BLOCK_ROWS, Scores, score_in};
 use super::wire::{
     self, Fault, MAX_EXCERPT_BYTES, MAX_PATH_BYTES, MAX_REGION_SETS, PAYLOAD_TRANSPORT_BYTES,
@@ -80,15 +81,14 @@ fn coverage(population: &Population) -> Value {
 fn dependencies(sets: &Named) -> Vec<Value> {
     let mut found = Vec::new();
     for (name, set) in sets {
-        let Producer::Venn {
-            scorer_revision, ..
-        } = &set.producer
-        else {
+        // Also of sets a receipt retained.
+        let Origin::Venn { scorer_revision } = Origin::of(&set.producer) else {
             continue;
         };
+        let scorer_revision = &scorer_revision;
         for (other, scored) in sets {
-            if matches!(&scored.producer, Producer::Score { scorer, .. }
-                if scorer.revision == *scorer_revision)
+            if matches!(Origin::of(&scored.producer), Origin::Score { scorer_revision: revision }
+                if revision == *scorer_revision)
             {
                 found.push(json!({
                     "set": name,
@@ -362,6 +362,180 @@ pub(crate) fn regions(population: &Population, sets: &Named) -> Result<String, F
 
 /// The columns of a records page.
 pub(crate) const RECORD_FIELDS: [&str; 4] = ["id", "locator", "occurrences", "membership"];
+/// The columns of a records page of a final work set: also the slot of each member.
+pub(crate) const FINAL_FIELDS: [&str; 5] =
+    ["id", "locator", "occurrences", "membership", "allocation"];
+
+/// The projected fields of one record of a page.
+fn row_fields(
+    snapshot: &Snapshot,
+    request: &RecordsRequest<'_>,
+    allocation: Option<&Allocation>,
+    row: u64,
+    original: &Original,
+    path_clipped: &mut bool,
+) -> Result<Value, Fault> {
+    let mut fields = Map::new();
+    for field in &request.projection {
+        match *field {
+            "id" => {
+                fields.insert("id".into(), json!(wire::record_id(original.id.0)));
+            }
+            "locator" => {
+                let (shown, clipped) = locator(snapshot, original);
+                *path_clipped |= clipped;
+                fields.insert("locator".into(), shown);
+            }
+            "occurrences" => {
+                fields.insert("occurrences".into(), json!(original.occurrences));
+            }
+            "allocation" => {
+                let slot = allocation.and_then(|allocation| {
+                    allocation.slot_of(row).map(|(index, slot)| {
+                        json!({
+                            "pool": allocation.pools[slot.pool as usize].name,
+                            "slot": index + 1,
+                            "pool_rank": slot.rank,
+                            "outside_candidate": slot.outside_candidate,
+                        })
+                    })
+                });
+                fields.insert("allocation".into(), slot.unwrap_or(Value::Null));
+            }
+            _ => {
+                let mut membership = Map::new();
+                for (name, set) in request.sets {
+                    membership.insert(name.clone(), json!(set.states.get(row)?.name()));
+                }
+                fields.insert("membership".into(), Value::Object(membership));
+            }
+        }
+    }
+    Ok(Value::Object(fields))
+}
+
+/// One page of the members of a final work set in the order of its slots: pool by
+/// pool, each in its order. The cursor continues after a slot.
+pub(crate) fn final_records(
+    shared: &Shared,
+    request: &RecordsRequest<'_>,
+    allocation: &Allocation,
+) -> Result<String, Fault> {
+    let population = request.population;
+    let snapshot = population.snapshot();
+    let mut bound: Vec<&str> = vec![population.handle(), population.revision(), "records"];
+    for (name, set) in request.sets {
+        bound.push(name);
+        bound.push(&set.handle);
+    }
+    bound.push("allocation");
+    bound.extend(request.projection.iter());
+    let binding = wire::cursor_binding(&shared.config.project, &bound);
+    let start = match request.cursor {
+        None => 0,
+        Some(cursor) => {
+            let after = wire::cursor_position(cursor, &binding)
+                .filter(|after| *after < allocation.slots.len() as u64)
+                .ok_or_else(|| {
+                    Fault::new(
+                        "stale_cursor",
+                        "the cursor was not issued for this handle, its revision, these sets, \
+                         this order and this projection; start again from the first page",
+                    )
+                })?;
+            after as usize + 1
+        }
+    };
+    let (total_originals, total_occurrences) = population.size();
+    let mut result = head("records", population);
+    result.insert("sort".into(), json!(["allocation"]));
+    result.insert("projection".into(), json!(request.projection));
+    result.insert("applied_limits".into(), applied_limits(request.limit));
+    let frame = {
+        let mut frame = result.clone();
+        frame.insert("rows".into(), json!([]));
+        frame.insert(
+            "page".into(),
+            json!({
+                "limit": request.limit,
+                "returned": request.limit,
+                "total": {"distinct_originals": total_originals, "occurrences": total_occurrences},
+                "next_cursor": wire::cursor(u64::MAX, &binding),
+            }),
+        );
+        frame.insert(
+            "clipping".into(),
+            json!({"clipped": true, "rows_by_bytes": true, "fields": ["locator.entry"]}),
+        );
+        frame.insert(
+            "cost".into(),
+            json!({"archive_scans": 0, "rows_scored": 0, "index_rows_read": u64::MAX,
+                   "response_bytes": PAYLOAD_TRANSPORT_BYTES}),
+        );
+        Value::Object(frame).to_string()
+    };
+    let mut used = wire::transport_bytes(&frame);
+    let mut shown: Vec<Value> = Vec::with_capacity(request.limit);
+    let mut path_clipped = false;
+    let mut by_bytes = false;
+    let mut last = None;
+    let mut read = 0u64;
+    let end = allocation.slots.len().min(start + request.limit);
+    for (index, slot) in allocation.slots[start.min(end)..end].iter().enumerate() {
+        let original = snapshot.scope.row(slot.row)?;
+        read += 1;
+        let fields = row_fields(
+            snapshot,
+            request,
+            Some(allocation),
+            slot.row,
+            &original,
+            &mut path_clipped,
+        )?;
+        let text = fields.to_string();
+        let bytes = 2 * (text.len() + 1) + wire::escape_bytes(&text);
+        if used + bytes > PAYLOAD_TRANSPORT_BYTES {
+            by_bytes = true;
+            break;
+        }
+        used += bytes;
+        last = Some((start + index) as u64);
+        shown.push(fields);
+    }
+    if shown.is_empty() && start < end {
+        return Err(Fault::runtime(
+            "one row of this projection does not fit the response limit",
+        ));
+    }
+    let more = by_bytes || end < allocation.slots.len();
+    result.insert(
+        "page".into(),
+        json!({
+            "limit": request.limit,
+            "returned": shown.len(),
+            "total": {"distinct_originals": total_originals, "occurrences": total_occurrences},
+            "next_cursor": match (more, last) {
+                (true, Some(last)) => json!(wire::cursor(last, &binding)),
+                _ => Value::Null,
+            },
+        }),
+    );
+    let clipped_fields: Vec<&str> = if path_clipped {
+        vec!["locator.entry"]
+    } else {
+        Vec::new()
+    };
+    result.insert(
+        "clipping".into(),
+        json!({"clipped": by_bytes || path_clipped, "rows_by_bytes": by_bytes,
+               "fields": clipped_fields}),
+    );
+    result.insert("cost".into(), warm_cost(read));
+    result.insert("rows".into(), Value::Array(shown));
+    let payload = wire::with_response_bytes(Value::Object(result));
+    fits(&payload)?;
+    Ok(payload)
+}
 
 pub(crate) struct RecordsRequest<'a> {
     pub population: &'a Population,
@@ -464,34 +638,21 @@ pub(crate) fn records(shared: &Shared, request: &RecordsRequest<'_>) -> Result<S
     let mut last = None;
     let mut path_clipped = false;
     let mut by_bytes = false;
+    let allocation = population
+        .as_set()
+        .and_then(|set| set.allocation.as_deref());
     for row in &page {
         let original = snapshot.scope.row(*row)?;
         read += 1;
         let position = original.id.0;
-        let mut fields = Map::new();
-        for field in &request.projection {
-            match *field {
-                "id" => {
-                    fields.insert("id".into(), json!(wire::record_id(position)));
-                }
-                "locator" => {
-                    let (shown, clipped) = locator(snapshot, &original);
-                    path_clipped |= clipped;
-                    fields.insert("locator".into(), shown);
-                }
-                "occurrences" => {
-                    fields.insert("occurrences".into(), json!(original.occurrences));
-                }
-                _ => {
-                    let mut membership = Map::new();
-                    for (name, set) in request.sets {
-                        membership.insert(name.clone(), json!(set.states.get(*row)?.name()));
-                    }
-                    fields.insert("membership".into(), Value::Object(membership));
-                }
-            }
-        }
-        let fields = Value::Object(fields);
+        let fields = row_fields(
+            snapshot,
+            request,
+            allocation,
+            *row,
+            &original,
+            &mut path_clipped,
+        )?;
         let text = fields.to_string();
         // A row, its comma, and both again in the text form.
         let bytes = 2 * (text.len() + 1) + wire::escape_bytes(&text);
@@ -652,22 +813,92 @@ fn explain(name: &str, set: &Set, row: u64, read: &mut u64) -> Result<Value, Fau
         Some(parent) => parent.states.get(row)? != State::In,
         None => false,
     };
+    // What kind of producer made the set, also for one a receipt retained.
+    let origin = Origin::of(&set.producer);
     if state == State::Unknown {
-        explained["reason"] = json!(match (&set.producer, outside) {
-            (Producer::Expression { .. }, _) => "operand_not_evaluated",
+        explained["reason"] = json!(match (&origin, outside) {
+            (Origin::Expression | Origin::Allocation, _) => "operand_not_evaluated",
             (_, true) => "outside_producer_scope",
-            (Producer::Neighbours { .. }, false) if code == ABSTAINED => "not_represented",
+            (Origin::Neighbours, false) if code == ABSTAINED => "not_represented",
             (_, false) if code == ABSTAINED => "abstained",
             (
-                Producer::Membership { .. }
-                | Producer::Pattern { .. }
-                | Producer::Neighbours { .. }
-                | Producer::Venn { .. }
-                | Producer::Issued { .. },
+                Origin::Membership
+                | Origin::Pattern { .. }
+                | Origin::Neighbours
+                | Origin::Venn { .. }
+                | Origin::Issued,
                 false,
             ) => "outside_producer_coverage",
             (_, false) => "missing_model_output",
         });
+    }
+    if let Some(allocation) = &set.allocation
+        && !outside
+    {
+        // Why a slot holds the original, or why none does.
+        explained["allocation"] = allocation.explain(row)?;
+        return Ok(explained);
+    }
+    if let Producer::Retained { .. } = &set.producer {
+        explained["retained"] = json!(true);
+        match (&origin, &set.scores) {
+            (Origin::Venn { .. }, Some(scores)) if !outside && state != State::Unknown => {
+                if let Some(detail) = super::recommend::venn_detail(scores.get(row)?) {
+                    explained["venn"] = detail;
+                }
+            }
+            (Origin::Neighbours, Some(scores)) if state == State::In => {
+                explained["distance"] = json!(scores.get(row)?);
+            }
+            (Origin::Pattern { pattern }, _) if state != State::Unknown => {
+                explained["pattern"] = json!(pattern);
+                explained["matched"] = json!(state == State::In);
+            }
+            (Origin::Score { .. }, Some(scores)) if !outside => {
+                let score = scores.get(row)?;
+                if score.is_finite() {
+                    explained["score"] = json!(score);
+                    // Among the originals the receipt retained, not the whole snapshot.
+                    explained["rank"] = json!(rank(set, scores, row)?);
+                    *read += set.states.rows();
+                    explained["ranked_among"] =
+                        json!(set.tally.parent().0 - set.tally.of(State::Unknown).0);
+                    explained["ranked_within"] = json!("the originals the receipt retained");
+                }
+            }
+            (Origin::Filter, _) if state != State::Unknown => {
+                explained["matched"] = json!(state == State::In);
+            }
+            (Origin::Issued, _) if !outside => {
+                // The judgments as they were when the receipt was saved, and the run's
+                // caller-reported model and prompt revision.
+                if let Producer::Retained {
+                    judged: Some(judged),
+                    ..
+                } = &set.producer
+                {
+                    let position = set.snapshot.scope.row(row)?.id.0;
+                    let mut detail = match judged.detail(position) {
+                        Some(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                        None => json!({
+                            "outcome": "not_issued",
+                            "judgments": [],
+                            "kind": "model suggestion; not a reviewed outcome",
+                        }),
+                    };
+                    detail["run"] = json!({
+                        "name": judged.run["name"],
+                        "model": judged.run["model"],
+                        "prompt_revision": judged.run["prompt_revision"],
+                        "model_identity": judged.run["model_identity"],
+                        "submissions": judged.run["submissions"],
+                    });
+                    explained["recommendation"] = detail;
+                }
+            }
+            _ => {}
+        }
+        return Ok(explained);
     }
     match (&set.producer, &set.scores) {
         (Producer::Venn { .. }, Some(scores)) if !outside && state != State::Unknown => {
@@ -800,6 +1031,16 @@ pub(crate) fn evidence(
             );
             cost = excerpt.cost;
             cost["index_rows_read"] = json!(index_rows_read);
+        }
+        None if snapshot.retained.is_some() => {
+            result.insert(
+                "excerpt_estimate".into(),
+                json!({
+                    "requires": "the source, which a reopened receipt does not retain: open \
+                                 the source and replay the receipt's recipe",
+                    "archive_scans": Value::Null,
+                }),
+            );
         }
         None => {
             // The text of a record is not kept: an excerpt is another read of the

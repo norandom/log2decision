@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use l2d_triager::scope::IndexPlacement;
 use l2d_triager::service::TablePlacement;
 use serde_json::{Value, json};
-use support::{Host, HostOptions, Orig, auth_entries, occurrences, oracle, top_k};
+use support::{Host, HostOptions, Orig, auth_entries, membership_line, occurrences, oracle, top_k};
 
 /// What the fixture producer says of the original at `index` of the universe: it
 /// did not assess every third original nor any rejected challenge, abstained on every
@@ -31,7 +31,7 @@ fn fixture(universe: &[Orig]) -> String {
     // Not in the order of the record IDs: the file is joined by key.
     for (index, original) in universe.iter().enumerate().rev() {
         if let Some(state) = fixture_state(index, original) {
-            lines.push_str(&format!("{}\t{state}\n", original.id()));
+            lines.push_str(&membership_line(&original.id(), state));
         }
     }
     lines
@@ -39,15 +39,31 @@ fn fixture(universe: &[Orig]) -> String {
 
 fn options(universe: &[Orig]) -> HostOptions {
     let first = universe[0].id();
+    let second = universe[1].id();
     HostOptions {
         memberships: vec![
             ("fixture-c".into(), fixture(universe)),
             (
                 "foreign".into(),
-                format!("{first}\tin\nr-00000000deadbeef\tout\n"),
+                membership_line(&first, "in") + &membership_line("r-00000000deadbeef", "out"),
             ),
-            ("conflict".into(), format!("{first}\tin\n{first}\tout\n")),
-            ("malformed".into(), format!("{first}\tmaybe\n")),
+            (
+                "conflict".into(),
+                membership_line(&first, "in")
+                    + &membership_line(&second, "out")
+                    + &membership_line(&first, "out"),
+            ),
+            ("malformed".into(), membership_line(&first, "maybe")),
+            // The tab-separated form of task 1.3.
+            ("tab-separated".into(), format!("{first}\tin\n")),
+            (
+                "too-long".into(),
+                membership_line(&first, "in")
+                    + &format!(
+                        "{{\"id\": \"{second}\", \"state\": \"in\"{}}}\n",
+                        " ".repeat(100)
+                    ),
+            ),
         ],
         ..HostOptions::default()
     }
@@ -357,8 +373,9 @@ fn a_fixture_membership_gives_the_eight_regions_and_the_unknown_combinations() {
     for (reference, code, needle) in [
         ("absent", "unknown_membership", "registered no membership"),
         ("foreign", "refused", "line 2"),
-        ("conflict", "refused", "line 2"),
+        ("conflict", "refused", "line 3"),
         ("malformed", "refused", "line 1"),
+        ("tab-separated", "refused", "JSON lines"),
     ] {
         let (found, message) = host.err(
             "triager_select",
@@ -539,36 +556,69 @@ fn a_selection_the_memory_does_not_admit_goes_to_disk_and_completes() {
 fn a_membership_refusal_names_the_membership_and_never_the_hosts_path() {
     let entries = auth_entries();
     let universe = oracle(&entries, ".log");
-    let host = Host::new(
-        &entries,
-        HostOptions {
-            profile: l2d_triager::service::DisclosureProfile::PublicDevelopment,
-            ..options(&universe)
-        },
-    );
-    let opened = host.open("public-fixture");
-    let directory = host.dir.path().to_string_lossy().into_owned();
-    // The last one after its file is gone: the host removed it while the server ran.
-    std::fs::remove_file(host.dir.path().join("membership-fixture-c.tsv")).unwrap();
-    for (reference, needle) in [
-        ("foreign", "line 2 of the membership `foreign`"),
-        ("conflict", "line 2 of the membership `conflict`"),
-        ("malformed", "line 1 of the membership `malformed`"),
-        ("fixture-c", "registered as the membership `fixture-c`"),
-    ] {
-        let (code, message) = host.err(
-            "triager_select",
-            json!({"v": 1, "scope": opened["snapshot"],
-                   "producer": {"kind": "membership", "ref": reference}}),
+    // Refused alike whether the selection's tables are in memory or spooled to disk,
+    // where a conflict is found only when the spool is placed.
+    for tables in [TablePlacement::MemoryWhenAdmitted, TablePlacement::Disk] {
+        let host = Host::new(
+            &entries,
+            HostOptions {
+                profile: l2d_triager::service::DisclosureProfile::PublicDevelopment,
+                tables,
+                ..options(&universe)
+            },
         );
-        assert_eq!(code, "refused", "{reference}: {message}");
-        assert!(message.contains(needle), "{reference}: {message}");
-        for hidden in [directory.as_str(), "membership-", ".tsv", "\\", "/"] {
-            assert!(
-                !message.contains(hidden),
-                "{reference} shows `{hidden}`: {message}"
+        let opened = host.open("public-fixture");
+        let directory = host.dir.path().to_string_lossy().into_owned();
+        // The last one after its file is gone: the host removed it while the server ran.
+        std::fs::remove_file(host.dir.path().join("membership-fixture-c.jsonl")).unwrap();
+        for (reference, needle) in [
+            (
+                "foreign",
+                "line 2 of the membership `foreign` names the record",
+            ),
+            ("conflict", "line 3 of the membership `conflict`"),
+            (
+                "malformed",
+                "line 1 of the membership `malformed` is no membership line",
+            ),
+            (
+                "tab-separated",
+                "line 1 of the membership `tab-separated` is no membership line",
+            ),
+            (
+                "too-long",
+                "line 2 of the membership `too-long` is longer than 128 bytes",
+            ),
+            ("fixture-c", "registered as the membership `fixture-c`"),
+        ] {
+            let (code, message) = host.err(
+                "triager_select",
+                json!({"v": 1, "scope": opened["snapshot"],
+                       "producer": {"kind": "membership", "ref": reference}}),
             );
+            assert_eq!(code, "refused", "{tables:?} {reference}: {message}");
+            assert!(
+                message.contains(needle),
+                "{tables:?} {reference}: {message}"
+            );
+            if reference != "fixture-c" && reference != "foreign" && reference != "conflict" {
+                assert!(message.contains("JSON lines"), "{reference}: {message}");
+            }
+            for hidden in [directory.as_str(), "membership-", ".jsonl", "\\", "/"] {
+                assert!(
+                    !message.contains(hidden),
+                    "{reference} shows `{hidden}`: {message}"
+                );
+            }
+            // No file text is shown either.
+            assert!(!message.contains("maybe"), "{reference}: {message}");
         }
+        // Nothing was committed: the snapshot holds no set.
+        let overview = host.ok(
+            "triager_inspect",
+            json!({"v": 1, "handle": opened["snapshot"], "view": "overview"}),
+        );
+        assert_eq!(overview["activity"]["membership_reads"], 5, "{overview}");
     }
 }
 

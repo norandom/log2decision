@@ -99,13 +99,18 @@ pub(crate) fn tools() -> Value {
          (`ref`) or an archive below a directory the host allowed (`path`), with optional \
          entry patterns. Returns the snapshot handle, both denominators (distinct originals \
          and occurrences), what was skipped with units and reasons, and the capabilities. \
-         A large scan returns a job.",
+         A large scan returns a job. With `receipt` instead of `source`, reopens a saved \
+         candidate view or final work set without its source: a retained snapshot with \
+         every set the receipt retained, their lineage, coverage, ordering and reasons; \
+         nothing is read from the archive, scored or inferred.",
         json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["v", "source"],
+            "required": ["v"],
             "properties": {
                 "v": version(),
+                "receipt": {"type": "string", "pattern": "^rcpt-[0-9a-f]{32}$",
+                            "description": "A receipt `triager_save` returned; exclusive with `source`."},
                 "source": {
                     "type": "object",
                     "additionalProperties": false,
@@ -142,6 +147,14 @@ pub(crate) fn tools() -> Value {
                 "completeness": {"type": "object"},
                 "capabilities": {"type": "object"},
                 "disclosure": {"type": "object"},
+                "receipt": {"type": "string"},
+                "kind": {"enum": ["candidate", "final"]},
+                "set": {"type": "string", "description": "receipt: the reopened saved set."},
+                "sets": {"type": "array", "description": "receipt: every reopened set with the handle it was saved as."},
+                "retained": {"type": "object"},
+                "origin": {"type": "object"},
+                "lineage": {"type": "object"},
+                "recipe": {"type": "object"},
                 "cost": {"type": "object"}
             }),
         ),
@@ -393,27 +406,67 @@ pub(crate) fn tools() -> Value {
             {"type": "object", "additionalProperties": false, "required": ["difference"],
              "properties": {"difference": {"type": "array", "minItems": 2, "maxItems": 2}}},
             {"type": "object", "additionalProperties": false, "required": ["complement"],
-             "properties": {"complement": {"type": "array", "minItems": 1, "maxItems": 1}}}
+             "properties": {"complement": {"type": "array", "minItems": 1, "maxItems": 1}}},
+            {"type": "object", "additionalProperties": false, "required": ["state"],
+             "description": "In where the persisted state of the named set is `is`, out elsewhere: selects what a producer did not evaluate.",
+             "properties": {"state": {
+                 "type": "object", "additionalProperties": false, "required": ["set", "is"],
+                 "properties": {"set": {"type": "string"},
+                                "is": {"enum": ["in", "out", "not_evaluated"]}}}}}
         ]
+    });
+    let budget = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["total", "duplicate_rule", "shortfall", "pools"],
+        "description": "allocate: one review budget over named pools, filled in their order. \
+                        An original takes one slot, in the first pool that reaches it; a pool \
+                        whose population runs short leaves its slots unused. The limits add up \
+                        to `total`.",
+        "properties": {
+            "total": {"type": "integer", "minimum": 1, "maximum": 10_000},
+            "duplicate_rule": {"const": "first_pool_wins"},
+            "shortfall": {"const": "leave_unfilled"},
+            "pools": {
+                "type": "array", "minItems": 1, "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "limit", "from", "order"],
+                    "properties": {
+                        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$"},
+                        "limit": {"type": "integer", "minimum": 1},
+                        "from": {"description": "The pool's population: an expression over `sets`; it may reach beyond the candidate expression."},
+                        "order": {"type": "array", "minItems": 1, "maxItems": 3,
+                                  "description": "Keys `score_desc` (or {\"score_desc\": NAME}), `seeded_hash` (the policy's FNV-1a key with `seed`) and `record_id_ascending`, which ends every order."},
+                        "seed": {"type": "integer", "minimum": 0}
+                    }
+                }
+            }
+        }
     });
     let compose = tool(
         "triager_compose",
-        "Compose a candidate view",
+        "Compose a candidate view or allocate once",
         "Reduce a population by a set expression over named sets of one snapshot. \
          `mode=view` returns an immutable candidate view with its parent and the \
          reduction in both units: parent, in, out, unknown and the retained share. The \
-         parent is `scope`, which defaults to the snapshot.",
+         parent is `scope`, which defaults to the snapshot. `mode=allocate` spends one \
+         review budget once: `expr` is the candidate expression, `budget` names the pools; \
+         it returns a final work set with the pool, slot and reason of every member, the \
+         deferred counts and the audit drawn outside the candidate expression.",
         json!({
             "type": "object",
             "additionalProperties": false,
             "required": ["v", "mode", "snapshot", "sets", "expr"],
             "properties": {
                 "v": version(),
-                "mode": {"const": "view"},
+                "mode": {"enum": ["view", "allocate"]},
                 "snapshot": handle("The snapshot every set belongs to."),
                 "scope": handle("The parent population; defaults to the snapshot."),
                 "sets": sets("Names for the selections and views the expression uses."),
                 "expr": expr,
+                "budget": budget,
                 "idempotency_key": key()
             }
         }),
@@ -421,6 +474,8 @@ pub(crate) fn tools() -> Value {
             &job_statuses,
             json!({
                 "view": {"type": "string"},
+                "set": {"type": "string", "description": "allocate: the final work set."},
+                "kind": {"const": "final"},
                 "snapshot": {"type": "string"},
                 "parent": {"type": "string"},
                 "operation": {"type": "object"},
@@ -430,6 +485,52 @@ pub(crate) fn tools() -> Value {
                 "coverage": {"type": "object"},
                 "complete": {"type": "boolean"},
                 "root": {"type": "object"},
+                "capacity": {"type": "integer"},
+                "selected": {"type": "integer"},
+                "allocation": {"type": "object",
+                               "description": "allocate: the rule, every pool with its limit, selected, unused, eligible and deferred counts, the candidate and the audit outside it."},
+                "cost": {"type": "object"}
+            }),
+        ),
+    );
+    let save = tool(
+        "triager_save",
+        "Save a receipt",
+        "Save a candidate view or a final work set as a durable receipt in the host's \
+         receipt directory, atomically: the source identity, the set and every set it was \
+         made from with their producers, revisions, counts and coverage, every retained \
+         original's record handle, locator, occurrences, states and slot, the allocation \
+         and the recipe that makes it again. No source text and no host path. The \
+         receipt is named by its content; `triager_open` with `receipt` reopens it in \
+         this or another server.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["v", "handle"],
+            "properties": {
+                "v": version(),
+                "handle": handle("A candidate view or a final work set."),
+                "sets": sets("Sets to retain beside it over its originals, such as a C to drill into after reopening."),
+                "parent_receipt": {"type": "string", "pattern": "^rcpt-[0-9a-f]{32}$",
+                                   "description": "The receipt whose recipe this set replays: recorded as lineage."},
+                "idempotency_key": key()
+            }
+        }),
+        output(
+            &job_statuses,
+            json!({
+                "receipt": {"type": "string"},
+                "kind": {"enum": ["candidate", "final"]},
+                "snapshot": {"type": "string"},
+                "set": {"type": "string"},
+                "content_sha256": {"type": "string"},
+                "rows_sha256": {"type": "string"},
+                "retained": {"type": "object"},
+                "recipe": {"type": "object"},
+                "lineage": {"type": "object"},
+                "contains": {"type": "array"},
+                "excludes": {"type": "array"},
+                "reopen": {"type": "object"},
                 "cost": {"type": "object"}
             }),
         ),
@@ -455,15 +556,18 @@ pub(crate) fn tools() -> Value {
                 "projection": {
                     "type": "array", "uniqueItems": true, "minItems": 1,
                     "items": {"enum": ["id", "locator", "occurrences", "membership",
-                                       "explanation", "excerpt"]},
-                    "description": "records: id, locator, occurrences, membership. evidence: \
-                                    those, explanation and excerpt (not projected by default)."
+                                       "allocation", "explanation", "excerpt"]},
+                    "description": "records: id, locator, occurrences, membership, and of a \
+                                    final work set allocation. evidence: id, locator, \
+                                    occurrences, membership, explanation and excerpt (not \
+                                    projected by default)."
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
                           "default": DEFAULT_ROWS},
                 "cursor": {"type": "string", "maxLength": 64,
                            "description": "From `page.next_cursor` of the same request."},
-                "sort": {"const": ["record_id_ascending"]},
+                "sort": {"enum": [["record_id_ascending"], ["allocation"]],
+                         "description": "A final work set is paged by `allocation` (its slots in order) unless record IDs are asked for."},
                 "idempotency_key": key(),
                 "record": {"type": "string", "pattern": "^r-[0-9a-f]{16}$",
                            "description": "evidence: a record handle from the records view."}
@@ -474,7 +578,7 @@ pub(crate) fn tools() -> Value {
             json!({
                 "view": {"type": "string"},
                 "handle": {"type": "string"},
-                "kind": {"enum": ["snapshot", "selection", "view"]},
+                "kind": {"enum": ["snapshot", "selection", "view", "final"]},
                 "snapshot": {"type": "string"},
                 "revision": {"type": "string"},
                 "coverage": {"type": "object"},
@@ -554,7 +658,7 @@ pub(crate) fn tools() -> Value {
             }),
         ),
     );
-    json!([open, select, refine, compose, inspect, job])
+    json!([open, select, refine, compose, inspect, save, job])
 }
 
 #[cfg(test)]

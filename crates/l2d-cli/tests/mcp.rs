@@ -422,7 +422,7 @@ fn an_mcp_client_reduces_an_archive_to_a_minus_b_and_explains_one_row() {
         &["--source", &format!("logs={archive}")],
     );
     let listed = client.request("tools/list", json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
     let opened = client.ok(
         "triager_open",
         json!({"v": 1, "source": {"ref": "logs", "entries": ["*.log"]}}),
@@ -843,15 +843,15 @@ fn an_mcp_client_drills_prepared_sets_on_disk_as_in_memory_without_another_read(
         }
         let outcome = seen.len() % 4;
         assessed[outcome] += 1;
+        let state = ["in", "out", "abstain"][outcome];
         membership.push_str(&format!(
-            "{}\t{}\n",
-            record_id(line as u64 + 1),
-            ["in", "out", "abstain"][outcome]
+            "{}\n",
+            json!({"id": record_id(line as u64 + 1), "state": state})
         ));
     }
-    std::fs::write(scratch.path("c.tsv"), membership).unwrap();
+    std::fs::write(scratch.path("c.jsonl"), membership).unwrap();
     let source = format!("logs={archive}");
-    let registered = format!("c={}", scratch.arg("c.tsv"));
+    let registered = format!("c={}", scratch.arg("c.jsonl"));
 
     let mut outcomes = Vec::new();
     for on_disk in [false, true] {
