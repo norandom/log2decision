@@ -47,7 +47,9 @@ use l2d_store::Store;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use index::{ID_BYTES, Index, Spool, Work};
+use index::{ID_BYTES, Index, KEY_BYTES, Spool, Work};
+pub(crate) use index::{read_at, write_at};
+use l2d_core::zip_input::{DiskDedup, SelectedBytes};
 
 pub use join::{JOIN_FIXED_BYTES, JoinError, JoinReport, NativeKey};
 pub use manifest::{ManifestScorer, ScoreManifest};
@@ -248,10 +250,51 @@ pub struct Scope {
     binding: ScopeBinding,
     kind: SourceKind,
     completeness: ScopeCompleteness,
-    dedup_on_disk: bool,
+    dedup: Option<DiskDedup>,
     archive_readers: Option<usize>,
+    selected: Option<SelectedBytes>,
     retained: u64,
     index: Index,
+}
+
+/// A run of rows of a scope's relation, read at once: the positions and occurrence
+/// counts of up to [`RowBlock::ROWS`] originals in the order of their record IDs.
+pub(crate) struct RowBlock {
+    keys: Vec<u8>,
+    counts: Vec<u8>,
+    first: u64,
+    rows: usize,
+}
+
+impl RowBlock {
+    pub(crate) const ROWS: u64 = 1_024;
+    /// What a block takes in memory.
+    pub(crate) const BYTES: u64 = Self::ROWS * (KEY_BYTES + 4);
+
+    pub(crate) fn new() -> Self {
+        Self {
+            keys: vec![0u8; (Self::ROWS * KEY_BYTES) as usize],
+            counts: vec![0u8; (Self::ROWS * 4) as usize],
+            first: 0,
+            rows: 0,
+        }
+    }
+
+    /// The record ID of `row`, which the block holds with its positions.
+    pub(crate) fn position(&self, row: u64) -> u64 {
+        let at = (row - self.first) as usize * KEY_BYTES as usize;
+        debug_assert!(row - self.first < self.rows as u64);
+        u64::from_le_bytes(self.keys[at..at + 8].try_into().expect("8 bytes"))
+    }
+
+    /// The occurrences of `row`, which the block holds.
+    pub(crate) fn occurrences(&self, row: u64) -> u64 {
+        let at = (row - self.first) as usize * 4;
+        debug_assert!(row - self.first < self.rows as u64);
+        u64::from(u32::from_le_bytes(
+            self.counts[at..at + 4].try_into().expect("4 bytes"),
+        ))
+    }
 }
 
 impl std::fmt::Debug for Scope {
@@ -515,8 +558,9 @@ impl Scope {
             binding,
             kind,
             completeness,
-            dedup_on_disk: false,
+            dedup: None,
             archive_readers: None,
+            selected: None,
             retained,
             index,
         })
@@ -643,6 +687,7 @@ impl Scope {
                 free_bytes: settings.free_disk_bytes,
             });
             let id_source = input.path().to_string_lossy().into_owned();
+            let selected = input.selected_bytes();
             let mut rows = 0u64;
             for batch in input.batches(budget) {
                 let batch = batch?;
@@ -655,7 +700,7 @@ impl Scope {
                     spool.count(count)?;
                 }
             }
-            let dedup_on_disk = input.disk_dedup().is_some();
+            let dedup = input.disk_dedup();
             let readers = input.entries_at_once();
             let summary = input.finish();
             // The reader's own count of the summary ended with the reader, and the
@@ -695,8 +740,9 @@ impl Scope {
                 completeness,
                 index,
             )?;
-            scope.dedup_on_disk = dedup_on_disk;
+            scope.dedup = dedup;
             scope.archive_readers = Some(readers);
+            scope.selected = Some(selected);
             Ok((scope, summary))
         })();
         budget.hold(before);
@@ -803,7 +849,19 @@ impl Scope {
     /// Whether the archive's deduplication went on on disk while the scope was opened.
     /// Part of what the open cost, not of what the scope binds.
     pub fn dedup_on_disk(&self) -> bool {
-        self.dedup_on_disk
+        self.dedup.is_some()
+    }
+
+    /// What the archive's deduplication wrote to disk while the scope was opened;
+    /// `None` when it stayed in memory. Part of what the open cost.
+    pub fn disk_dedup(&self) -> Option<DiskDedup> {
+        self.dedup
+    }
+
+    /// The entries of the archive the scope selected with their bytes, packed and
+    /// unpacked; `None` for a file or a store. Part of what the open cost.
+    pub fn selected_bytes(&self) -> Option<SelectedBytes> {
+        self.selected
     }
 
     /// How many entries of the archive were read at the same time while the scope was
@@ -824,6 +882,19 @@ impl Scope {
         self.index.disk_bytes()
     }
 
+    /// The most the relation took in the work directory while the scope was opened,
+    /// the archive's own deduplication aside. Part of what the open cost.
+    pub fn disk_peak_bytes(&self) -> u64 {
+        self.index.disk_peak()
+    }
+
+    /// Whether the source handed its originals out in another order than their
+    /// record IDs, so that the relation was sorted on disk. Part of what the open
+    /// cost, not of what the scope binds.
+    pub fn index_sorted(&self) -> bool {
+        self.index.sorted()
+    }
+
     /// The original a record ID of this scope names; `None` when it names none.
     pub fn original(&self, id: OriginalId) -> Result<Option<Original>, L2dError> {
         match self.index.find_position(id.0)? {
@@ -834,11 +905,64 @@ impl Scope {
 
     /// The row of the relation that holds the original first read at `position`.
     ///
-    /// Rows are in the order the source handed its originals out. That order is fixed
-    /// for one open scope and differs between batch sizes and spill, so a row is never
-    /// part of a result: results name originals by their record ID.
+    /// Rows are in the order of the record IDs, whatever order the source handed its
+    /// originals out in: the lowest record ID is row 0. A row is still no part of a
+    /// result: results name originals by their record ID.
     pub(crate) fn row_of(&self, position: u64) -> Result<Option<u64>, L2dError> {
         self.index.find_position(position)
+    }
+
+    /// [`Scope::row_of`] for many lookups in a row, as a read of a source or of a
+    /// membership file makes them: `near` keeps the run of rows around the last row
+    /// found, and a position within that run is found there without a read. The rows
+    /// are in the order of their positions, so a source that hands its originals out
+    /// in that order reads the relation once, a run at a time, instead of once per
+    /// original; that matters when the relation is on disk.
+    pub(crate) fn row_near(
+        &self,
+        position: u64,
+        near: &mut RowBlock,
+    ) -> Result<Option<u64>, L2dError> {
+        if near.rows > 0 {
+            let last = near.first + near.rows as u64 - 1;
+            if (near.position(near.first)..=near.position(last)).contains(&position) {
+                // The run holds every row between its ends: a position that is not
+                // in it names no original.
+                let (mut low, mut high) = (near.first, last + 1);
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    match near.position(middle).cmp(&position) {
+                        std::cmp::Ordering::Equal => return Ok(Some(middle)),
+                        std::cmp::Ordering::Less => low = middle + 1,
+                        std::cmp::Ordering::Greater => high = middle,
+                    }
+                }
+                return Ok(None);
+            }
+        }
+        let found = self.row_of(position)?;
+        if let Some(row) = found {
+            self.rows(row - row % RowBlock::ROWS, true, near)?;
+        }
+        Ok(found)
+    }
+
+    /// Reads the rows from `first` on into `block`, at most [`RowBlock::ROWS`] and to
+    /// the end of the relation: their occurrence counts, and with `positions` their
+    /// record IDs. Returns how many rows the block holds.
+    pub(crate) fn rows(
+        &self,
+        first: u64,
+        positions: bool,
+        block: &mut RowBlock,
+    ) -> Result<u64, L2dError> {
+        let rows = RowBlock::ROWS.min(self.index.rows().saturating_sub(first)) as usize;
+        let keys = positions.then(|| &mut block.keys[..rows * KEY_BYTES as usize]);
+        self.index
+            .read_rows(first, keys, &mut block.counts[..rows * 4])?;
+        block.first = first;
+        block.rows = rows;
+        Ok(rows as u64)
     }
 
     /// The original in `row` of the relation; see [`Scope::row_of`].

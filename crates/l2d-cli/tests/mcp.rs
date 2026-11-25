@@ -820,3 +820,149 @@ impl TapScope for Value {
         self
     }
 }
+
+/// Triager task 1.3 through the real server, on the small archive: the reduction
+/// with its relation, membership and scores kept on disk (`--tables-on-disk`,
+/// deduplication forced to disk, another batch size) is the reduction with them in
+/// memory; a registered membership stands in for C with its unknown states; and
+/// thirty warm interactions on the prepared sets read no source and score nothing.
+/// `tools/triager-scale` runs the same checks on the multi-million fixture.
+#[test]
+fn an_mcp_client_drills_prepared_sets_on_disk_as_in_memory_without_another_read() {
+    let scratch = fitted("drill");
+    let entries = web_entries();
+    let archive = scratch.archive("logs.zip", &entries);
+    // The stand-in for C: of the originals of the first entry, by first occurrence,
+    // a quarter each is in, out, abstained and not assessed.
+    let mut seen = std::collections::HashSet::new();
+    let mut membership = String::new();
+    let mut assessed = [0u64; 3];
+    for (line, text) in entries[0].1.iter().enumerate() {
+        if !seen.insert(text.as_str()) || seen.len() % 4 == 3 {
+            continue;
+        }
+        let outcome = seen.len() % 4;
+        assessed[outcome] += 1;
+        membership.push_str(&format!(
+            "{}\t{}\n",
+            record_id(line as u64 + 1),
+            ["in", "out", "abstain"][outcome]
+        ));
+    }
+    std::fs::write(scratch.path("c.tsv"), membership).unwrap();
+    let source = format!("logs={archive}");
+    let registered = format!("c={}", scratch.arg("c.tsv"));
+
+    let mut outcomes = Vec::new();
+    for on_disk in [false, true] {
+        let mut args = vec![
+            "--source",
+            source.as_str(),
+            "--membership",
+            registered.as_str(),
+        ];
+        let mut global = vec!["--memory-limit", "512MB"];
+        if on_disk {
+            args.extend(["--tables-on-disk", "--dedup-set-texts", "20"]);
+            global.extend(["--batch-rows", "64"]);
+        }
+        let mut client = Client::spawn(&scratch, &global, &args);
+        let opened = client.ok(
+            "triager_open",
+            json!({"v": 1, "source": {"ref": "logs", "entries": ["*.log"]}}),
+        );
+        let snapshot = opened["snapshot"].as_str().unwrap().to_string();
+        assert_eq!(opened["cost"]["index_on_disk"], on_disk);
+        assert_eq!(opened["cost"]["dedup_on_disk"], on_disk);
+        assert!(opened["cost"]["bytes_unpacked"].as_u64().unwrap() > 0);
+        let a = client.ok(
+            "triager_select",
+            json!({"v": 1, "scope": snapshot, "producer": {
+                "kind": "score", "model": "web", "top_k": 25, "ties": "record_id_ascending"}}),
+        );
+        let b = client.ok(
+            "triager_select",
+            json!({"v": 1, "scope": snapshot,
+                   "producer": {"kind": "filter", "syntax": "glob", "query": "*login*"}}),
+        );
+        let c = client.ok(
+            "triager_select",
+            json!({"v": 1, "scope": snapshot, "producer": {"kind": "membership", "ref": "c"}}),
+        );
+        assert_eq!(c["counts"]["in"], assessed[0]);
+        assert_eq!(c["counts"]["out"], assessed[1]);
+        assert_eq!(c["coverage"]["reasons"][0]["reason"], "abstained");
+        assert_eq!(
+            c["coverage"]["reasons"][0]["distinct_originals"],
+            assessed[2]
+        );
+        assert_eq!(
+            c["coverage"]["reasons"][1]["reason"],
+            "outside_producer_coverage"
+        );
+        let sets = json!({"a": a["set"], "b": b["set"], "c": c["set"]});
+        let d = client.ok(
+            "triager_compose",
+            json!({"v": 1, "mode": "view", "snapshot": snapshot, "sets": sets,
+                   "expr": {"difference": ["a", "b"]}}),
+        );
+        for made in [&a, &b, &c, &d] {
+            assert_eq!(made["cost"]["tables_on_disk"], on_disk, "{made}");
+            assert!(made["cost"]["server_process_peak_bytes"].is_u64() || !cfg!(windows));
+        }
+        assert_eq!(a["cost"]["dedup_on_disk"], on_disk);
+        assert_eq!(a["cost"]["spilled_bytes"].as_u64().unwrap() > 0, on_disk);
+
+        // Warm: the overlap with its unknown combinations, pages, a row, another
+        // rule of the prepared scorer. Nothing of it reads the source.
+        let before = client.activity(&snapshot);
+        let d_view = d["view"].as_str().unwrap().to_string();
+        let mut interactions = 0;
+        let mut regions = Value::Null;
+        let mut rows = Vec::new();
+        for round in 0..6 {
+            regions = client.ok(
+                "triager_inspect",
+                json!({"v": 1, "handle": snapshot, "view": "regions", "sets": sets}),
+            );
+            assert_eq!(regions["regions"].as_array().unwrap().len(), 8);
+            assert!(!regions["unknown_regions"].as_array().unwrap().is_empty());
+            rows = client.records(&d_view, sets.clone());
+            let page = client.ok(
+                "triager_inspect",
+                json!({"v": 1, "handle": c["set"], "view": "records", "limit": 3 + round}),
+            );
+            assert_eq!(page["cost"]["archive_scans"], 0);
+            let evidence = client.ok(
+                "triager_inspect",
+                json!({"v": 1, "handle": d_view, "view": "evidence", "record": rows[0]["id"],
+                       "sets": sets}),
+            );
+            assert!(evidence["explanation"][1]["rank"].is_u64(), "{evidence}");
+            let derived = client.ok(
+                "triager_select",
+                json!({"v": 1, "scope": snapshot, "producer": {
+                    "kind": "score", "model": "web", "top_k": 10 + round,
+                    "ties": "record_id_ascending"}}),
+            );
+            assert_eq!(derived["cost"]["archive_scans"], 0, "{derived}");
+            assert_eq!(derived["cost"]["rows_scored"], 0, "{derived}");
+            assert_eq!(derived["cost"]["reused"]["set"], a["set"]);
+            interactions += 5;
+        }
+        assert!(interactions >= 30);
+        let after = client.activity(&snapshot);
+        for counter in ["archive_scans", "bytes_unpacked", "rows_scored"] {
+            assert_eq!(after[counter], before[counter], "{counter}");
+        }
+        outcomes.push(json!({
+            "counts": opened["counts"],
+            "revisions": [a["revision"], b["revision"], c["revision"], d["revision"]],
+            "counts_of": [a["counts"], b["counts"], c["counts"], d["counts"]],
+            "regions": regions["regions"], "unknown_regions": regions["unknown_regions"],
+            "rows": rows,
+        }));
+        client.close();
+    }
+    assert_eq!(outcomes[1], outcomes[0], "on disk and in memory");
+}

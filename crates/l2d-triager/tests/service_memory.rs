@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use l2d_core::resource::{BusyChoice, ResourceGuard};
 use l2d_triager::mcp::{self, MAX_REQUEST_BYTES, MAX_REQUEST_VALUES};
-use l2d_triager::service::ADAPTER_FIXED_BYTES;
+use l2d_triager::scope::IndexPlacement;
+use l2d_triager::service::{ADAPTER_FIXED_BYTES, TablePlacement};
 use serde_json::{Value, json};
 use support::{BASELINE, HostOptions, MIB, Orig, oracle, start, write_archive};
 
@@ -78,14 +79,16 @@ static ALLOCATOR: Counting = Counting;
 /// The measurements share the process's counters, so they run one after the other.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-const ORIGINALS: usize = 60_000;
+const ORIGINALS: usize = 90_000;
 /// What the job table of one measured run may keep of the adapter's share beside the
 /// results, which the artifacts hold a second time for it: the records of at most
-/// 23 jobs. The membership tables of a complete run take 19 x 15,000 bytes, so a
-/// table that is not held does not hide in this.
+/// 27 jobs. One membership table of a run takes 22,500 bytes, more than this: a
+/// single table that is in memory and not held does not hide in it (the open test
+/// gap of task 1.2, whose tables took 15,000 bytes each).
 const JOB_TABLE_BYTES: u64 = 16 * 1024;
+const _: () = assert!(ORIGINALS as u64 / 4 > JOB_TABLE_BYTES);
 /// The steps of a run that nothing refuses.
-const STEPS: usize = 23;
+const STEPS: usize = 27;
 
 fn entries() -> Vec<(String, Vec<String>)> {
     (0..3)
@@ -117,18 +120,40 @@ fn refused(value: &Value) -> bool {
     value["status"] == "error" && value["error"]["code"] == "refused"
 }
 
-fn run(
-    dir: &std::path::Path,
+/// How one run of the operations is set up.
+#[derive(Clone, Copy)]
+struct Setup<'a> {
     usable: u64,
     batch_rows: Option<u64>,
     dedup_set_texts: Option<u64>,
-    first: &Orig,
+    /// Where the sets keep their membership and scores, and the snapshot its relation.
+    tables: TablePlacement,
+    first: &'a Orig,
+    /// The lines of the membership file `fixture`.
+    fixture: &'a str,
     measured: bool,
-) -> Outcome {
+}
+
+fn run(dir: &std::path::Path, setup: &Setup<'_>) -> Outcome {
+    let Setup {
+        usable,
+        batch_rows,
+        dedup_set_texts,
+        tables,
+        first,
+        fixture,
+        measured,
+    } = *setup;
     let options = HostOptions {
         usable,
         batch_rows,
         dedup_set_texts,
+        tables,
+        index: match tables {
+            TablePlacement::Disk => IndexPlacement::Disk,
+            TablePlacement::MemoryWhenAdmitted => IndexPlacement::MemoryWhenAdmitted,
+        },
+        memberships: vec![("fixture".into(), fixture.to_string())],
         ..HostOptions::default()
     };
     let _ = std::fs::remove_dir_all(dir.join("work"));
@@ -150,15 +175,22 @@ fn run(
     let mut outcome = Outcome::new();
     // Everything a call returns stays alive until the end of the measurement.
     let mut kept: Vec<String> = Vec::new();
+    let mut on_disk = 0;
     let mut call = |step: &str, tool: &str, args: Value, field: &str| -> Option<Value> {
         let reply = service.call(tool, &args);
         let value: Value = serde_json::from_str(&reply.json).unwrap();
         kept.push(reply.json);
         if refused(&value) {
+            let reason = value["error"]["message"].as_str().unwrap_or_default();
+            let shown: String = reason.chars().take(260).collect();
+            eprintln!("  {step} refused under {} MiB: {shown}", usable / MIB);
             outcome.push((step.into(), "refused".into()));
             return None;
         }
         assert_eq!(value["status"], "ready", "{step}: {value}");
+        if value["cost"]["tables_on_disk"] == true {
+            on_disk += 1;
+        }
         outcome.push((step.into(), value[field].to_string()));
         Some(value)
     };
@@ -214,8 +246,40 @@ fn run(
                    "projection": ["id", "membership", "explanation", "excerpt"]}),
             "excerpt",
         )?;
+        // A registered membership, joined by key; another rule from the scores of the
+        // first; the filter and the membership again inside the view, from the sets
+        // over the whole snapshot.
+        let fixture = call(
+            "membership",
+            "triager_select",
+            json!({"v": 1, "scope": snapshot, "producer": {"kind": "membership", "ref": "fixture"}}),
+            "revision",
+        )?;
+        let derived = call(
+            "threshold",
+            "triager_select",
+            json!({"v": 1, "scope": snapshot,
+                   "producer": {"kind": "score", "model": "sum", "threshold": 0.9}}),
+            "revision",
+        )?;
+        assert_eq!(derived["cost"]["archive_scans"], 0, "{derived}");
+        let within = call(
+            "filter-in-view",
+            "triager_select",
+            json!({"v": 1, "scope": view["view"], "producer": {
+                "kind": "filter", "syntax": "regex", "query": r"login request \d+7 "}}),
+            "revision",
+        )?;
+        assert_eq!(within["cost"]["archive_scans"], 0, "{within}");
+        call(
+            "regions-3",
+            "triager_inspect",
+            json!({"v": 1, "handle": snapshot, "view": "regions",
+                   "sets": {"a": a["set"], "b": b["set"], "c": fixture["set"]}}),
+            "regions",
+        )?;
         // More selections and views, so that what the membership tables take is far
-        // more than the tolerance of the check below: nineteen tables in all.
+        // more than the tolerance of the check below: twenty-two tables in all.
         for index in 1..=4 {
             let more = call(
                 &format!("filter-{index}"),
@@ -246,17 +310,35 @@ fn run(
     let held = service.held_bytes();
     let growth = PEAK.load(Ordering::Relaxed).saturating_sub(before) as u64;
     let admitted = usage.report().counted_peak_bytes.saturating_sub(BASELINE);
+    // With the tables on disk every set that was made says so, and nothing of a
+    // table is in memory.
+    let made = outcome
+        .iter()
+        .filter(|(step, result)| {
+            result != "refused"
+                && !["open", "regions", "regions-3", "records", "evidence"].contains(&step.as_str())
+        })
+        .count();
+    if tables == TablePlacement::Disk {
+        assert_eq!(on_disk, made, "{outcome:?}");
+    }
     eprintln!(
-        "service usable {:>3} MiB batch {:>5} set {:>5}: heap {:>6.2} MiB = {:.2} x usable, {:.2} x admitted ({:>6.2} MiB); retained {:.2} of {:.2} MiB held; {:.1?}; {}",
+        "service usable {:>3} MiB batch {:>5} set {:>5} tables {}: {on_disk} of {made} sets on disk; heap {:>6.2} MiB = {:.2} x usable, {:.2} x admitted ({:>6.2} MiB); retained {:.2} of {:.2} MiB held, {} bytes beyond the artifacts; {:.1?}; {}",
         usable / MIB,
         batch_rows.map_or("auto".into(), |rows| rows.to_string()),
         dedup_set_texts.map_or("auto".into(), |texts| texts.to_string()),
+        if tables == TablePlacement::Disk {
+            "disk"
+        } else {
+            "auto"
+        },
         growth as f64 / MIB as f64,
         growth as f64 / usable as f64,
         growth as f64 / admitted.max(1) as f64,
         admitted as f64 / MIB as f64,
         retained as f64 / MIB as f64,
         held as f64 / MIB as f64,
+        retained as i64 - (held - ADAPTER_FIXED_BYTES) as i64,
         started.elapsed(),
         outcome
             .iter()
@@ -302,18 +384,38 @@ fn warm_up() {
     let entries = support::auth_entries();
     write_archive(&dir.path().join("private.zip"), &entries);
     write_archive(&dir.path().join("public.zip"), &entries);
-    let first = oracle(&entries, ".log")[0].clone();
-    for (batch_rows, dedup_set_texts) in [(None, None), (Some(64), Some(20))] {
+    let universe = oracle(&entries, ".log");
+    let fixture = fixture(&universe);
+    for (batch_rows, dedup_set_texts, tables) in [
+        (None, None, TablePlacement::MemoryWhenAdmitted),
+        (Some(64), Some(20), TablePlacement::MemoryWhenAdmitted),
+        (Some(64), Some(20), TablePlacement::Disk),
+    ] {
         let outcome = run(
             dir.path(),
-            128 * MIB,
-            batch_rows,
-            dedup_set_texts,
-            &first,
-            false,
+            &Setup {
+                usable: 128 * MIB,
+                batch_rows,
+                dedup_set_texts,
+                tables,
+                first: &universe[0],
+                fixture: &fixture,
+                measured: false,
+            },
         );
         assert!(outcome.iter().all(|(_, result)| result != "refused"));
     }
+}
+
+/// A membership file over `universe`: every fourth original is assessed, in the
+/// reverse order of the record IDs, a third of them in, out and abstained each.
+fn fixture(universe: &[Orig]) -> String {
+    let mut lines = String::new();
+    for (index, original) in universe.iter().enumerate().rev().step_by(4) {
+        let state = ["in", "out", "abstain"][index % 3];
+        lines.push_str(&format!("{}\t{state}\n", original.id()));
+    }
+    lines
 }
 
 #[test]
@@ -326,22 +428,38 @@ fn the_operations_stay_within_the_limit_and_the_admitted_peak() {
     let universe = oracle(&entries, ".log");
     assert_eq!(universe.len(), ORIGINALS);
     let first = universe[ORIGINALS / 2].clone();
+    let fixture = fixture(&universe);
     drop(universe);
     drop(entries);
     warm_up();
 
     let mut complete: Option<Outcome> = None;
     let mut completed = 0;
+    let mut completed_on_disk = 0;
     let mut refusals = 0;
-    for usable in [10 * MIB, 16 * MIB, 24 * MIB, 40 * MIB, 128 * MIB] {
-        for (batch_rows, dedup_set_texts) in [(None, None), (Some(1_024), Some(4_000))] {
+    let (auto, disk) = (TablePlacement::MemoryWhenAdmitted, TablePlacement::Disk);
+    for (usable, placements) in [
+        (10 * MIB, &[auto, disk][..]),
+        (16 * MIB, &[auto, disk]),
+        (24 * MIB, &[auto]),
+        (40 * MIB, &[auto, disk]),
+        (128 * MIB, &[auto]),
+    ] {
+        for (batch_rows, dedup_set_texts, tables) in placements
+            .iter()
+            .flat_map(|tables| [(None, None, *tables), (Some(1_024), Some(4_000), *tables)])
+        {
             let outcome = run(
                 dir.path(),
-                usable,
-                batch_rows,
-                dedup_set_texts,
-                &first,
-                true,
+                &Setup {
+                    usable,
+                    batch_rows,
+                    dedup_set_texts,
+                    tables,
+                    first: &first,
+                    fixture: &fixture,
+                    measured: true,
+                },
             );
             // A step that completed gave what it gives at every limit.
             if let Some(reference) = &complete {
@@ -354,15 +472,197 @@ fn the_operations_stay_within_the_limit_and_the_admitted_peak() {
             }
             if outcome.iter().all(|(_, result)| result != "refused") && outcome.len() == STEPS {
                 completed += 1;
+                completed_on_disk += usize::from(tables == disk);
                 complete.get_or_insert(outcome);
             } else {
                 refusals += 1;
             }
         }
     }
-    // The ladder shows both: limits that are refused and limits that complete.
+    // The ladder shows both: limits that are refused and limits that complete, with
+    // the tables in memory and with the tables on disk.
     assert!(completed >= 2, "{completed} runs completed");
+    assert!(
+        completed_on_disk >= 2,
+        "{completed_on_disk} runs completed with the tables on disk"
+    );
     assert!(refusals >= 1, "no limit of the ladder was refused");
+}
+
+/// What one selection under one limit gave, with the heap it took.
+struct Attempt {
+    selected: Value,
+    /// The peak of the heap above its level before the service started.
+    run_peak: u64,
+    /// The peak of the heap during the selection above its level before it.
+    select_peak: u64,
+    /// The highest figure the budget admitted, the share of the process aside.
+    admitted: u64,
+    scored_by_the_server: u64,
+}
+
+/// Opens the archive under `usable` bytes and selects the top `top_k` of the test
+/// scorer; `None` when the open or the selection is refused.
+fn select_under(
+    dir: &std::path::Path,
+    usable: u64,
+    tables: TablePlacement,
+    top_k: usize,
+) -> Option<Attempt> {
+    // Small batches and deduplication on disk, so that the read takes little heap of
+    // its own. What it keeps per original (3.7 MB here) is still about one list of
+    // candidates: a second list made for an instant between the two reads would not
+    // be the peak of the selection, and this test would not see it. That the
+    // candidates are emptied without a second list is measured where it happens, in
+    // `candidates_are_emptied_and_used_again_without_a_second_list` (`ops.rs`).
+    let options = HostOptions {
+        usable,
+        tables,
+        batch_rows: Some(1_024),
+        dedup_set_texts: Some(2_000),
+        ..HostOptions::default()
+    };
+    let _ = std::fs::remove_dir_all(dir.join("work"));
+    let before = CURRENT.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let service = start(dir, "memory", &options).ok()?;
+    let call = |tool: &str, args: Value| -> Option<Value> {
+        let value: Value = serde_json::from_str(&service.call(tool, &args).json).unwrap();
+        if refused(&value) {
+            return None;
+        }
+        assert_eq!(value["status"], "ready", "{value}");
+        Some(value)
+    };
+    let opened = call(
+        "triager_open",
+        json!({"v": 1, "source": {"ref": "private"}}),
+    )?;
+    let open_peak = PEAK.load(Ordering::Relaxed).saturating_sub(before) as u64;
+    let level = CURRENT.load(Ordering::Relaxed);
+    PEAK.store(level, Ordering::Relaxed);
+    let selected = call(
+        "triager_select",
+        json!({"v": 1, "scope": opened["snapshot"], "producer": {
+            "kind": "score", "model": "sum", "top_k": top_k, "ties": "record_id_ascending"}}),
+    )?;
+    let peak = PEAK.load(Ordering::Relaxed);
+    let overview = call(
+        "triager_inspect",
+        json!({"v": 1, "handle": opened["snapshot"], "view": "overview"}),
+    )?;
+    Some(Attempt {
+        selected,
+        run_peak: open_peak.max(peak.saturating_sub(before) as u64),
+        select_peak: peak.saturating_sub(level) as u64,
+        admitted: service
+            .usage()
+            .report()
+            .counted_peak_bytes
+            .saturating_sub(BASELINE),
+        scored_by_the_server: overview["activity"]["rows_scored"].as_u64().unwrap(),
+    })
+}
+
+/// Requirement 6.2 by admission, in the default suite and with the heap measured
+/// (review round 1 of task 1.3): under the lowest memory limit at which a selection
+/// completes, the read of the source is refused with the tables in memory, and the
+/// selection is placed on disk and read again. The top-k is every original, so the
+/// kept candidates are the largest thing the selection holds: they are charged once,
+/// and the selection that was read again takes no more heap than one that the host
+/// placed on disk from the start.
+///
+/// The limit is found by bisection between 12 MiB, which refuses, and 48 MiB, which
+/// admits the tables in memory, to 64 KiB: about ten services over an archive of
+/// 150,000 originals. The tables take 637,500 bytes in memory and 327,680 on disk, so
+/// the limits at which only the disk form completes span more than four such steps.
+#[test]
+fn a_selection_the_read_refuses_in_memory_is_read_again_onto_disk_within_its_share() {
+    let _one = ONE_AT_A_TIME.lock().unwrap();
+    const ORIGINALS: usize = 150_000;
+    let dir = tempfile::tempdir().unwrap();
+    let entries: Vec<(String, Vec<String>)> = (0..3)
+        .map(|entry| {
+            let lines = (0..ORIGINALS / 3)
+                .map(|line| format!("host-{entry} request {line} took {} ms", line * 7 % 1000))
+                .collect();
+            (format!("logs/host-{entry}.log"), lines)
+        })
+        .collect();
+    write_archive(&dir.path().join("private.zip"), &entries);
+    write_archive(&dir.path().join("public.zip"), &entries[..1]);
+    drop(entries);
+    warm_up();
+    let auto = TablePlacement::MemoryWhenAdmitted;
+    let dir = dir.path();
+
+    let (mut refused_at, mut completes_at) = (12 * MIB, 48 * MIB);
+    assert!(select_under(dir, refused_at, auto, ORIGINALS).is_none());
+    let roomy = select_under(dir, completes_at, auto, ORIGINALS).expect("48 MiB complete");
+    assert_eq!(roomy.selected["cost"]["tables_on_disk"], false);
+    assert_eq!(roomy.selected["counts"]["in"], ORIGINALS as u64);
+    let mut lowest = None;
+    while completes_at - refused_at > 64 * 1024 {
+        let middle = refused_at + (completes_at - refused_at) / 2;
+        match select_under(dir, middle, auto, ORIGINALS) {
+            Some(attempt) => {
+                completes_at = middle;
+                lowest = Some(attempt);
+            }
+            None => refused_at = middle,
+        }
+    }
+    let lowest = lowest.expect("a limit below 48 MiB completes");
+    let cost = &lowest.selected["cost"];
+    eprintln!(
+        "the lowest limit that completes leaves {completes_at} bytes: tables on disk {}, read \
+         again {}, archive scans {}, rows scored {}; heap {} of {} admitted, {} during the \
+         selection",
+        cost["tables_on_disk"],
+        cost["read_again_for_disk"],
+        cost["archive_scans"],
+        cost["rows_scored"],
+        lowest.run_peak,
+        lowest.admitted,
+        lowest.select_peak
+    );
+    // On disk, by admission: no option placed the tables there.
+    assert_eq!(cost["tables_on_disk"], true);
+    assert_eq!(cost["read_again_for_disk"], true);
+    assert_eq!(cost["archive_scans"], 2);
+    assert_eq!(lowest.selected["revision"], roomy.selected["revision"]);
+    assert_eq!(lowest.selected["counts"], roomy.selected["counts"]);
+    // The cost counts both reads, as the server's work counters do.
+    assert_eq!(cost["rows_scored"], lowest.scored_by_the_server);
+    assert!(cost["rows_scored"].as_u64().unwrap() >= ORIGINALS as u64);
+    assert!(
+        lowest.run_peak <= completes_at && lowest.run_peak <= lowest.admitted,
+        "the heap grew by {} bytes; the limit leaves {completes_at} and the budget admitted {}",
+        lowest.run_peak,
+        lowest.admitted
+    );
+    // The same limit with the tables placed on disk from the start: at its peak the
+    // selection that was read again holds what that one holds, and nothing of the
+    // first read beside it (the tables it had in memory are 637,500 bytes).
+    let placed = select_under(dir, completes_at, TablePlacement::Disk, ORIGINALS)
+        .expect("the limit completes with the tables on disk");
+    assert_eq!(placed.selected["cost"]["read_again_for_disk"], false);
+    assert_eq!(placed.selected["revision"], roomy.selected["revision"]);
+    eprintln!(
+        "placed on disk from the start: {} bytes during the selection",
+        placed.select_peak
+    );
+    assert!(
+        lowest.select_peak <= placed.select_peak + 512 * 1024,
+        "read again, the selection took {} bytes of heap, and {} when it was placed on disk \
+         from the start",
+        lowest.select_peak,
+        placed.select_peak
+    );
+    // Two mebibytes above, the tables are admitted in memory beside the read.
+    let above = select_under(dir, completes_at + 2 * MIB, auto, ORIGINALS).expect("above");
+    assert_eq!(above.selected["cost"]["tables_on_disk"], false);
+    assert_eq!(above.selected["revision"], roomy.selected["revision"]);
 }
 
 /// Yields one line of `length` bytes and then `tail`, without holding either.
@@ -588,6 +888,22 @@ fn a_full_job_table_and_the_densest_requests_stay_within_the_adapters_share() {
         "arguments": {"v": 1, "handle": snapshot, "view": "records", "limit": 100,
                       "sets": {"s": set["set"]}}}});
     messages.extend_from_slice(format!("{largest_page}\n").as_bytes());
+    // The reads that go through the most blocks of committed tables: the regions of
+    // three sets, and the evidence of a record with its rank among every score.
+    let scored = done(call(
+        "triager_select",
+        json!({"v": 1, "scope": snapshot, "producer": {
+            "kind": "score", "model": "sum", "top_k": 5, "ties": "record_id_ascending"}}),
+    ));
+    let regions = json!({"jsonrpc": "2.0", "id": 102, "method": "tools/call", "params": {
+        "name": "triager_inspect",
+        "arguments": {"v": 1, "handle": snapshot, "view": "regions",
+                      "sets": {"s": set["set"], "t": scored["set"], "u": sets["a"]}}}});
+    let ranked = json!({"jsonrpc": "2.0", "id": 103, "method": "tools/call", "params": {
+        "name": "triager_inspect",
+        "arguments": {"v": 1, "handle": snapshot, "view": "evidence", "record": record,
+                      "sets": {"t": scored["set"]}}}});
+    messages.extend_from_slice(format!("{regions}\n{ranked}\n").as_bytes());
     let mut output: Vec<u8> = Vec::with_capacity(MIB as usize);
     let mut recipe_output: Vec<u8> = Vec::with_capacity(MIB as usize);
     let queries: Vec<Value> = (0..10)
@@ -702,7 +1018,7 @@ fn a_full_job_table_and_the_densest_requests_stay_within_the_adapters_share() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(replies.len(), fillers.len() + 3);
+    assert_eq!(replies.len(), fillers.len() + 5);
     for (reply, (shape, _)) in replies.iter().zip(&fillers) {
         assert_eq!(
             reply["result"]["structuredContent"]["error"]["code"], "invalid_arguments",
@@ -724,7 +1040,18 @@ fn a_full_job_table_and_the_densest_requests_stay_within_the_adapters_share() {
             .is_empty()
     );
     assert_eq!(
-        replies[fillers.len() + 2]["result"]["structuredContent"]["status"],
+        replies[fillers.len() + 2]["result"]["structuredContent"]["regions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    assert!(
+        replies[fillers.len() + 3]["result"]["structuredContent"]["explanation"][0]["rank"]
+            .is_u64()
+    );
+    assert_eq!(
+        replies[fillers.len() + 4]["result"]["structuredContent"]["status"],
         "completed"
     );
     assert_eq!(

@@ -1,0 +1,60 @@
+{
+  "fixture": "triager scale gate, task 1.3",
+  "scale": "full",
+  "seed": 20261125,
+  "generator": {
+    "python": "3.14.9",
+    "zlib": "1.3.1.zlib-ng",
+    "note": "the archive's bytes depend on the zlib that deflated it; its content does not"
+  },
+  "entries": [
+    "notes/README.txt",
+    "logs/day-01.log",
+    "logs/day-02.log",
+    "logs/day-03.log",
+    "logs/day-04.log",
+    "logs/day-05.log",
+    "logs/day-06.log",
+    "logs/day-07.log",
+    "logs/day-08.log",
+    "logs/core-dump.log",
+    "logs/late.log"
+  ],
+  "entry_filter": [
+    "*.log"
+  ],
+  "max_record_bytes": 4096,
+  "by_construction": {
+    "entries_selected_text": 9,
+    "entries_excluded": 1,
+    "entries_unsupported": 1,
+    "records": 4400064,
+    "accepted_occurrences": 4400004,
+    "skipped_records": 60,
+    "skipped_by_reason": {
+      "empty line": 41,
+      "line is not valid UTF-8": 17,
+      "longer than the maximum record length": 2
+    },
+    "distinct_originals": 2200001,
+    "membership_c": {
+      "in": 157142,
+      "out": 785716,
+      "abstain": 157143
+    }
+  },
+  "files": {
+    "fixture.zip": {
+      "bytes": 76880103,
+      "sha256": "1ce49d127ed45d08cf4affe124a86f30d6d641230c1d337b8fee11ced6b07371"
+    },
+    "membership-c.tsv": {
+      "bytes": 25771453,
+      "sha256": "7346f51e94d1c628f6d398e7f4b5ce9316f8e03fec4bfc2ac0b7bc4d148611bf"
+    },
+    "labelled.csv": {
+      "bytes": 110426,
+      "sha256": "40f08d1eea3fe43f753d50f9c24733ceb8eb6e4ef9cdde0c9444428f8224f0eb"
+    }
+  }
+}
