@@ -66,6 +66,36 @@ pub(crate) enum Producer {
         content_sha256: String,
         bytes: u64,
     },
+    /// The exact members of one pattern of a refinement revision.
+    Pattern {
+        refinement: String,
+        revision: String,
+        pattern: u64,
+    },
+    /// The nearest neighbours of an exemplar among the members of a refinement,
+    /// and of a wider one when the request named it as target.
+    Neighbours {
+        /// The request as results state it, with the revisions it is bound to.
+        described: Value,
+    },
+    /// The routes of a saved Venn policy report the host registered.
+    Venn {
+        /// The report as results state it: name, content hash, policy, scorer,
+        /// history and profile revisions, calibration and the membership rule.
+        described: Value,
+        /// The revision of the scorer the policy scored with.
+        scorer_revision: String,
+    },
+    /// The judgments a model client submitted for the issued batches of a run.
+    Issued {
+        run: Arc<Run>,
+        /// The submissions of the run the set covers: the first `upto`.
+        upto: usize,
+        /// The batches of the run the set was collected over: the first `batches`.
+        /// What the run issues later is no part of the set.
+        batches: usize,
+        described: Value,
+    },
 }
 
 impl Producer {
@@ -126,6 +156,21 @@ impl Producer {
                 "content_sha256": content_sha256,
                 "bytes": bytes,
             }),
+            Producer::Pattern {
+                refinement,
+                revision,
+                pattern,
+            } => json!({
+                "kind": "filter",
+                "version": 1,
+                "syntax": "pattern",
+                "refinement": refinement,
+                "refinement_revision": revision,
+                "pattern": pattern,
+            }),
+            Producer::Neighbours { described }
+            | Producer::Venn { described, .. }
+            | Producer::Issued { described, .. } => described.clone(),
         }
     }
 
@@ -145,6 +190,19 @@ impl Producer {
                 content_sha256,
                 ..
             } => name.capacity() + content_sha256.capacity(),
+            Producer::Pattern {
+                refinement,
+                revision,
+                ..
+            } => refinement.capacity() + revision.capacity(),
+            // As an expression: a parsed tree takes several times its text.
+            Producer::Neighbours { described } | Producer::Issued { described, .. } => {
+                16 * described.to_string().len()
+            }
+            Producer::Venn {
+                described,
+                scorer_revision,
+            } => 16 * described.to_string().len() + scorer_revision.capacity(),
         }) as u64
     }
 }
@@ -275,13 +333,154 @@ impl Population {
     }
 }
 
+/// One immutable revision of the pattern catalogue of a filter selection: the
+/// project's `PatternRefinement`, kept as the file its own `save` writes and loaded
+/// under the budget by every action on it. A split or a merge makes another one.
+pub(crate) struct Refinement {
+    pub handle: String,
+    /// The selection whose members it groups.
+    pub set: Arc<Set>,
+    /// The refinement it was split or merged from.
+    pub parent: Option<String>,
+    /// The revision the project's refinement states of itself.
+    pub revision: String,
+    /// `refinement.json` in a directory of its own, removed with the refinement.
+    pub path: PathBuf,
+    pub disk_bytes: u64,
+    pub result: String,
+    pub held: u64,
+}
+
+impl Drop for Refinement {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// The outcome of one judgment, as the code its record has in a collected set.
+pub(crate) const OUTCOMES: [(&str, u8); 3] = [
+    ("recommend", State::In as u8),
+    ("pass", State::Out as u8),
+    ("abstain", super::membership::ABSTAINED),
+];
+
+/// One judgment of a submission: an issued record, its outcome and the reason given.
+pub(crate) struct Judgment {
+    pub position: u64,
+    pub code: u8,
+    pub reason: String,
+}
+
+/// An accepted submission for one issued batch.
+pub(crate) struct Submission {
+    pub batch: usize,
+    /// The digest of the payload: the same payload again is a retry, not another
+    /// submission.
+    pub digest: String,
+    /// By position ascending.
+    pub judgments: Vec<Judgment>,
+    /// The batches the run had issued when the submission was taken: a retry
+    /// collects over the same ones.
+    pub batches_then: usize,
+}
+
+/// An issued batch: the records a model client may judge, and nothing else.
+pub(crate) struct Batch {
+    pub handle: String,
+    /// The issued records, by position ascending.
+    pub positions: Vec<u64>,
+    /// The digest of the projected evidence the batch was issued with.
+    pub input_sha256: String,
+    /// One more than the submissions accepted for the batch.
+    pub revision: u64,
+}
+
+/// What a run has issued and collected so far. It only grows.
+#[derive(Default)]
+pub(crate) struct RunState {
+    pub batches: Vec<Batch>,
+    pub submissions: Vec<Submission>,
+    /// The model and the prompt revision the first submission reported; every later
+    /// one must report the same.
+    pub model: Option<(String, String)>,
+    /// The row after the last record issued: the next batch goes on from there.
+    pub next_row: u64,
+    pub excerpt_bytes: u64,
+}
+
+/// The most batches of one run, and the most submissions accepted for one batch.
+pub(crate) const MAX_BATCHES: usize = 64;
+pub(crate) const MAX_BATCH_SUBMISSIONS: u64 = 8;
+
+/// A recommendation run over one candidate scope: issued batches and the submissions
+/// collected for them (interface.md, "For GenAI recommendations").
+pub(crate) struct Run {
+    pub handle: String,
+    pub name: String,
+    /// The candidate scope: no record outside it is issued, and no submission
+    /// outside it fills coverage.
+    pub scope: Arc<Set>,
+    /// Whether batches carry excerpts.
+    pub excerpts: bool,
+    pub state: Mutex<RunState>,
+}
+
+impl Run {
+    pub fn state(&self) -> std::sync::MutexGuard<'_, RunState> {
+        self.state.lock().unwrap_or_else(|held| held.into_inner())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Registry {
     snapshots: HashMap<String, Arc<Snapshot>>,
     sets: HashMap<String, Arc<Set>>,
+    refinements: HashMap<String, Arc<Refinement>>,
+    /// Runs by their own handle and by the handle of every batch they issued.
+    runs: HashMap<String, Arc<Run>>,
 }
 
 impl Registry {
+    pub fn refinement(&self, handle: &str) -> Option<Arc<Refinement>> {
+        self.refinements.get(handle).cloned()
+    }
+
+    /// Every committed refinement, in no stated order.
+    pub fn refinements(&self) -> impl Iterator<Item = &Arc<Refinement>> {
+        self.refinements.values()
+    }
+
+    pub fn insert_refinement(&mut self, refinement: Arc<Refinement>) {
+        self.refinements
+            .insert(refinement.handle.clone(), refinement);
+    }
+
+    pub fn run(&self, handle: &str) -> Option<Arc<Run>> {
+        self.runs.get(handle).cloned()
+    }
+
+    /// Registers `run` under `handle`: its own, or that of a batch it issued.
+    pub fn insert_run(&mut self, handle: String, run: Arc<Run>) {
+        self.runs.insert(handle, run);
+    }
+
+    /// The refinement `handle` names.
+    pub fn require_refinement(&self, handle: &str) -> Result<Arc<Refinement>, Fault> {
+        self.refinement(handle).ok_or_else(|| {
+            Fault::new(
+                "unknown_handle",
+                format!(
+                    "`{}` names no refinement of this project and server; refinements are \
+                     issued by `triager_refine`",
+                    super::wire::clip(handle, 80).0
+                ),
+            )
+        })
+    }
+
     pub fn snapshot(&self, handle: &str) -> Option<Arc<Snapshot>> {
         self.snapshots.get(handle).cloned()
     }
@@ -305,6 +504,8 @@ impl Registry {
 
     /// Lets every artifact go: sets first, since they keep their snapshot.
     pub fn clear(&mut self) {
+        self.runs.clear();
+        self.refinements.clear();
         self.sets.clear();
         self.snapshots.clear();
     }
@@ -369,12 +570,20 @@ pub(crate) enum Task {
     Select(super::ops::SelectTask),
     Compose(super::ops::ComposeTask),
     Evidence(super::inspect::EvidenceTask),
+    Refine(super::refine::RefineTask),
+    Recommend(super::recommend::RecommendTask),
 }
 
 impl Task {
-    /// Whether the task reads a source and so takes the host lease.
+    /// Whether the task reads a source or runs one of the project's heavy operations
+    /// and so takes the host lease. Composing a view and taking or collecting the
+    /// submissions of a run read committed state only.
     pub fn reads_source(&self) -> bool {
-        !matches!(self, Task::Compose(_))
+        match self {
+            Task::Compose(_) => false,
+            Task::Recommend(task) => task.reads_source(),
+            _ => true,
+        }
     }
 }
 
@@ -580,6 +789,12 @@ pub(crate) struct Activity {
     pub rows_scored: AtomicU64,
     pub scorer_loads: AtomicU64,
     pub membership_reads: AtomicU64,
+    /// Originals given to an encoder for a neighbour search.
+    pub rows_encoded: AtomicU64,
+    /// Judgments a model client submitted and the service accepted.
+    pub genai_rows_submitted: AtomicU64,
+    /// Records issued to a model client in batches.
+    pub genai_rows_issued: AtomicU64,
     pub jobs_started: AtomicU64,
     pub evidence_bytes: AtomicU64,
     /// Tool calls answered, and the bytes of their MCP tool results.
@@ -587,6 +802,33 @@ pub(crate) struct Activity {
     pub bytes_returned: AtomicU64,
     /// Calls refused as not served by this revision.
     pub unsupported: AtomicU64,
+}
+
+/// Whether `bytes` of text of a source may be shown under `profile`: always to the
+/// local analyst or a local model; to a hosted development client only of a source
+/// the host declared a public fixture, and within what is `left` of the allowance.
+pub(crate) fn disclosable(
+    profile: super::DisclosureProfile,
+    public_fixture: bool,
+    left: u64,
+    bytes: u64,
+) -> Result<(), Fault> {
+    match profile {
+        super::DisclosureProfile::PrivateLocal => Ok(()),
+        super::DisclosureProfile::PublicDevelopment if !public_fixture => Err(Fault::new(
+            "disclosure_refused",
+            "the host runs the public-development profile and this source is not declared \
+             a public fixture; nothing of its text is shown or issued",
+        )),
+        super::DisclosureProfile::PublicDevelopment if bytes > left => Err(Fault::new(
+            "disclosure_refused",
+            format!(
+                "this would show {bytes} bytes of evidence and the allowance of this session \
+                 has {left} left; counts, handles and memberships stay available"
+            ),
+        )),
+        super::DisclosureProfile::PublicDevelopment => Ok(()),
+    }
 }
 
 /// What the adapter threads and the worker share.
@@ -612,8 +854,9 @@ impl Shared {
             "rows_scored": self.activity.rows_scored.load(Ordering::Relaxed),
             "scorer_loads": self.activity.scorer_loads.load(Ordering::Relaxed),
             "membership_reads": self.activity.membership_reads.load(Ordering::Relaxed),
-            "rows_encoded": 0,
-            "genai_rows_submitted": 0,
+            "rows_encoded": self.activity.rows_encoded.load(Ordering::Relaxed),
+            "genai_rows_issued": self.activity.genai_rows_issued.load(Ordering::Relaxed),
+            "genai_rows_submitted": self.activity.genai_rows_submitted.load(Ordering::Relaxed),
             "jobs_started": self.activity.jobs_started.load(Ordering::Relaxed),
             "evidence_bytes_disclosed": self.activity.evidence_bytes.load(Ordering::Relaxed),
         })
@@ -650,6 +893,74 @@ impl Shared {
             "excerpts": true,
             "remaining_evidence_bytes": self.remaining_evidence(),
         })
+    }
+
+    /// Admits showing `bytes` of text of `snapshot`'s source to this session, and
+    /// counts them against its allowance: templates, proposed queries and the excerpts
+    /// of an issued batch, as the excerpt of one record is counted.
+    pub fn disclose(&self, snapshot: &Snapshot, bytes: u64) -> Result<(), Fault> {
+        let mut left = self
+            .allowance
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        disclosable(self.config.profile, snapshot.public, *left, bytes)?;
+        if self.config.profile == super::DisclosureProfile::PublicDevelopment {
+            *left -= bytes;
+        }
+        self.activity
+            .evidence_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The disclosure block of a result that shows `bytes` of evidence, as it will
+    /// read once they are counted: a result is built and found to fit before the
+    /// allowance is spent on it.
+    pub fn disclosure_after(&self, snapshot: &Snapshot, bytes: u64) -> Value {
+        let mut disclosure = self.disclosure(snapshot);
+        if let Some(left) = self.remaining_evidence() {
+            disclosure["remaining_evidence_bytes"] = json!(left.saturating_sub(bytes));
+        }
+        disclosure
+    }
+
+    /// `text` with the paths of the host taken out: the work directory, and every
+    /// source, policy and membership file the host registered, in the spelling the
+    /// host gave and in their resolved one. An error of a drill-down or a
+    /// recommendation job goes through this before a client sees it.
+    pub fn scrub(&self, text: String) -> String {
+        let config = &self.config;
+        let mut hidden: Vec<(String, &str)> = Vec::new();
+        let mut hide = |path: &std::path::Path, what: &'static str| {
+            let given = path.to_string_lossy().into_owned();
+            if let Ok(resolved) = std::fs::canonicalize(path) {
+                let resolved = resolved.to_string_lossy().into_owned();
+                if let Some(plain) = resolved.strip_prefix(r"\\?\") {
+                    hidden.push((plain.to_string(), what));
+                }
+                hidden.push((resolved, what));
+            }
+            hidden.push((given, what));
+        };
+        hide(&config.work_root, "<work directory>");
+        for source in &config.sources {
+            hide(&source.path, "<source>");
+        }
+        for policy in &config.policies {
+            hide(&policy.path, "<policy file>");
+        }
+        for membership in &config.memberships {
+            hide(&membership.path, "<membership file>");
+        }
+        // The longest first, so that a path inside another is not left in halves.
+        hidden.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+        let mut text = text;
+        for (path, what) in hidden {
+            if path.len() >= 3 && text.contains(&path) {
+                text = text.replace(&path, what);
+            }
+        }
+        text
     }
 
     /// The status of a job as `triager_job` returns it.

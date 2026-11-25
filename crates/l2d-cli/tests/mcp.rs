@@ -422,7 +422,7 @@ fn an_mcp_client_reduces_an_archive_to_a_minus_b_and_explains_one_row() {
         &["--source", &format!("logs={archive}")],
     );
     let listed = client.request("tools/list", json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
     let opened = client.ok(
         "triager_open",
         json!({"v": 1, "source": {"ref": "logs", "entries": ["*.log"]}}),
@@ -965,4 +965,188 @@ fn an_mcp_client_drills_prepared_sets_on_disk_as_in_memory_without_another_read(
         client.close();
     }
     assert_eq!(outcomes[1], outcomes[0], "on disk and in memory");
+}
+
+/// Triager task 2.1 through the real binary: a development client on an explicit
+/// public fixture lists the patterns `l2d discover search` builds, takes one as a
+/// set, and plays the model client of the issued-batch protocol with a partial, a
+/// duplicate and a foreign submission. The private registration of the same archive
+/// cannot be opened, so nothing of it can be issued.
+#[test]
+fn an_mcp_client_on_a_public_fixture_refines_patterns_and_submits_to_issued_batches() {
+    let scratch = Scratch::new("drill");
+    let entries = web_entries();
+    let archive = scratch.archive("logs.zip", &entries);
+    // The existing command path on the same archive, entry filter and query.
+    let seed = scratch.arg("seed");
+    let searched = scratch.run(&[
+        "discover",
+        "search",
+        "--input",
+        &archive,
+        "--entry",
+        "*.log",
+        "--glob",
+        "*login*",
+        "--name",
+        "triager",
+        "--max-members",
+        "100000",
+        "--out",
+        &seed,
+    ]);
+    assert_eq!(
+        searched.status.code(),
+        Some(0),
+        "{}",
+        support::diagnostics(&searched)
+    );
+    let native: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path("seed").join("refinement.json")).unwrap(),
+    )
+    .unwrap();
+    let native_groups = native["groups"].as_array().unwrap();
+    assert!(native_groups.len() >= 2, "{}", native_groups.len());
+
+    let source = format!("logs={archive}");
+    let fixture = format!("fixture={archive}");
+    let mut client = Client::spawn(
+        &scratch,
+        &["--memory-limit", "1GB"],
+        &[
+            "--disclosure",
+            "public-development",
+            "--source",
+            &source,
+            "--public-fixture",
+            &fixture,
+            "--evidence-allowance-bytes",
+            "4096",
+        ],
+    );
+    let listed = client.request("tools/list", json!({}));
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"triager_refine"), "{names:?}");
+    let (refused, is_error) =
+        client.tool("triager_open", json!({"v": 1, "source": {"ref": "logs"}}));
+    assert!(is_error);
+    assert_eq!(refused["error"]["code"], "disclosure_refused");
+    let opened = client.ok(
+        "triager_open",
+        json!({"v": 1, "source": {"ref": "fixture", "entries": ["*.log"]}}),
+    );
+    let snapshot = opened["snapshot"].clone();
+    let b = client.ok(
+        "triager_select",
+        json!({"v": 1, "scope": snapshot,
+               "producer": {"kind": "filter", "syntax": "glob", "query": "*login*"}}),
+    );
+    let members = b["counts"]["in"].as_u64().unwrap();
+    assert_eq!(members, native["rows"].as_array().unwrap().len() as u64);
+
+    // The refinement is the one the command saved, revision for revision.
+    let p = client.ok(
+        "triager_refine",
+        json!({"v": 1, "set": b["set"], "action": {"kind": "patterns"}}),
+    );
+    assert_eq!(p["revision"], native["revision"], "{p}");
+    assert_eq!(p["groups"], native_groups.len() as u64);
+    let first = native_groups[0]["id"].as_u64().unwrap();
+    let selected = client.ok(
+        "triager_select",
+        json!({"v": 1, "scope": snapshot, "producer": {
+            "kind": "filter", "syntax": "pattern", "refinement": p["refinement"],
+            "pattern": first}}),
+    );
+    let mut expected: Vec<String> = native["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["pattern"] == first)
+        .map(|row| record_id(row["member"]["value"].as_u64().unwrap()))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        ids(&client.records(selected["set"].as_str().unwrap(), json!({}))),
+        expected
+    );
+    assert_eq!(selected["counts"]["out"], members - expected.len() as u64);
+
+    // The model client: one batch, a duplicate and a foreign submission refused
+    // whole, a partial one taken.
+    let issued = |producer: Value| {
+        let mut producer = producer;
+        producer["kind"] = json!("recommend");
+        producer["method"] = json!("issued_batch");
+        json!({"v": 1, "scope": b["set"], "producer": producer})
+    };
+    let batch = client.ok(
+        "triager_select",
+        issued(json!({"action": "issue", "limit": 4, "projection": ["excerpt"]})),
+    );
+    let records = batch["records"].as_array().unwrap();
+    assert_eq!(records.len(), 4);
+    assert!(
+        records
+            .iter()
+            .all(|record| record["excerpt"].as_str().unwrap().contains("login"))
+    );
+    assert_eq!(batch["disclosure"]["source_class"], "public_fixture");
+    let disclosed = batch["disclosure"]["excerpt_bytes"].as_u64().unwrap();
+    assert_eq!(
+        batch["disclosure"]["remaining_evidence_bytes"],
+        4096 - disclosed
+    );
+    let all = ids(&client.records(b["set"].as_str().unwrap(), json!({})));
+    let submit = |items: Value| {
+        issued(
+            json!({"action": "submit", "batch": batch["batch"], "expected_revision": 1,
+                      "model": "dev-provider/model@rev", "prompt_revision": "p1",
+                      "items": items}),
+        )
+    };
+    let (refused, is_error) = client.tool(
+        "triager_select",
+        submit(json!([{"id": records[0]["id"], "outcome": "recommend"},
+                      {"id": records[0]["id"], "outcome": "pass"}])),
+    );
+    assert!(is_error);
+    assert_eq!(refused["error"]["code"], "duplicate_item");
+    let (refused, is_error) = client.tool(
+        "triager_select",
+        submit(json!([{"id": records[0]["id"], "outcome": "recommend"},
+                      {"id": all[5], "outcome": "recommend"}])),
+    );
+    assert!(is_error);
+    assert_eq!(refused["error"]["code"], "foreign_item");
+    let c = client.ok(
+        "triager_select",
+        submit(json!([{"id": records[0]["id"], "outcome": "recommend",
+                       "reason": "Repeated sign-in failures"},
+                      {"id": records[1]["id"], "outcome": "pass"}])),
+    );
+    assert_eq!(c["counts"]["in"], 1);
+    assert_eq!(c["counts"]["out"], 1);
+    assert_eq!(c["counts"]["unknown"], members - 2);
+    assert_eq!(c["run_coverage"]["omitted"], 2);
+    assert_eq!(c["producer"]["model"]["identity"], "caller_reported");
+    assert_eq!(
+        ids(&client.records(c["set"].as_str().unwrap(), json!({}))),
+        [records[0]["id"].as_str().unwrap()]
+    );
+    let activity = client.activity(snapshot.as_str().unwrap());
+    assert_eq!(activity["genai_rows_issued"], 4);
+    assert_eq!(activity["genai_rows_submitted"], 2);
+    client.close();
+    // A suggestion creates no analyst mark (requirement 3.2): after a session that
+    // took a recommendation the project holds no mark set.
+    assert!(
+        !scratch.root.join("project").join("marks").exists(),
+        "a recommendation wrote into the project's marks"
+    );
 }

@@ -447,13 +447,12 @@ def refusals(server, handles):
     """The optional operations this revision refuses, each with its code."""
     snapshot, d = handles["snapshot"], handles["d"]
     asked = [
-        ("triager_refine", {"v": 1, "set": handles["b"], "action": {"kind": "patterns"}}),
+        ("triager_refine", {"v": 1, "set": handles["b"], "action": {"kind": "field"}}),
         ("triager_save", {"v": 1, "handle": d, "idempotency_key": "scale"}),
         ("triager_open", {"v": 1, "receipt": "H1"}),
         ("triager_select", {"v": 1, "scope": snapshot, "producer": {
-            "kind": "recommend", "method": "venn", "policy": "V1"}}),
-        ("triager_select", {"v": 1, "scope": snapshot, "producer": {
-            "kind": "filter", "syntax": "pattern", "query": "P"}}),
+            "kind": "recommend", "method": "local_model"}}),
+        ("triager_refine", {"v": 1, "set": handles["b"], "action": {"kind": "time"}}),
         ("triager_compose", {"v": 1, "mode": "allocate", "snapshot": snapshot,
                              "sets": {"d": d}, "expr": "d"}),
         ("triager_compose", {"v": 1, "mode": "view", "snapshot": snapshot, "sets": {"d": d},

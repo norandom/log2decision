@@ -87,6 +87,7 @@ fn the_server_initializes_lists_typed_tools_and_answers_only_requests() {
         [
             "triager_open",
             "triager_select",
+            "triager_refine",
             "triager_compose",
             "triager_inspect",
             "triager_job"

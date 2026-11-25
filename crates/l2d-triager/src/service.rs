@@ -34,18 +34,34 @@
 //! counters, which such calls leave unchanged, and what the session was returned.
 //! Every job states its cost in the counters of the scale gate (requirement 6.4).
 //!
+//! # Drill-down and recommendations (task 2.1)
+//!
+//! `triager_refine` binds the project's pattern catalogue, its refinement and its
+//! exemplar retrieval to these sets ([`refine`]): the patterns of a filter selection,
+//! a split and a merge as new revisions with their parent, a preview that changes
+//! nothing, and the neighbours of an exemplar as a selection. A pattern becomes a
+//! set through the filter syntax `pattern`. The producer `recommend` makes C
+//! ([`recommend`]): the routes of a saved Venn policy report the host registered
+//! ([`PolicyRef`]), with the scorer revision the policy depended on, or the judgments
+//! a model client submits for issued batches. A recommendation is a suggestion: the
+//! service keeps no analyst mark.
+//!
 //! # Scope of this revision
 //!
-//! Sources are ZIP archives. A selection is a score, a filter or a membership file
-//! the host registered ([`MembershipRef`]). Saved receipts, `triager_refine`,
-//! `triager_save`, recommendation producers, allocation and occurrence projections
-//! are refused by name (`unsupported_operation`); they belong to later tasks of the
-//! plan.
+//! Sources are ZIP archives. A selection is a score, a filter, a membership file the
+//! host registered ([`MembershipRef`]), a pattern, a neighbourhood or a
+//! recommendation. Saved receipts, `triager_save`, allocation, occurrence projections
+//! (field and time drill-down) and inference by a generative model on the host
+//! (`recommend` with the method `local_model`) are refused by name
+//! (`unsupported_operation`); they belong to later tasks of the plan or need a
+//! provider this build does not have.
 
 mod inspect;
 mod membership;
 mod ops;
 mod process;
+mod recommend;
+mod refine;
 mod schema;
 mod state;
 mod tables;
@@ -69,6 +85,8 @@ use crate::scope::IndexPlacement;
 use inspect::{EVIDENCE_DEFAULT, EVIDENCE_FIELDS, EvidenceTask, Named, RECORD_FIELDS};
 use membership::{Expr, check_names};
 use ops::{ComposeTask, OpenTask, Rule, SelectProducer, SelectTask, Worker};
+use recommend::{RecommendTask, Submitted, VennMembership};
+use refine::RefineTask;
 use state::{Activity, JobState, Jobs, Keyed, MAX_KEY_BYTES, Registry, Shared, Task};
 use wire::{CANCELLED, Fault, MAX_REGION_SETS, MAX_SETS, VERSION};
 
@@ -92,21 +110,16 @@ pub const MAX_ENTRY_PATTERN_BYTES: usize = 1024;
 const ENTRY_ECHO_TRANSPORT_BYTES: usize = 4 * 1024;
 
 /// The tools this revision serves, in the order they are listed.
-pub const TOOLS: [&str; 5] = [
+pub const TOOLS: [&str; 6] = [
     "triager_open",
     "triager_select",
+    "triager_refine",
     "triager_compose",
     "triager_inspect",
     "triager_job",
 ];
 /// Tools of the interface contract that later tasks deliver.
-const LATER_TOOLS: [(&str, &str); 2] = [
-    (
-        "triager_refine",
-        "pattern, field, time and neighbour drill-down (tasks 2.1 and 3.1)",
-    ),
-    ("triager_save", "saved receipts (task 2.2)"),
-];
+const LATER_TOOLS: [(&str, &str); 1] = [("triager_save", "saved receipts (task 2.2)")];
 
 /// Who may be shown raw evidence. It belongs to the host: no tool argument names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +192,79 @@ pub struct HostConfig {
     pub memberships: Vec<MembershipRef>,
     /// The free disk space to compare with in place of the operating system's figure.
     pub free_disk_bytes: Option<u64>,
+    /// The saved Venn policy reports a recommendation may name.
+    pub policies: Vec<PolicyRef>,
+    /// The limits of a pattern catalogue, as `l2d discover search` takes them.
+    pub patterns: PatternLimits,
+    /// The encoder of the neighbour method `vector`; without one that method is
+    /// refused by name.
+    pub encoder: Option<Encoders>,
+}
+
+impl HostConfig {
+    /// The neighbour methods this host serves.
+    pub(crate) fn neighbour_methods(&self) -> Vec<&'static str> {
+        match self.encoder {
+            Some(_) => vec!["character_trigram", "vector"],
+            None => vec!["character_trigram"],
+        }
+    }
+}
+
+/// The limits of the pattern catalogue `triager_refine` builds: the most patterns,
+/// and the most bytes of a text that is grouped. They are part of what a refinement
+/// revision binds, and the catalogue reserves memory for all of them before it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternLimits {
+    pub max_patterns: usize,
+    pub max_text_bytes: usize,
+}
+
+impl Default for PatternLimits {
+    /// The defaults of `l2d discover search`.
+    fn default() -> Self {
+        Self {
+            max_patterns: 256,
+            max_text_bytes: 4096,
+        }
+    }
+}
+
+/// A policy report `l2d triage` saved, registered by the host under a name. A
+/// recommendation names it as `{"kind": "recommend", "method": "venn", "policy": NAME}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRef {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Where the service finds the encoder of a vector neighbour search: the project's
+/// exploration encoder, opened on the worker for one search and let go after it.
+pub trait EncoderSource: Send + Sync {
+    /// What an open session is held at in the budget.
+    fn session_bytes(&self) -> u64;
+    /// The profile and the method the sessions of this source state of themselves:
+    /// part of what a neighbour search is named by, before a session is opened.
+    fn profile(&self) -> &str;
+    fn method(&self) -> &str {
+        "direct-exemplar-cosine"
+    }
+    /// Opens the encoder, after asking `budget` for what that takes. The service
+    /// holds [`EncoderSource::session_bytes`] while it uses the encoder.
+    fn open(
+        &self,
+        budget: &mut MemoryBudget,
+    ) -> Result<Box<dyn l2d_decide::exploration::ExplorationEncoder>, L2dError>;
+}
+
+/// The encoder source of a host.
+#[derive(Clone)]
+pub struct Encoders(pub Arc<dyn EncoderSource>);
+
+impl std::fmt::Debug for Encoders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Encoders")
+    }
 }
 
 /// The identity of a frozen scorer: what a score set retains of it.
@@ -271,6 +357,12 @@ impl Service {
                     .memberships
                     .iter()
                     .map(|membership| ("membership", &membership.name)),
+            )
+            .chain(
+                config
+                    .policies
+                    .iter()
+                    .map(|policy| ("policy", &policy.name)),
             );
         let mut seen: Vec<(&str, &String)> = Vec::new();
         for (kind, name) in names {
@@ -402,7 +494,11 @@ impl Service {
             }
             "triager_select" => {
                 let (task, key) = self.parse_select(&args)?;
-                self.start_job("triager_select", Task::Select(task), key)
+                self.start_job("triager_select", task, key)
+            }
+            "triager_refine" => {
+                let (task, key) = self.parse_refine(&args)?;
+                self.start_job("triager_refine", Task::Refine(task), key)
             }
             "triager_compose" => {
                 let (task, key) = self.parse_compose(&args)?;
@@ -564,10 +660,7 @@ impl Service {
         }
     }
 
-    fn parse_select(
-        &self,
-        args: &Args<'_>,
-    ) -> Result<(SelectTask, Option<(String, String)>), Fault> {
+    fn parse_select(&self, args: &Args<'_>) -> Result<(Task, Option<(String, String)>), Fault> {
         args.only(&["v", "scope", "producer", "idempotency_key"])?;
         let producer = Args::of(args.required("producer")?, "producer")?;
         let kind = producer.required_text("kind")?;
@@ -627,10 +720,8 @@ impl Service {
             "filter" => {
                 let syntax = producer.required_text("syntax")?;
                 if syntax == "pattern" {
-                    return Err(Fault::unsupported(
-                        "the filter syntax `pattern` selects a refined pattern, which comes \
-                         with `triager_refine` (task 2.1); use `literal`, `glob` or `regex`",
-                    ));
+                    let task = self.parse_pattern(args, &producer)?;
+                    return Ok((Task::Refine(task), args.key("triager_select")?));
                 }
                 producer.only(&["kind", "version", "syntax", "query", "case_insensitive"])?;
                 let text = producer.required_text("query")?.to_string();
@@ -700,15 +791,12 @@ impl Service {
                 }
             }
             "recommend" => {
-                return Err(Fault::unsupported(
-                    "the producer `recommend` (Venn policy, local model, issued batches) is \
-                     not served by this revision (task 2.1); use `score`, `filter` or a \
-                     registered `membership`",
-                ));
+                let task = self.parse_recommend(args, &producer)?;
+                return Ok((Task::Recommend(task), args.key("triager_select")?));
             }
             _ => {
                 return Err(Fault::invalid(
-                    "`producer.kind` is `score`, `filter` or `membership`",
+                    "`producer.kind` is `score`, `filter`, `membership` or `recommend`",
                 ));
             }
         };
@@ -716,12 +804,489 @@ impl Service {
             .registry()
             .require_population(args.required_text("scope")?)?;
         Ok((
-            SelectTask {
+            Task::Select(SelectTask {
                 scope,
                 producer: parsed,
-            },
+            }),
             args.key("triager_select")?,
         ))
+    }
+
+    /// A filter with the syntax `pattern`: the members of one pattern of a refinement.
+    fn parse_pattern(&self, args: &Args<'_>, producer: &Args<'_>) -> Result<RefineTask, Fault> {
+        producer.only(&["kind", "version", "syntax", "refinement", "pattern"])?;
+        let registry = self.registry();
+        let refinement = registry.require_refinement(producer.required_text("refinement")?)?;
+        let scope = registry.require_population(args.required_text("scope")?)?;
+        if scope.snapshot().handle != refinement.set.snapshot.handle {
+            return Err(Fault::new(
+                "mixed_snapshots",
+                "`producer.refinement` groups a selection of another snapshot than `scope`",
+            ));
+        }
+        Ok(RefineTask::Select {
+            scope,
+            refinement,
+            pattern: producer.whole("pattern", 0, u64::MAX)?,
+        })
+    }
+
+    fn parse_recommend(
+        &self,
+        args: &Args<'_>,
+        producer: &Args<'_>,
+    ) -> Result<RecommendTask, Fault> {
+        let scope = args.required_text("scope")?;
+        match producer.required_text("method")? {
+            "venn" => {
+                producer.only(&["kind", "version", "method", "policy", "membership"])?;
+                let name = producer.required_text("policy")?;
+                let found = self
+                    .shared
+                    .config
+                    .policies
+                    .iter()
+                    .find(|known| known.name == name)
+                    .ok_or_else(|| {
+                        Fault::new(
+                            "unknown_policy",
+                            format!(
+                                "the host registered no policy report `{}`",
+                                wire::clip(name, 64).0
+                            ),
+                        )
+                    })?;
+                let membership = match producer.required_text("membership")? {
+                    "investigate_or_review" => VennMembership::InvestigateOrReview,
+                    "investigate" => VennMembership::Investigate,
+                    _ => {
+                        return Err(Fault::invalid(
+                            "`producer.membership` is `investigate_or_review` or `investigate`",
+                        ));
+                    }
+                };
+                Ok(RecommendTask::Venn {
+                    scope: self.registry().require_population(scope)?,
+                    name: found.name.clone(),
+                    path: found.path.clone(),
+                    membership,
+                })
+            }
+            "issued_batch" => self.parse_issued(scope, producer),
+            "local_model" => Err(Fault::unsupported(
+                "the method `local_model` runs a generative model on the analysis host, and \
+                 this build has no on-host generative provider; a local client takes \
+                 `issued_batch` batches instead, and `venn` reads a saved policy report",
+            )),
+            _ => Err(Fault::invalid(
+                "`producer.method` is `venn` or `issued_batch`",
+            )),
+        }
+    }
+
+    /// The three actions of the issued-batch protocol; `scope` is the candidate
+    /// scope of the run.
+    fn parse_issued(&self, scope: &str, producer: &Args<'_>) -> Result<RecommendTask, Fault> {
+        let candidate = |registry: &Registry| {
+            registry
+                .require_set(scope)
+                .map_err(|fault| match fault.code {
+                    "wrong_handle_kind" => Fault::invalid(
+                        "an issued-batch run takes a bounded candidate scope: `scope` is a \
+                     selection or a view, not a whole snapshot",
+                    ),
+                    _ => fault,
+                })
+        };
+        let run_name = |producer: &Args<'_>| -> Result<String, Fault> {
+            let name = producer.text("run")?.unwrap_or("default");
+            let usable = (1..=64).contains(&name.len())
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+            if !usable {
+                return Err(Fault::invalid(
+                    "`producer.run` is 1 to 64 letters, digits, '.', '_' or '-'",
+                ));
+            }
+            Ok(name.to_string())
+        };
+        let project = &self.shared.config.project;
+        match producer.required_text("action")? {
+            "issue" => {
+                producer.only(&[
+                    "kind",
+                    "version",
+                    "method",
+                    "action",
+                    "run",
+                    "limit",
+                    "projection",
+                ])?;
+                let limit = match producer.get("limit") {
+                    None => DEFAULT_ROWS,
+                    Some(_) => producer.whole("limit", 1, MAX_ROWS as u64)? as usize,
+                };
+                let excerpts = match producer.get("projection") {
+                    None => false,
+                    Some(projection) => {
+                        let fields: Option<Vec<&str>> = projection
+                            .as_array()
+                            .filter(|fields| (1..=2).contains(&fields.len()))
+                            .and_then(|fields| fields.iter().map(Value::as_str).collect());
+                        match fields.as_deref() {
+                            Some(["id"]) => false,
+                            Some(["excerpt"] | ["id", "excerpt"] | ["excerpt", "id"]) => true,
+                            _ => {
+                                return Err(Fault::invalid(
+                                    "`producer.projection` is a list of `id` and `excerpt`",
+                                ));
+                            }
+                        }
+                    }
+                };
+                Ok(RecommendTask::Issue {
+                    scope: candidate(&self.registry())?,
+                    name: run_name(producer)?,
+                    limit,
+                    excerpts,
+                })
+            }
+            "submit" => {
+                producer.only(&[
+                    "kind",
+                    "version",
+                    "method",
+                    "action",
+                    "batch",
+                    "expected_revision",
+                    "model",
+                    "prompt_revision",
+                    "items",
+                ])?;
+                let batch = producer.required_text("batch")?;
+                let run = self.registry().run(batch).filter(|run| run.handle != batch);
+                let run = run.ok_or_else(|| {
+                    Fault::new(
+                        "unknown_handle",
+                        format!(
+                            "`{}` names no issued batch of this project and server",
+                            wire::clip(batch, 80).0
+                        ),
+                    )
+                })?;
+                if run.scope.handle != scope {
+                    return Err(Fault::new(
+                        "run_mismatch",
+                        "the batch was issued for another scope than `scope`; a submission \
+                         fills coverage only in the scope its batch was issued for",
+                    ));
+                }
+                let bounded = |field: &str, most: usize| -> Result<String, Fault> {
+                    let text = producer.required_text(field)?;
+                    if text.is_empty() || text.len() > most {
+                        return Err(Fault::invalid(format!(
+                            "`producer.{field}` is 1 to {most} bytes"
+                        )));
+                    }
+                    Ok(text.to_string())
+                };
+                let items = producer
+                    .required("items")?
+                    .as_array()
+                    .filter(|items| (1..=MAX_ROWS).contains(&items.len()))
+                    .ok_or_else(|| {
+                        Fault::invalid(format!(
+                            "`producer.items` is a list of 1 to {MAX_ROWS} judgments"
+                        ))
+                    })?;
+                let mut judgments = Vec::with_capacity(items.len());
+                for item in items {
+                    let item = Args::of(item, "producer.items[]")?;
+                    item.only(&["id", "outcome", "reason"])?;
+                    let position =
+                        wire::record_position(item.required_text("id")?).ok_or_else(|| {
+                            Fault::invalid(
+                                "an `id` in `producer.items` is a record handle as the batch \
+                                 issued it",
+                            )
+                        })?;
+                    let outcome = item.required_text("outcome")?;
+                    let code = state::OUTCOMES
+                        .iter()
+                        .find(|(name, _)| *name == outcome)
+                        .map(|(_, code)| *code)
+                        .ok_or_else(|| {
+                            Fault::invalid(
+                                "an `outcome` in `producer.items` is `recommend`, `pass` or \
+                                 `abstain`",
+                            )
+                        })?;
+                    let reason = item.text("reason")?.unwrap_or_default();
+                    if reason.len() > recommend::MAX_REASON_BYTES {
+                        return Err(Fault::invalid(format!(
+                            "a `reason` in `producer.items` is at most {} bytes",
+                            recommend::MAX_REASON_BYTES
+                        )));
+                    }
+                    judgments.push(state::Judgment {
+                        position,
+                        code,
+                        reason: reason.to_string(),
+                    });
+                }
+                judgments.sort_by_key(|judgment| judgment.position);
+                if let Some(twice) = judgments
+                    .windows(2)
+                    .find(|pair| pair[0].position == pair[1].position)
+                {
+                    return Err(Fault::new(
+                        "duplicate_item",
+                        format!(
+                            "`{}` is judged twice in one submission; nothing of it was taken",
+                            wire::record_id(twice[0].position)
+                        ),
+                    ));
+                }
+                let mut hash = Sha256::new();
+                canonical_fields(&mut hash, producer.fields, None);
+                Ok(RecommendTask::Submit {
+                    run,
+                    submitted: Submitted {
+                        batch: batch.to_string(),
+                        expected_revision: producer.whole("expected_revision", 1, u64::MAX)?,
+                        model: bounded("model", recommend::MAX_MODEL_BYTES)?,
+                        prompt_revision: bounded("prompt_revision", recommend::MAX_PROMPT_BYTES)?,
+                        judgments,
+                        digest: format!("{:x}", hash.finalize()),
+                    },
+                })
+            }
+            "collect" => {
+                producer.only(&[
+                    "kind",
+                    "version",
+                    "method",
+                    "action",
+                    "run",
+                    "membership",
+                    "submissions_ref",
+                ])?;
+                if producer
+                    .text("membership")?
+                    .is_some_and(|membership| membership != "recommend")
+                {
+                    return Err(Fault::invalid(
+                        "`producer.membership` is `recommend`: recommend is in and pass is out",
+                    ));
+                }
+                let name = run_name(producer)?;
+                let registry = self.registry();
+                let scope = candidate(&registry)?;
+                let handle = wire::handle("run", project, &[&scope.handle, &name]);
+                let run = registry.run(&handle).ok_or_else(|| {
+                    Fault::new(
+                        "unknown_run",
+                        format!("the scope has no run `{name}`; issue a batch for it first"),
+                    )
+                })?;
+                Ok(RecommendTask::Collect {
+                    run,
+                    submissions_ref: producer.text("submissions_ref")?.map(str::to_string),
+                })
+            }
+            _ => Err(Fault::invalid(
+                "`producer.action` is `issue`, `submit` or `collect`",
+            )),
+        }
+    }
+
+    fn parse_refine(
+        &self,
+        args: &Args<'_>,
+    ) -> Result<(RefineTask, Option<(String, String)>), Fault> {
+        args.only(&["v", "set", "refinement", "action", "idempotency_key"])?;
+        let action = Args::of(args.required("action")?, "action")?;
+        let kind = action.required_text("kind")?;
+        if let Some(later) = ["region", "field", "time"]
+            .iter()
+            .find(|later| **later == kind)
+        {
+            return Err(Fault::unsupported(format!(
+                "the refine action `{later}` is not served by this revision: a region is \
+                 composed with `triager_compose`, and field and time drill-down need \
+                 occurrence projections (task 3.1); the actions are `patterns`, `list`, \
+                 `split`, `merge`, `preview` and `neighbours`"
+            )));
+        }
+        let key = args.key("triager_refine")?;
+        if kind == "patterns" {
+            action.only(&["kind"])?;
+            if args.has("refinement") {
+                return Err(Fault::invalid(
+                    "`patterns` lists the patterns of a selection: give `set`, not `refinement`",
+                ));
+            }
+            let set = self.registry().require_set(args.required_text("set")?)?;
+            return Ok((RefineTask::Patterns { set }, key));
+        }
+        if args.has("set") {
+            return Err(Fault::invalid(
+                "this action works on a refinement revision: give `refinement`, the handle \
+                 `patterns` returned, not `set`",
+            ));
+        }
+        let registry = self.registry();
+        let refinement = registry.require_refinement(args.required_text("refinement")?)?;
+        let regex = |required: bool| -> Result<Option<String>, Fault> {
+            let regex = match (action.text("regex")?, required) {
+                (None, false) => return Ok(None),
+                (None, true) => action.required_text("regex")?,
+                (Some(regex), _) => regex,
+            };
+            if regex.is_empty() || regex.len() > l2d_core::marks::MAX_PATTERN_BYTES {
+                return Err(Fault::invalid(format!(
+                    "`action.regex` is 1 to {} bytes",
+                    l2d_core::marks::MAX_PATTERN_BYTES
+                )));
+            }
+            Ok(Some(regex.to_string()))
+        };
+        let task = match kind {
+            "list" => {
+                action.only(&["kind", "after", "limit", "projection"])?;
+                let templates = match action.get("projection") {
+                    None => false,
+                    Some(projection) if *projection == json!(["template"]) => true,
+                    Some(_) => {
+                        return Err(Fault::invalid("`action.projection` is `[\"template\"]`"));
+                    }
+                };
+                RefineTask::List {
+                    refinement,
+                    page: refine::Page {
+                        after: match action.get("after") {
+                            None => None,
+                            Some(_) => Some(action.whole("after", 0, u64::MAX)?),
+                        },
+                        limit: match action.get("limit") {
+                            None => DEFAULT_ROWS,
+                            Some(_) => action.whole("limit", 1, MAX_ROWS as u64)? as usize,
+                        },
+                        templates,
+                    },
+                }
+            }
+            "split" => {
+                action.only(&["kind", "pattern", "regex"])?;
+                RefineTask::Split {
+                    refinement,
+                    pattern: action.whole("pattern", 0, u64::MAX)?,
+                    regex: regex(true)?.unwrap_or_default(),
+                }
+            }
+            "merge" => {
+                action.only(&["kind", "patterns"])?;
+                let patterns: Option<Vec<usize>> = action
+                    .required("patterns")?
+                    .as_array()
+                    .filter(|patterns| (2..=256).contains(&patterns.len()))
+                    .and_then(|patterns| {
+                        patterns
+                            .iter()
+                            .map(|pattern| pattern.as_u64().map(|pattern| pattern as usize))
+                            .collect()
+                    });
+                RefineTask::Merge {
+                    refinement,
+                    patterns: patterns.ok_or_else(|| {
+                        Fault::invalid("`action.patterns` is a list of 2 to 256 pattern numbers")
+                    })?,
+                }
+            }
+            "preview" => {
+                action.only(&["kind", "pattern", "regex"])?;
+                RefineTask::Preview {
+                    refinement,
+                    pattern: action.whole("pattern", 0, u64::MAX)?,
+                    regex: regex(false)?,
+                }
+            }
+            "neighbours" => {
+                action.only(&[
+                    "kind", "exemplar", "method", "within", "top_k", "radius", "target",
+                ])?;
+                let exemplar = wire::record_position(action.required_text("exemplar")?)
+                    .ok_or_else(|| {
+                        Fault::invalid("`action.exemplar` is a record handle of a member")
+                    })?;
+                let method = match action.required_text("method")? {
+                    "character_trigram" => refine::Method::CharacterTrigram,
+                    "vector" if self.shared.config.encoder.is_some() => refine::Method::Vector,
+                    "vector" => {
+                        return Err(Fault::unsupported(
+                            "the neighbour method `vector` needs an encoder profile, and the \
+                             host configured none; use `character_trigram`",
+                        ));
+                    }
+                    _ => {
+                        return Err(Fault::invalid(
+                            "`action.method` is `character_trigram` or `vector`",
+                        ));
+                    }
+                };
+                let within = match action.text("within")?.unwrap_or("all") {
+                    "pattern" => refine::Within::Pattern,
+                    "other_patterns" => refine::Within::OtherPatterns,
+                    "all" => refine::Within::All,
+                    _ => {
+                        return Err(Fault::invalid(
+                            "`action.within` is `pattern`, `other_patterns` or `all`",
+                        ));
+                    }
+                };
+                let radius = action
+                    .required("radius")?
+                    .as_f64()
+                    .filter(|radius| (0.0..=2.0).contains(radius))
+                    .ok_or_else(|| Fault::invalid("`action.radius` is a number from 0 to 2"))?;
+                let target = match action.text("target")? {
+                    None => None,
+                    Some(_) if within == refine::Within::Pattern => {
+                        return Err(Fault::invalid(
+                            "a search within the exemplar's pattern has no wider `target`; \
+                             use `within` `other_patterns` or `all` with it",
+                        ));
+                    }
+                    Some(target) => {
+                        let target = registry.require_refinement(target)?;
+                        if target.set.snapshot.handle != refinement.set.snapshot.handle {
+                            return Err(Fault::new(
+                                "mixed_snapshots",
+                                "`action.target` groups a selection of another snapshot",
+                            ));
+                        }
+                        Some(target)
+                    }
+                };
+                RefineTask::Neighbours {
+                    refinement,
+                    exemplar,
+                    method,
+                    within,
+                    top_k: action.whole("top_k", 1, refine::MAX_NEIGHBOURS)?,
+                    radius,
+                    target,
+                }
+            }
+            _ => {
+                return Err(Fault::invalid(
+                    "`action.kind` is `patterns`, `list`, `split`, `merge`, `preview` or \
+                     `neighbours`",
+                ));
+            }
+        };
+        Ok((task, key))
     }
 
     /// The named sets of a request, each a selection or view of `snapshot`.
@@ -1161,6 +1726,8 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Select(_) => "reading the source for a selection",
                 Task::Compose(_) => "composing a view",
                 Task::Evidence(_) => "reading one record",
+                Task::Refine(_) => "refining patterns or neighbours",
+                Task::Recommend(_) => "making a recommendation",
             };
         }
         shared.changed.notify_all();
@@ -1181,6 +1748,8 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Open(task) => ops::open(&mut worker, task),
                 Task::Select(task) => ops::select(&mut worker, task),
                 Task::Compose(task) => ops::compose(&mut worker, task),
+                Task::Refine(task) => refine::run(&mut worker, task),
+                Task::Recommend(task) => recommend::run(&mut worker, task),
                 Task::Evidence(task) => {
                     inspect::evidence_with_excerpt(&mut worker, task).map(|result| ops::Done {
                         result,
@@ -1189,6 +1758,16 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 }
             }
         }));
+        // A drill-down or a recommendation works with files of the host: its errors
+        // are shown without the host's paths.
+        let scrubbed = matches!(task, Task::Refine(_) | Task::Recommend(_));
+        let ran = match ran {
+            Ok(Err(mut fault)) if scrubbed => {
+                fault.message = shared.scrub(fault.message);
+                Ok(Err(fault))
+            }
+            ran => ran,
+        };
         // The task holds handles of the artifacts it worked on; it is let go before
         // the job is reported as ended.
         drop(task);
@@ -1202,10 +1781,7 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                         .registry
                         .write()
                         .unwrap_or_else(|held| held.into_inner());
-                    match commit {
-                        ops::Commit::Snapshot(snapshot) => registry.insert_snapshot(snapshot),
-                        ops::Commit::Set(set) => registry.insert_set(set),
-                    }
+                    commit.register(&mut registry);
                     shared.held.store(held, Ordering::Relaxed);
                 }
                 (JobState::Completed, Ok(done.result))
@@ -1304,6 +1880,23 @@ impl<'a> Args<'a> {
             Some(Value::String(text)) => Ok(Some(text)),
             Some(_) => Err(Fault::invalid(format!("{} is a string", self.name(field)))),
         }
+    }
+
+    /// A required whole number from `least` to `most`.
+    fn whole(&self, field: &str, least: u64, most: u64) -> Result<u64, Fault> {
+        self.required(field)?
+            .as_u64()
+            .filter(|number| (least..=most).contains(number))
+            .ok_or_else(|| {
+                Fault::invalid(if most == u64::MAX {
+                    format!("{} is a whole number of at least {least}", self.name(field))
+                } else {
+                    format!(
+                        "{} is a whole number from {least} to {most}",
+                        self.name(field)
+                    )
+                })
+            })
     }
 
     fn required_text(&self, field: &str) -> Result<&'a str, Fault> {

@@ -74,6 +74,36 @@ fn coverage(population: &Population) -> Value {
     }
 }
 
+/// The named sets that are not independent of each other: a Venn recommendation and
+/// every score set made by the scorer revision its policy scored with (requirement
+/// 2.2). Empty when no such pair is named.
+fn dependencies(sets: &Named) -> Vec<Value> {
+    let mut found = Vec::new();
+    for (name, set) in sets {
+        let Producer::Venn {
+            scorer_revision, ..
+        } = &set.producer
+        else {
+            continue;
+        };
+        for (other, scored) in sets {
+            if matches!(&scored.producer, Producer::Score { scorer, .. }
+                if scorer.revision == *scorer_revision)
+            {
+                found.push(json!({
+                    "set": name,
+                    "depends_on": other,
+                    "shared": "scorer_revision",
+                    "scorer_revision": wire::display(scorer_revision, 160).0,
+                    "meaning": "the policy scored with the scorer of this set: their \
+                                agreement is not independent evidence",
+                }));
+            }
+        }
+    }
+    found
+}
+
 /// What every inspect result states first.
 fn head(view: &str, population: &Population) -> Map<String, Value> {
     let mut head = Map::new();
@@ -124,6 +154,50 @@ pub(crate) fn overview(shared: &Shared, population: &Population) -> Result<Strin
             }),
         );
     }
+    let (mut dependencies_total, mut dependencies_listed) = (0u64, 0u64);
+    if let Population::Of(set) = population
+        && let Producer::Venn {
+            scorer_revision, ..
+        } = &set.producer
+    {
+        // Found now, not when the set was made: the score sets of this snapshot by
+        // the scorer revision the policy scored with. C is not independent of them
+        // (requirement 2.2), whichever was selected first.
+        // Nothing is collected: the sets are counted as the registry is walked,
+        // and the eight with the lowest handles are kept by reference, so the
+        // list is the same however the registry orders its sets.
+        let registry = super::ops::registry(shared);
+        let mut lowest: Vec<&Arc<Set>> = Vec::with_capacity(wire::MAX_SETS + 1);
+        for other in registry.sets() {
+            let depends = other.snapshot.handle == set.snapshot.handle
+                && matches!(&other.producer, Producer::Score { scorer, .. }
+                    if scorer.revision == *scorer_revision);
+            if !depends {
+                continue;
+            }
+            dependencies_total += 1;
+            let at = lowest.partition_point(|kept| kept.handle < other.handle);
+            if at < wire::MAX_SETS {
+                lowest.insert(at, other);
+                lowest.truncate(wire::MAX_SETS);
+            }
+        }
+        dependencies_listed = lowest.len() as u64;
+        let revision = wire::display(scorer_revision, 160).0;
+        let found: Vec<Value> = lowest
+            .iter()
+            .map(|other| {
+                let model = match &other.producer {
+                    Producer::Score { model, .. } => wire::display(model, 128).0,
+                    _ => String::new(),
+                };
+                json!({"set": other.handle, "model": model, "shared": "scorer_revision",
+                       "scorer_revision": revision})
+            })
+            .collect();
+        result.insert("dependencies_total".into(), json!(dependencies_total));
+        result.insert("dependencies".into(), Value::Array(found));
+    }
     result.insert("activity".into(), shared.activity());
     result.insert("session".into(), shared.session());
     result.insert(
@@ -131,7 +205,15 @@ pub(crate) fn overview(shared: &Shared, population: &Population) -> Result<Strin
         shared.disclosure(population.snapshot()),
     );
     result.insert("applied_limits".into(), applied_limits(0));
-    result.insert("clipping".into(), json!({"clipped": false}));
+    // A list of dependencies that is shorter than their number says so.
+    result.insert(
+        "clipping".into(),
+        if dependencies_total > dependencies_listed {
+            json!({"clipped": true, "fields": ["dependencies"]})
+        } else {
+            json!({"clipped": false})
+        },
+    );
     result.insert("page".into(), Value::Null);
     result.insert("cost".into(), warm_cost(0));
     // The creating result is spliced in as it was returned, not parsed again.
@@ -254,6 +336,7 @@ pub(crate) fn regions(population: &Population, sets: &Named) -> Result<String, F
         .collect();
     let mut result = head("regions", population);
     result.insert("sets".into(), Value::Object(named));
+    result.insert("dependencies".into(), Value::Array(dependencies(sets)));
     result.insert(
         "parent".into(),
         json!({"handle": population.handle(), "distinct_originals": total.0, "occurrences": total.1}),
@@ -573,12 +656,43 @@ fn explain(name: &str, set: &Set, row: u64, read: &mut u64) -> Result<Value, Fau
         explained["reason"] = json!(match (&set.producer, outside) {
             (Producer::Expression { .. }, _) => "operand_not_evaluated",
             (_, true) => "outside_producer_scope",
+            (Producer::Neighbours { .. }, false) if code == ABSTAINED => "not_represented",
             (_, false) if code == ABSTAINED => "abstained",
-            (Producer::Membership { .. }, false) => "outside_producer_coverage",
+            (
+                Producer::Membership { .. }
+                | Producer::Pattern { .. }
+                | Producer::Neighbours { .. }
+                | Producer::Venn { .. }
+                | Producer::Issued { .. },
+                false,
+            ) => "outside_producer_coverage",
             (_, false) => "missing_model_output",
         });
     }
     match (&set.producer, &set.scores) {
+        (Producer::Venn { .. }, Some(scores)) if !outside && state != State::Unknown => {
+            // The route, the reason and the allocation the saved policy gave.
+            if let Some(detail) = super::recommend::venn_detail(scores.get(row)?) {
+                explained["venn"] = detail;
+            }
+        }
+        (
+            Producer::Issued {
+                run, upto, batches, ..
+            },
+            Some(scores),
+        ) if !outside => {
+            let position = set.snapshot.scope.row(row)?.id.0;
+            explained["recommendation"] =
+                super::recommend::issued_detail(run, (*upto, *batches), position, scores.get(row)?);
+        }
+        (Producer::Neighbours { .. }, Some(scores)) if state == State::In => {
+            explained["distance"] = json!(scores.get(row)?);
+        }
+        (Producer::Pattern { pattern, .. }, _) if state != State::Unknown => {
+            explained["pattern"] = json!(pattern);
+            explained["matched"] = json!(state == State::In);
+        }
         (Producer::Score { .. }, Some(scores)) if !outside => {
             let score = scores.get(row)?;
             if score.is_finite() {
@@ -661,6 +775,10 @@ pub(crate) fn evidence(
             explained.push(explain(name, set, task.row, &mut index_rows_read)?);
         }
         result.insert("explanation".into(), Value::Array(explained));
+        result.insert(
+            "dependencies".into(),
+            Value::Array(dependencies(&task.sets)),
+        );
     }
     let mut disclosed = 0;
     let mut cost = warm_cost(index_rows_read);

@@ -54,7 +54,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::membership::{ABSTAINED, Expr, State, States, Tally, code_in, put_code};
-use super::state::{Population, Producer, Progress, Set, SetKind, Shared, Snapshot};
+use super::state::{
+    Population, Producer, Progress, Refinement, Run, Set, SetKind, Shared, Snapshot,
+};
 use super::tables::{BLOCK_ROWS, Scores, SetDir, TablePlacement, require_disk, score_in};
 use super::wire::{self, Fault, MAX_MESSAGE_BYTES, VERSION, cancelled, share};
 use super::{FrozenScorer, ScorerSource};
@@ -70,7 +72,7 @@ pub(crate) const SCAN_FIXED_BYTES: u64 = 1024 * 1024;
 pub(crate) const COMPOSE_FIXED_BYTES: u64 = 64 * 1024 + TALLY_BYTES;
 /// What an artifact keeps beside its tables and strings: its own structure, its place
 /// in the registry and the room strings may have beyond their content.
-const ARTIFACT_FIXED_BYTES: u64 = 2 * 1024;
+pub(crate) const ARTIFACT_FIXED_BYTES: u64 = 2 * 1024;
 /// The most reasons for what a source left out that an open result lists.
 const MAX_REASONS: usize = 24;
 /// What counting the members of a set reads at a time: a block of its codes, a block
@@ -112,7 +114,7 @@ pub(crate) struct Worker<'a> {
 }
 
 impl Worker<'_> {
-    fn fresh_dir(&mut self, kind: &str) -> PathBuf {
+    pub(crate) fn fresh_dir(&mut self, kind: &str) -> PathBuf {
         *self.dirs += 1;
         self.shared
             .config
@@ -120,7 +122,7 @@ impl Worker<'_> {
             .join(format!("{kind}-{}", *self.dirs))
     }
 
-    fn check_cancel(&self) -> Result<(), L2dError> {
+    pub(crate) fn check_cancel(&self) -> Result<(), L2dError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(cancelled());
         }
@@ -235,19 +237,53 @@ pub(crate) struct Done {
 pub(crate) enum Commit {
     Snapshot(Arc<Snapshot>),
     Set(Arc<Set>),
+    Refinement(Arc<Refinement>),
+    /// A run that issued a batch or took a submission: it is registered under
+    /// `handles` (its own when it is new, and that of a new batch), it keeps `grown`
+    /// bytes more, and `set` is what was collected from it.
+    Run {
+        run: Arc<Run>,
+        handles: Vec<String>,
+        grown: u64,
+        set: Option<Arc<Set>>,
+    },
 }
 
 impl Commit {
+    /// What the commit adds to what the service holds between jobs.
     pub fn held(&self) -> u64 {
         match self {
             Commit::Snapshot(snapshot) => snapshot.held,
             Commit::Set(set) => set.held,
+            Commit::Refinement(refinement) => refinement.held,
+            Commit::Run { grown, set, .. } => {
+                grown.saturating_add(set.as_ref().map_or(0, |set| set.held))
+            }
+        }
+    }
+
+    /// Registers what was made.
+    pub fn register(self, registry: &mut super::state::Registry) {
+        match self {
+            Commit::Snapshot(snapshot) => registry.insert_snapshot(snapshot),
+            Commit::Set(set) => registry.insert_set(set),
+            Commit::Refinement(refinement) => registry.insert_refinement(refinement),
+            Commit::Run {
+                run, handles, set, ..
+            } => {
+                for handle in handles {
+                    registry.insert_run(handle, run.clone());
+                }
+                if let Some(set) = set {
+                    registry.insert_set(set);
+                }
+            }
         }
     }
 }
 
 /// A removed directory when the operation that made it ends, however it ends.
-struct Scratch(PathBuf);
+pub(crate) struct Scratch(pub PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -449,10 +485,13 @@ pub(crate) fn open(worker: &mut Worker<'_>, task: &OpenTask) -> Result<Done, Fau
             "reasons_clipped": completeness.reasons.len() > MAX_REASONS,
         },
         "capabilities": {
-            "producers": ["score", "filter", "membership"],
+            "producers": ["score", "filter", "membership", "recommend"],
             "score_rules": ["top_k", "threshold"],
             "ties": ["record_id_ascending"],
-            "filter_syntax": ["literal", "glob", "regex"],
+            "filter_syntax": ["literal", "glob", "regex", "pattern"],
+            "recommend_methods": ["venn", "issued_batch"],
+            "refine_actions": ["patterns", "list", "split", "merge", "preview", "neighbours"],
+            "neighbour_methods": worker.shared.config.neighbour_methods(),
             "compose_modes": ["view"],
             "operators": ["union", "intersection", "difference", "complement"],
             "inspect_views": ["overview", "regions", "records", "evidence"],
@@ -460,8 +499,9 @@ pub(crate) fn open(worker: &mut Worker<'_>, task: &OpenTask) -> Result<Done, Fau
             "job_actions": ["status", "cancel"],
             "occurrence_locators": "first_only",
             "not_supported": [
-                "triager_refine", "triager_save", "open receipt", "producer recommend",
-                "filter syntax pattern", "compose mode allocate", "expression state",
+                "triager_save", "open receipt", "recommend method local_model",
+                "refine region", "refine field", "refine time",
+                "compose mode allocate", "expression state",
                 "inspect histogram", "inspect fields", "inspect lineage",
             ],
         },
@@ -1192,7 +1232,9 @@ fn prepared(
             );
             registry.set(&whole).map(Prepared::Membership)
         }
-        Producer::Expression { .. } => None,
+        // A view is composed, and a producer that names its records is fed them
+        // again: neither is derived from another set.
+        _ => None,
     }
 }
 
@@ -1657,10 +1699,73 @@ pub(crate) fn select(worker: &mut Worker<'_>, task: &SelectTask) -> Result<Done,
         cost.set("membership_bytes_read", membership_hashed);
     }
     worker.check_cancel()?;
+    debug_assert_eq!(on_disk, states.is_on_disk());
+    let reason = match &producer {
+        Producer::Membership { .. } => "outside_producer_coverage",
+        _ => "missing_model_output",
+    };
+    let (result, set) = seal(
+        worker,
+        Sealed {
+            scope: &task.scope,
+            handle,
+            described,
+            producer,
+            states,
+            scores,
+            owns_scores,
+            cost,
+            reason,
+            extra: Map::new(),
+        },
+    )?;
+    worker.budget.hold(worker.base.saturating_add(set.held));
+    Ok(Done {
+        result,
+        commit: Some(Commit::Set(set)),
+    })
+}
 
-    let (tally, revision, outside) = tally(&snapshot, &task.scope, &states)?;
+/// A new selection whose states are known: what is left is to count it, state it and
+/// keep it.
+pub(crate) struct Sealed<'a> {
+    pub scope: &'a Population,
+    pub handle: String,
+    pub described: Value,
+    pub producer: Producer,
+    pub states: States,
+    pub scores: Option<Arc<Scores>>,
+    pub owns_scores: bool,
+    pub cost: Cost,
+    /// Why a member of the scope the producer gave no state is not evaluated.
+    pub reason: &'static str,
+    /// What the producer adds to the result of the call.
+    pub extra: Map<String, Value>,
+}
+
+/// Counts a new selection within its scope, builds the result of the call that made
+/// it and returns both; the caller commits the set. The caller holds [`TALLY_BYTES`]
+/// and what the set keeps.
+pub(crate) fn seal(
+    worker: &mut Worker<'_>,
+    sealed: Sealed<'_>,
+) -> Result<(String, Arc<Set>), Fault> {
+    let Sealed {
+        scope,
+        handle,
+        described,
+        producer,
+        states,
+        scores,
+        owns_scores,
+        mut cost,
+        reason,
+        extra,
+    } = sealed;
+    let snapshot = scope.snapshot().clone();
+    let (tally, revision, outside) = tally(&snapshot, scope, &states)?;
     let (parent_originals, parent_occurrences) = tally.parent();
-    if (parent_originals, parent_occurrences) != task.scope.size() {
+    if (parent_originals, parent_occurrences) != scope.size() {
         return Err(Fault::runtime(
             "the members of a selection's parent do not add up to the parent",
         ));
@@ -1671,25 +1776,18 @@ pub(crate) fn select(worker: &mut Worker<'_>, task: &SelectTask) -> Result<Done,
             .filter(|_| owns_scores)
             .map_or(0, |scores| scores.disk_bytes());
     let peak = cost.fields["disk_peak_bytes"].as_u64().unwrap_or(0);
-    debug_assert_eq!(on_disk, states.is_on_disk());
     cost.set("candidates", parent_originals)
         .set("output", tally.of(State::In).0)
         .set("tables_on_disk", states.is_on_disk())
         .set("disk_bytes", disk_bytes)
         .set("disk_peak_bytes", peak.max(disk_bytes));
-    let coverage = coverage(
-        &tally,
-        match &producer {
-            Producer::Membership { .. } => "outside_producer_coverage",
-            _ => "missing_model_output",
-        },
-    );
-    let result = wire::with_response_bytes(json!({
+    let coverage = coverage(&tally, reason);
+    let mut result = json!({
         "v": VERSION,
         "status": "ready",
         "set": handle,
         "snapshot": snapshot.handle,
-        "scope": task.scope.handle(),
+        "scope": scope.handle(),
         "producer": described,
         "revision": revision,
         "counts": tally.counts(),
@@ -1708,7 +1806,11 @@ pub(crate) fn select(worker: &mut Worker<'_>, task: &SelectTask) -> Result<Done,
             "views": ["records", "evidence"],
         },
         "cost": cost.finish(worker),
-    }));
+    });
+    if let Some(fields) = result.as_object_mut() {
+        fields.extend(extra);
+    }
+    let result = wire::with_response_bytes(result);
     require_fit(&result)?;
     let kept = states
         .held_bytes()
@@ -1724,7 +1826,7 @@ pub(crate) fn select(worker: &mut Worker<'_>, task: &SelectTask) -> Result<Done,
     let set = Set {
         handle,
         kind: SetKind::Selection,
-        parent: task.scope.as_set().cloned(),
+        parent: scope.as_set().cloned(),
         snapshot,
         states,
         scores,
@@ -1735,11 +1837,153 @@ pub(crate) fn select(worker: &mut Worker<'_>, task: &SelectTask) -> Result<Done,
         result: result.clone(),
         held: kept,
     };
-    worker.budget.hold(worker.base.saturating_add(kept));
-    Ok(Done {
-        result,
-        commit: Some(Commit::Set(Arc::new(set))),
-    })
+    Ok((result, Arc::new(set)))
+}
+
+/// A selection whose producer names its records itself: a pattern of a refinement,
+/// the neighbours of an exemplar, the decisions of a saved policy report or the
+/// judgments collected for a run.
+pub(crate) struct Listed<'a> {
+    pub scope: &'a Population,
+    pub producer: Producer,
+    /// Whether a value is kept beside every named record, as a score is.
+    pub with_values: bool,
+    /// Why a member of the scope the producer does not name is not evaluated.
+    pub reason: &'static str,
+    pub extra: Map<String, Value>,
+    /// What the caller holds beside `worker.base` while the records are fed: the
+    /// loaded artifact they come from.
+    pub held: u64,
+    pub cost: Cost,
+}
+
+/// The handle of the selection `producer` makes in `scope`, and the set when it was
+/// made before: the same producer revision over the same population is the same set.
+pub(crate) fn known_selection(
+    worker: &Worker<'_>,
+    scope: &Population,
+    producer: &Producer,
+) -> (String, Option<Arc<Set>>) {
+    let handle = wire::handle(
+        "set",
+        &worker.shared.config.project,
+        &[
+            &scope.snapshot().handle,
+            scope.handle(),
+            &producer.describe().to_string(),
+        ],
+    );
+    let known = registry(worker.shared).set(&handle);
+    (handle, known)
+}
+
+/// Takes one named record of a listed selection: its position, the code of its state
+/// and the value kept beside it.
+pub(crate) type Put<'a> = &'a mut dyn FnMut(u64, u8, f32) -> Result<(), L2dError>;
+
+/// What [`select_listed`] holds beside its tables and the caller's share: the run of
+/// rows the named records are found in, the blocks its members are counted from, the
+/// result and the artifact's own structure.
+pub(crate) const LISTED_FIXED_BYTES: u64 =
+    RowBlock::BYTES + TALLY_BYTES + ARTIFACT_FIXED_BYTES + 64 * 1024;
+
+/// Makes the selection of a producer that names its records: `feed` gives every named
+/// record's position, the code of its state and the value kept beside it. A record
+/// outside the scope fills no coverage, and one the producer does not name is not
+/// evaluated. Returns the result and, unless the set was made before, the set to
+/// commit.
+///
+/// The tables are kept in memory when the budget admits them beside what the caller
+/// holds and on disk otherwise, as those of every selection. A position that names no
+/// original of the snapshot is refused.
+pub(crate) fn select_listed(
+    worker: &mut Worker<'_>,
+    listed: Listed<'_>,
+    feed: &mut dyn FnMut(Put<'_>) -> Result<(), L2dError>,
+) -> Result<(String, Option<Arc<Set>>), Fault> {
+    let Listed {
+        scope,
+        producer,
+        with_values,
+        reason,
+        extra,
+        held,
+        mut cost,
+    } = listed;
+    let (handle, known) = known_selection(worker, scope, &producer);
+    if let Some(known) = known {
+        return Ok((known.result.clone(), None));
+    }
+    let snapshot = scope.snapshot().clone();
+    let rows = snapshot.scope.originals();
+    let fixed = LISTED_FIXED_BYTES.saturating_add(producer.held_bytes());
+    let beside = worker.base.saturating_add(held);
+    worker.budget.hold(beside);
+    worker.budget.require_whole(
+        fixed,
+        "making a selection from the records its producer names: the rows they are found \
+         in and the blocks its members are counted from,",
+    )?;
+    worker.budget.hold(beside.saturating_add(fixed));
+    let (tables, on_disk, sort_bytes) = Sink::plan(worker, rows, with_values);
+    worker.budget.require_whole(
+        tables,
+        if on_disk {
+            "placing the states of every original on disk: the spool's buffer and the \
+             memory its rows are sorted in,"
+        } else {
+            "keeping the states of every original,"
+        },
+    )?;
+    worker
+        .budget
+        .hold(beside.saturating_add(fixed).saturating_add(tables));
+    let mut sink = Sink::create(worker, rows, with_values, on_disk, sort_bytes)?;
+    let mut near = RowBlock::new();
+    let mut named = 0u64;
+    feed(&mut |position, code, value| {
+        let row = snapshot
+            .scope
+            .row_near(position, &mut near)?
+            .ok_or_else(|| L2dError::Refused {
+                reason: format!(
+                    "the producer names the record {}, which is no original of the snapshot; \
+                     nothing was committed",
+                    wire::record_id(position)
+                ),
+            })?;
+        named += 1;
+        if scope.state(row)? != State::In {
+            return Ok(());
+        }
+        sink.put(row, code, value.to_bits())
+    })?;
+    worker.check_cancel()?;
+    let (states, scores) = sink.finish(&|_, _| L2dError::Runtime {
+        detail: "a producer named one record with two states".into(),
+    })?;
+    cost.set("index_rows_read", named);
+    if on_disk {
+        cost.set("disk_peak_bytes", Sink::disk_peak(rows, with_values));
+    }
+    let described = producer.describe();
+    let (result, set) = seal(
+        worker,
+        Sealed {
+            scope,
+            handle,
+            described,
+            producer,
+            states,
+            scores: scores.map(Arc::new),
+            owns_scores: with_values,
+            cost,
+            reason,
+            extra,
+        },
+    )?;
+    worker.budget.hold(worker.base.saturating_add(set.held));
+    Ok((result, Some(set)))
 }
 
 /// Reads the membership file at `path` line by line and gives `each` the line number,
@@ -1971,7 +2215,7 @@ fn share_of(part: u64, parent: u64) -> Value {
 
 /// An artifact whose result would not fit the response limit is not committed: the
 /// result is what every later call about it returns.
-fn require_fit(result: &str) -> Result<(), Fault> {
+pub(crate) fn require_fit(result: &str) -> Result<(), Fault> {
     if wire::transport_bytes(result) > wire::PAYLOAD_TRANSPORT_BYTES {
         return Err(Fault::runtime(
             "the result of this call does not fit the response limit; nothing was committed",
