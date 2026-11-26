@@ -361,6 +361,14 @@ fn recipe(
                 }
                 json!({"tool": "triager_compose", "args": args, "bind": {bind: "set"}})
             }
+            (SetKind::View, Origin::Occurrence) => {
+                return Err(format!(
+                    "`{}` is a field or time view: replaying it needs an occurrence projection \
+                     of the source, which is another read of it; open the source with its \
+                     `projections` and drill again",
+                    set.handle
+                ));
+            }
             (SetKind::View, _) => {
                 let names: Vec<(String, String)> = set
                     .inputs

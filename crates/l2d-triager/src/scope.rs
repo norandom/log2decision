@@ -976,6 +976,29 @@ impl Scope {
         self.index.find_position(position)
     }
 
+    /// The row of the original whose text is `text`: its native identity
+    /// ([`NativeId`], the ID `l2d_store::log_id` gives the source and the text) looked up
+    /// in the relation. For a pass over the source that sees every occurrence of an
+    /// original, repeats included, and attributes each to its original (task 3.1).
+    /// Allocates nothing. [`L2dError::Runtime`] for a scope whose source has no path
+    /// that IDs are derived from (a store).
+    pub(crate) fn row_of_text(&self, text: &str) -> Result<Option<u64>, L2dError> {
+        let source = self
+            .binding
+            .policy_id_source
+            .as_deref()
+            .ok_or_else(|| L2dError::Runtime {
+                detail: "a scope over a store names its originals by stored ID, not by text".into(),
+            })?;
+        // As `l2d_store::log_id`, without the hexadecimal form.
+        let mut hasher = Sha256::new();
+        hasher.update((source.len() as u64).to_le_bytes());
+        hasher.update(source.as_bytes());
+        hasher.update(text.as_bytes());
+        let id: [u8; ID_BYTES] = hasher.finalize().into();
+        self.index.find_id(&id)
+    }
+
     /// [`Scope::row_of`] for many lookups in a row, as a read of a source or of a
     /// membership file makes them: `near` keeps the run of rows around the last row
     /// found, and a position within that run is found there without a read. The rows

@@ -1,6 +1,6 @@
 //! Immutable analyst views over a bounded, retained evidence projection.
 
-mod query;
+pub(crate) mod query;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};

@@ -364,12 +364,18 @@ fn patterns_split_merge_and_preview_bind_the_projects_refinement_to_immutable_se
             "kind": "filter", "syntax": "pattern", "refinement": p_handle, "pattern": 9_999}}),
     );
     assert_eq!(code, "unknown_pattern");
-    for later in ["region", "field", "time"] {
+    // A region is composed, and a field or time drill (task 3.1) works on a set, not a
+    // refinement.
+    for (action, expected) in [
+        ("region", "unsupported_operation"),
+        ("field", "invalid_arguments"),
+        ("time", "invalid_arguments"),
+    ] {
         let (code, message) = host.err(
             "triager_refine",
-            json!({"v": 1, "refinement": p_handle, "action": {"kind": later}}),
+            json!({"v": 1, "refinement": p_handle, "action": {"kind": action}}),
         );
-        assert_eq!(code, "unsupported_operation", "{message}");
+        assert_eq!(code, expected, "{message}");
     }
     // A pattern inside a view: outside the view nothing is evaluated.
     let in_view = pattern_set(

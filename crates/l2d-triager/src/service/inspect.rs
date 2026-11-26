@@ -105,7 +105,7 @@ fn dependencies(sets: &Named) -> Vec<Value> {
 }
 
 /// What every inspect result states first.
-fn head(view: &str, population: &Population) -> Map<String, Value> {
+pub(crate) fn head(view: &str, population: &Population) -> Map<String, Value> {
     let mut head = Map::new();
     head.insert("v".into(), json!(VERSION));
     head.insert("status".into(), json!("ready"));
@@ -142,6 +142,13 @@ pub(crate) fn overview(shared: &Shared, population: &Population) -> Result<Strin
         "members".into(),
         json!({"distinct_originals": originals, "occurrences": occurrences}),
     );
+    if let Population::Of(set) = population
+        && let Some(matching) = super::facets::matching(set)
+    {
+        // A field or time view counts its occurrences that pass its drills apart from
+        // every occurrence of its originals.
+        result.insert("occurrences".into(), matching);
+    }
     if let Population::Of(set) = population {
         // Where the set keeps its membership and scores, and what they take.
         result.insert(
@@ -722,6 +729,9 @@ pub(crate) struct EvidenceTask {
     pub sets: Named,
     pub projection: Vec<&'static str>,
     pub row: u64,
+    /// The snapshot's occurrence projection and the population's occurrence filter,
+    /// when the snapshot is projected: every occurrence of the record is listed.
+    pub occurrences: Option<(Arc<super::project::Projection>, super::project::Filter)>,
 }
 
 impl EvidenceTask {
@@ -866,7 +876,7 @@ fn explain(name: &str, set: &Set, row: u64, read: &mut u64) -> Result<Value, Fau
                     explained["ranked_within"] = json!("the originals the receipt retained");
                 }
             }
-            (Origin::Filter, _) if state != State::Unknown => {
+            (Origin::Filter | Origin::Occurrence, _) if state != State::Unknown => {
                 explained["matched"] = json!(state == State::In);
             }
             (Origin::Issued, _) if !outside => {
@@ -937,6 +947,11 @@ fn explain(name: &str, set: &Set, row: u64, read: &mut u64) -> Result<Value, Fau
         (Producer::Filter { .. }, _) if state != State::Unknown => {
             explained["matched"] = json!(state == State::In);
         }
+        (Producer::Occurrence { filter, .. }, _) if state != State::Unknown => {
+            // In when at least one of its occurrences passes every drill of the view.
+            explained["matched"] = json!(state == State::In);
+            explained["occurrence_filter"] = filter.describe();
+        }
         _ => {}
     }
     Ok(explained)
@@ -981,8 +996,21 @@ pub(crate) fn evidence(
     }
     if wants("occurrences") {
         record.insert("occurrences".into(), json!(original.occurrences));
-        // The scope keeps the first occurrence and the exact count of an original.
-        record.insert("occurrence_locators".into(), json!("first_only"));
+        match &task.occurrences {
+            // The scope keeps the first occurrence and the exact count of an original.
+            None => {
+                record.insert("occurrence_locators".into(), json!("first_only"));
+            }
+            // The projection keeps every occurrence.
+            Some((projection, filter)) => {
+                let listed = super::facets::listing(projection, task.row, filter)?;
+                if listed["clipped"] == true {
+                    clipped_fields.push("record.occurrence_list.rows");
+                }
+                record.insert("occurrence_locators".into(), json!("projected"));
+                record.insert("occurrence_list".into(), listed);
+            }
+        }
     }
     result.insert("record".into(), Value::Object(record));
     if wants("membership") {

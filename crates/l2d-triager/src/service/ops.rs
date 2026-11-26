@@ -184,7 +184,7 @@ impl Cost {
     }
 
     /// What one read of a source cost.
-    fn scanned(&mut self, scan: &ScanCost) -> &mut Self {
+    pub(crate) fn scanned(&mut self, scan: &ScanCost) -> &mut Self {
         self.set("archive_scans", 1)
             .set("bytes_packed", scan.packed)
             .set("bytes_unpacked", scan.unpacked)
@@ -253,6 +253,11 @@ pub(crate) enum Commit {
         snapshot: Arc<Snapshot>,
         sets: Vec<Arc<Set>>,
     },
+    /// An occurrence projection, with the snapshot an open in the same job made.
+    Projection {
+        snapshot: Option<Arc<Snapshot>>,
+        projection: Arc<super::project::Projection>,
+    },
 }
 
 impl Commit {
@@ -268,6 +273,13 @@ impl Commit {
             Commit::Reopened { snapshot, sets } => sets
                 .iter()
                 .fold(snapshot.held, |held, set| held.saturating_add(set.held)),
+            Commit::Projection {
+                snapshot,
+                projection,
+            } => snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.held)
+                .saturating_add(projection.held),
         }
     }
 
@@ -283,6 +295,15 @@ impl Commit {
                 }
             }
             Commit::Refinement(refinement) => registry.insert_refinement(refinement),
+            Commit::Projection {
+                snapshot,
+                projection,
+            } => {
+                if let Some(snapshot) = snapshot {
+                    registry.insert_snapshot(snapshot);
+                }
+                registry.insert_projection(projection);
+            }
             Commit::Run {
                 run, handles, set, ..
             } => {
@@ -506,20 +527,23 @@ pub(crate) fn open(worker: &mut Worker<'_>, task: &OpenTask) -> Result<Done, Fau
             "ties": ["record_id_ascending"],
             "filter_syntax": ["literal", "glob", "regex", "pattern"],
             "recommend_methods": ["venn", "issued_batch"],
-            "refine_actions": ["patterns", "list", "split", "merge", "preview", "neighbours"],
+            "refine_actions": ["patterns", "list", "split", "merge", "preview", "neighbours",
+                               "field", "time"],
             "neighbour_methods": worker.shared.config.neighbour_methods(),
             "compose_modes": ["view", "allocate"],
             "operators": ["union", "intersection", "difference", "complement", "state"],
             "allocation_rule": super::allocate::ALLOCATION_RULE,
-            "inspect_views": ["overview", "regions", "records", "evidence"],
+            "inspect_views": ["overview", "regions", "records", "evidence", "fields", "histogram"],
             "sort": ["record_id_ascending", "allocation"],
             "job_actions": ["status", "cancel"],
             "receipts": worker.shared.config.receipts.is_some(),
+            // The relation keeps first locators; `projections` (see the tool schema)
+            // keep every occurrence, and evidence lists them once projected.
             "occurrence_locators": "first_only",
             "not_supported": [
                 "recommend method local_model",
-                "refine region", "refine field", "refine time",
-                "inspect histogram", "inspect fields", "inspect lineage",
+                "refine region",
+                "inspect lineage",
             ],
         },
         "disclosure": worker.shared.disclosure(&snapshot),
@@ -592,6 +616,20 @@ pub(crate) fn scan(
     held: u64,
     each: &mut dyn FnMut(&LogsFrame) -> Result<bool, L2dError>,
 ) -> Result<Option<ScanCost>, L2dError> {
+    scan_with(worker, snapshot, held, each, None)
+}
+
+/// [`scan`] with `observer` called with the packed position and the text of every
+/// accepted occurrence, repeats included, in the order the source is read
+/// (`ZipBatches::observe`): for the pass that projects occurrences (task 3.1).
+/// What the observer keeps is in `held`.
+pub(crate) fn scan_with(
+    worker: &mut Worker<'_>,
+    snapshot: &Snapshot,
+    held: u64,
+    each: &mut dyn FnMut(&LogsFrame) -> Result<bool, L2dError>,
+    observer: Option<&mut l2d_core::zip_input::Observer<'_>>,
+) -> Result<Option<ScanCost>, L2dError> {
     let shared = worker.shared;
     let config = &shared.config;
     worker.check_cancel()?;
@@ -633,6 +671,9 @@ pub(crate) fn scan(
     let mut ended_early = false;
     {
         let mut batches = input.batches(worker.budget);
+        if let Some(observer) = observer {
+            batches.observe(observer);
+        }
         while let Some(batch) = batches.next() {
             let batch = batch?;
             if worker.cancel.load(Ordering::Relaxed) {
