@@ -1,5 +1,49 @@
 # Handover: npu-log-decision
 
+## Triager task 3.1, 26 November
+
+`l2d mcp` now serves occurrence-aware field and time views:
+- **Projections.** Fields and a timestamp are declared at `triager_open {source, projections}` or added later with an explicit re-scan, `triager_open {snapshot, projections}`. One admitted pass sees every occurrence before identical texts collapse, through `ZipBatches::observe` in `l2d-core`, and writes a sorted occurrence table to memory or disk. The code is in `service/project.rs` and `service/facets.rs`.
+- **Views and drills.** `triager_inspect` serves `fields` and `histogram`. `triager_refine` serves `field` and `time` drills as child views on the same snapshot, and a record's evidence lists every occurrence with `in_view`. None of these reads the source, scores or calls a model.
+- **Missing declarations.** A field or timestamp that no projection declares returns `projection_missing` with the scan estimate and the exact `rescan` request, and runs nothing. A declared timestamp with no valid value returns `time_unavailable` and offers occurrences by archive entry instead, labelled "not time".
+
+Round 1 of the independent review was rejected: the scale leg declared no timestamp, and an undeclared timestamp answered `time_unavailable`. Round 2 was approved by a fresh reviewer. The task is merged to `main` without pushing (`2843396`, merge `efa42b0`). Workspace: 1,142 passed, 0 failed, 58 ignored; Clippy and fmt are clean.
+
+Scale evidence, release binary `70A9834F…9A19`:
+- **Legs:** streamed 512 MB, spill 256 MB with tables and dedup on disk, and tight 192 MB all match an independent oracle.
+- **Fixtures:** the 1.3 fixture covers fields and the re-scan; a new timestamped variant (`generate.py --timestamps`) covers time. The default generator output is unchanged.
+- **Warm sequence:** 69 interactions per leg, with work counters unchanged. View p95 was 253–265 ms, a fresh drill 141–179 ms, and a replay under 1 ms.
+
+[Task 3.1 record with deviations, test gaps and names awaiting confirmation](specs/triager/tasks.md) · evidence in `D:\BuildArtifacts\log2decision\triager-3.1\scale2\` (round 1 in `scale\`)
+
+What to know before building on it:
+- **Text timestamps:** a timestamp read from a record's text is the same for every repeat of that text. Only an occurrence source, the entry path with `time.from: entry`, puts one original in several time buckets.
+- **Child-view counts:** a field or time child view counts whole originals and reports `matching_occurrences` apart. There is no occurrence-level set algebra.
+- **Timestamp format:** UTC only. A timestamp needs `Z` or an offset, or `format: date`.
+- **Field values:** a field keeps its first `max_values` values (default 10,000). The rest are counted as overflow and flagged with `exact: false` and `ranking_exact: false`.
+- **Snapshots per server:** three projected snapshots in one 512 MB server refuse a re-scan with figures, because tables stay where they were placed. The scale legs therefore use two servers.
+- **Open result:** the `projections` capability block is left out of the open result. The 2.1 test `service_drill_memory` has an 89-byte margin at 16 MiB because the job-table copy is not counted as `unowned`. Fix that accounting first.
+
+Cleanup done on 26 November:
+- The merged branches `triager-1.1` to `triager-3.1` were deleted.
+- Eight `codex/*` branches were deleted together with their worktrees. All were merged and unchanged since 18 November.
+- The shared target's dev profile was cleaned: 26.3 GiB removed, the target is now 2.0 GiB, and D: has 142 GiB free. The release binary `70A9834F…` is kept.
+- `codex/task-2.22` and its worktree `D:\BuildArtifacts\log2decision\worktrees\task-2.22` were kept on purpose. The worktree holds an uncommitted draft, `docs/qualification/end-to-end-triage-status.md`, dated 18 November, that says task 2.22 was blocked; it predates the 2.22 result. The owner decides whether to keep or drop it.
+
+Next, only when the owner asks: task 3.2 covers the TUI over the service, the SSH PTY acceptance, excerpts after reopen by checking the source hash again, and the MCP and terminal audit keys, which still differ (64-bit and 32-bit FNV-1a). Task 3.3, the model judge, stays deferred.
+
+Decisions waiting for the owner:
+- confirm the names added in 3.1: `projections`, the `fields` and `histogram` views, the `field` and `time` refines, `projection_missing`, `time_unavailable`, the fault codes and the result fields (full list in the tasks.md record);
+- push `main`, which is 18 commits ahead of `origin`;
+- the `codex/task-2.22` draft;
+- plain-file and store sources still have no task;
+- set tables stay in the placement they were first given.
+
+Things that will bite:
+- The test `service_drill_round2::listed_selections_on_disk…` fails about one run in three, because its Venn allocation follows IDs derived from the tempdir path. It failed once in the 3.1 implementer's round-2 run.
+- The first build after the clean is a full dev rebuild.
+- An AIT or fixture leg takes about 10 to 15 minutes; timings are system-related.
+
 ## Triager service, tasks 1.1–2.2, 25 November
 
 The service milestone named under "Triager workflow, 18 November" is done. `l2d mcp` is a local stdio MCP server with no network crates, and `--requests FILE` runs the same calls as a recipe. It does the following:
@@ -24,18 +68,7 @@ Owner decisions of 25 November:
 - Membership files become JSON lines (done in 2.2).
 - The model judge for `recommend` moves to the new task 3.3, with its open questions. Do not start it until a comparison shows value. A selected external provider is acceptable, but only with small data and bounded cost, both stated before any run. Do not call a model or start Ollama for triage until then.
 
-Next, only when the owner asks: task 3.1 (occurrence-aware field, time and record views), then 3.2 (the TUI over the service, excerpts after reopen, and the MCP and terminal audit keys, which still differ: 64-bit and 32-bit FNV-1a).
-
-Decisions waiting for the owner:
-- push `main`, which is 15 commits ahead of `origin`;
-- delete the merged branches `triager-1.1` to `triager-2.2` and the old `codex/*` branches;
-- plain-file and store sources have no task;
-- set tables stay in the placement they were first given.
-
-Things that will bite:
-- The test `service_drill_round2::listed_selections_on_disk…` fails about one run in three, because its Venn allocation follows IDs derived from the tempdir path.
-- The Cargo target is at 27.5 GiB of 30. Clean with `cargo clean --profile dev` on the shared target before the next release build.
-- An AIT run takes about 10 to 15 minutes per leg; timings are system-related.
+Next steps, open decisions and known problems from this section are carried into "Triager task 3.1, 26 November" above.
 
 ## Task 2.25, 23 November
 
