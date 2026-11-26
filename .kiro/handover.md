@@ -14,7 +14,7 @@ Scale evidence, release binary `70A9834F…9A19`:
 - **Fixtures:** the 1.3 fixture covers fields and the re-scan; a new timestamped variant (`generate.py --timestamps`) covers time. The default generator output is unchanged.
 - **Warm sequence:** 69 interactions per leg, with work counters unchanged. View p95 was 253–265 ms, a fresh drill 141–179 ms, and a replay under 1 ms.
 
-[Task 3.1 record with deviations, test gaps and names awaiting confirmation](specs/triager/tasks.md) · evidence in `D:\BuildArtifacts\log2decision\triager-3.1\scale2\` (round 1 in `scale\`)
+[Task 3.1 record with deviations, test gaps and the confirmed names](specs/triager/tasks.md) · evidence in `D:\BuildArtifacts\log2decision\triager-3.1\scale2\` (round 1 in `scale\`)
 
 What to know before building on it:
 - **Text timestamps:** a timestamp read from a record's text is the same for every repeat of that text. Only an occurrence source, the entry path with `time.from: entry`, puts one original in several time buckets.
@@ -28,16 +28,22 @@ Cleanup done on 26 November:
 - The merged branches `triager-1.1` to `triager-3.1` were deleted.
 - Eight `codex/*` branches were deleted together with their worktrees. All were merged and unchanged since 18 November.
 - The shared target's dev profile was cleaned: 26.3 GiB removed, the target is now 2.0 GiB, and D: has 142 GiB free. The release binary `70A9834F…` is kept.
-- `codex/task-2.22` and its worktree `D:\BuildArtifacts\log2decision\worktrees\task-2.22` were kept on purpose. The worktree holds an uncommitted draft, `docs/qualification/end-to-end-triage-status.md`, dated 18 November, that says task 2.22 was blocked; it predates the 2.22 result. The owner decides whether to keep or drop it.
+- On the owner's decision, `codex/task-2.22` and its worktree were removed too, together with its uncommitted draft of 18 November (`docs/qualification/end-to-end-triage-status.md`, superseded by the 2.22 result). No task branches or worktrees remain; only `main`.
 
-Next, only when the owner asks: task 3.2 covers the TUI over the service, the SSH PTY acceptance, excerpts after reopen by checking the source hash again, and the MCP and terminal audit keys, which still differ (64-bit and 32-bit FNV-1a). Task 3.3, the model judge, stays deferred.
+Owner decisions of 26 November:
+- The names added in 3.1 are confirmed as built: `projections`, the `fields` and `histogram` views, the `field` and `time` refines, `projection_missing`, `time_unavailable`, and the fault codes and result fields listed in the tasks.md record.
+- Push `main` (done after this handover was committed).
+- Drop the 2.22 draft without a copy (done).
+- New task 3.4: move a committed set table to disk when memory runs short, so the three-snapshot case of 3.1 completes in one 512 MB server.
+- Plain-file and store sources get no task for now; they stay refused by name as an accepted limit of this milestone.
 
-Decisions waiting for the owner:
-- confirm the names added in 3.1: `projections`, the `fields` and `histogram` views, the `field` and `time` refines, `projection_missing`, `time_unavailable`, the fault codes and the result fields (full list in the tasks.md record);
-- push `main`, which is 18 commits ahead of `origin`;
-- the `codex/task-2.22` draft;
-- plain-file and store sources still have no task;
-- set tables stay in the placement they were first given.
+Next, only when the owner asks:
+- task 3.2: the TUI over the service, the SSH PTY acceptance, excerpts after reopen by checking the source hash again, and the MCP and terminal audit keys, which still differ (64-bit and 32-bit FNV-1a);
+- task 3.4: re-placing committed tables (depends on 1.3 and 3.1).
+
+Task 3.3, the model judge, stays deferred.
+
+No decisions are waiting for the owner.
 
 Things that will bite:
 - The test `service_drill_round2::listed_selections_on_disk…` fails about one run in three, because its Venn allocation follows IDs derived from the tempdir path. It failed once in the 3.1 implementer's round-2 run.
