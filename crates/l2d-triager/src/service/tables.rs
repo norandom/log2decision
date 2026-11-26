@@ -127,6 +127,51 @@ impl Table {
         })
     }
 
+    /// The file `name` of `dir`, written before, as a table of its `len` bytes: a table
+    /// that was put in order on disk is kept where it is, not copied. The file is
+    /// removed with the table.
+    pub fn adopt(dir: &Arc<SetDir>, name: &str, len: u64) -> Result<Self, L2dError> {
+        let path = dir.path().join(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| failed("opening", &path, &error))?;
+        let found = file
+            .metadata()
+            .map_err(|error| failed("reading the length of", &path, &error))?
+            .len();
+        if found != len {
+            return Err(L2dError::Runtime {
+                detail: format!(
+                    "{} holds {found} bytes where {len} were written",
+                    path.display()
+                ),
+            });
+        }
+        Ok(Self {
+            backing: Backing::Disk {
+                file,
+                path,
+                _dir: dir.clone(),
+            },
+            len,
+        })
+    }
+
+    /// `bytes` in memory as a table. The caller has asked the budget for them.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        let len = bytes.len() as u64;
+        Self {
+            backing: Backing::Memory(bytes),
+            len,
+        }
+    }
+
+    pub fn byte_len(&self) -> u64 {
+        self.len
+    }
+
     pub fn is_on_disk(&self) -> bool {
         matches!(self.backing, Backing::Disk { .. })
     }

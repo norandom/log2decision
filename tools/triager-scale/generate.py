@@ -64,6 +64,30 @@ def text_of(key: int) -> str:
     return " ".join(parts)
 
 
+def stamped(key: int, day: int, text: str) -> str:
+    """Triager task 3.1, `--timestamps`: the record of the original `key` first read on
+    day `day` of January 2026, with a leading ISO 8601 time that varies within the day.
+    One original in 13 has none (missing), one in 29 has one without a zone (invalid,
+    as the service reads timestamps). A repeat is the same text, so it carries the time
+    of its original: the entries it is read from are other days."""
+    if key % 13 == 5:
+        return text
+    seconds = key * 7_919 % 86_400
+    clock = f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    if key % 29 == 7:
+        return f"2026-01-{day:02d} {clock} {text}"
+    return f"2026-01-{day:02d}T{clock}Z {text}"
+
+
+def record(key: int, state: dict) -> str:
+    """The text of the original `key` as the archive holds it."""
+    if not state["timestamps"]:
+        return text_of(key)
+    first = state["first"]
+    day = first[key] >> LINE_BITS if key < len(first) else state["late_entry"]
+    return stamped(key, day, text_of(key))
+
+
 def fixture_state(key: int):
     """What the stand-in for C says of the original `key`; None is not assessed."""
     if key % 4 == 3 or key % 16 not in (0, 1, 2, 5, 6, 7, 8, 9, 10):
@@ -99,7 +123,7 @@ def entry_lines(entry: int, slots: int, seed: int, state: dict):
             # A repeat of an original of this or an earlier time bin.
             key = (slot * 2_654_435_761 + entry * 40_503 + seed) % state["keys"]
         slot += 1
-        yield text_of(key).encode()
+        yield record(key, state).encode()
 
 
 def write_entry(archive: zipfile.ZipFile, name: str, lines) -> int:
@@ -132,6 +156,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--scale", choices=SCALES, default="full")
     parser.add_argument("--seed", type=int, default=20261125)
+    parser.add_argument("--timestamps", action="store_true",
+                        help="task 3.1: a leading ISO 8601 time per record and entries named by day")
     args = parser.parse_args()
     bins, slots = SCALES[args.scale]
     args.out.mkdir(parents=True, exist_ok=True)
@@ -139,6 +165,8 @@ def main() -> int:
 
     state = {
         "keys": 0,
+        "timestamps": args.timestamps,
+        "late_entry": bins + 2,
         "first": array.array("Q"),
         "skipped": {
             "empty line": 0,
@@ -147,7 +175,10 @@ def main() -> int:
         },
     }
     names = ["notes/README.txt"]
-    names += [f"logs/day-{day:02d}.log" for day in range(1, bins + 1)]
+    if args.timestamps:
+        names += [f"logs/2026-01-{day:02d}.log" for day in range(1, bins + 1)]
+    else:
+        names += [f"logs/day-{day:02d}.log" for day in range(1, bins + 1)]
     names += ["logs/core-dump.log", "logs/late.log"]
     archive_path = args.out / "fixture.zip"
     physical = {}
@@ -166,8 +197,8 @@ def main() -> int:
         info.compress_type = zipfile.ZIP_DEFLATED
         archive.writestr(info, core)
         # A last, short text entry after it: three repeats and one new original.
-        late = [text_of(0).encode(), text_of(1).encode(), text_of(0).encode()]
-        late.append(text_of(state["keys"]).encode())
+        late = [record(0, state).encode(), record(1, state).encode(), record(0, state).encode()]
+        late.append(record(state["keys"], state).encode())
         state["first"].append((bins + 2) << LINE_BITS | 4)
         state["keys"] += 1
         physical[names[bins + 2]] = write_entry(archive, names[bins + 2], late)
@@ -208,6 +239,7 @@ def main() -> int:
     manifest = {
         "fixture": "triager scale gate, task 1.3",
         "scale": args.scale,
+        **({"timestamps": True} if args.timestamps else {}),
         "seed": args.seed,
         "generator": {
             "python": platform.python_version(),

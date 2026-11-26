@@ -29,6 +29,7 @@ This file imports nothing of `generate.py` and nothing of the product.
 import argparse
 import array
 import bisect
+import calendar
 import fnmatch
 import hashlib
 import json
@@ -497,5 +498,435 @@ def main() -> int:
     return 0
 
 
+# --- Triager task 3.1: field, time and record views -------------------------------------
+#
+# `python oracle.py facets --zip fixture.zip --out facets.json` reads every accepted
+# occurrence (not only the first of each text), attributes it to its original by text,
+# and computes what the fields, histogram and drill views of the service state: for
+# every projected field the occurrences and distinct originals with a value, missing
+# and beyond the retained limit (the first `MAX_VALUES` values in read order), the
+# first page of values, the occurrences by archive entry (the no-time alternative: the
+# fixture's records carry no timestamp), the drills the scale leg makes and the
+# occurrences of one repeated original. A field's value is the `key=value` token of the
+# record split at spaces, which is what Splunk's automatic extraction gives on the
+# fixture's records; nothing of the product is imported.
+
+FIELDS = ("event", "host", "src", "svc", "user")
+RESCAN_FIELD = "status"
+MAX_VALUES = 10_000
+MAX_VALUE_BYTES = 256
+PAGE = 25
+NUMBER = re.compile(r"^[+-]?(\d+\.?\d*([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?)$")
+
+
+def tokens(text: str) -> dict:
+    found = {}
+    for part in text.split(" "):
+        key, sep, value = part.partition("=")
+        if sep and value and key not in found:
+            found[key] = value
+    return found
+
+
+def read_occurrences(path: Path, patterns, max_record_bytes: int, times=None):
+    """Every accepted occurrence: the original it repeats (by first position order) and
+    its entry, with the values of every field per original, interned per field in read
+    order up to `MAX_VALUES` (`-1` missing, `-2` beyond the limit, `-3` too long)."""
+    index = {}
+    first = array.array("Q")
+    count = array.array("L")
+    occ_original = array.array("L")
+    occ_entry = array.array("H")
+    names = {}
+    fields = (*FIELDS, RESCAN_FIELD)
+    ids = {field: {} for field in fields}
+    values_of = {field: array.array("l") for field in fields}
+    report = {"records": 0, "accepted_occurrences": 0}
+    with zipfile.ZipFile(path) as archive:
+        for entry, info in enumerate(archive.infolist()):
+            name = info.filename
+            if info.is_dir() or not any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                continue
+            with archive.open(info) as member:
+                head = member.read(8192)
+            text_head = b"\0" not in head
+            if text_head:
+                try:
+                    head.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    text_head = error.start >= len(head) - 3 and len(head) == 8192
+            if not text_head:
+                continue
+            names[entry] = name
+            with archive.open(info) as member:
+                for number, raw in enumerate(member, start=1):
+                    report["records"] += 1
+                    line = raw[:-1] if raw.endswith(b"\n") else raw
+                    if line.endswith(b"\r"):
+                        line = line[:-1]
+                    if not line or len(line) > max_record_bytes:
+                        continue
+                    try:
+                        text = line.decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    report["accepted_occurrences"] += 1
+                    digest = hashlib.blake2b(line, digest_size=16).digest()
+                    at = index.get(digest)
+                    if at is None:
+                        at = len(first)
+                        index[digest] = at
+                        first.append(entry << LINE_BITS | number)
+                        count.append(0)
+                        found = tokens(text)
+                        for field in fields:
+                            value = found.get(field)
+                            if value is None:
+                                code = -1
+                            elif len(value.encode()) > MAX_VALUE_BYTES:
+                                code = -3
+                            elif value in ids[field]:
+                                code = ids[field][value]
+                            elif len(ids[field]) < MAX_VALUES:
+                                code = ids[field][value] = len(ids[field])
+                            else:
+                                code = -2
+                            values_of[field].append(code)
+                        if times is not None:
+                            times.append(leading_time(text))
+                    count[at] += 1
+                    occ_original.append(at)
+                    occ_entry.append(entry)
+    del index
+    report["distinct_originals"] = len(first)
+    return first, count, occ_original, occ_entry, names, ids, values_of, report
+
+
+def pair(originals, occurrences):
+    return {"distinct_originals": originals, "occurrences": occurrences}
+
+
+def facets_main(argv) -> int:
+    parser = argparse.ArgumentParser(prog="oracle.py facets")
+    parser.add_argument("--zip", required=True, type=Path)
+    parser.add_argument("--entry", action="append", default=None)
+    parser.add_argument("--max-record-bytes", type=int, default=4096)
+    parser.add_argument("--out", required=True, type=Path)
+    args = parser.parse_args(argv)
+    patterns = args.entry or ["*.log"]
+    started = time.monotonic()
+    first, count, occ_original, occ_entry, names, ids, values_of, report = read_occurrences(
+        args.zip, patterns, args.max_record_bytes)
+    size = len(first)
+    total = len(occ_original)
+    value_text = {field: {code: value for value, code in ids[field].items()} for field in ids}
+
+    def summary(field, members=None):
+        """The fields-view figures of `field` over the originals `members` (all)."""
+        codes = values_of[field]
+        with_value = missing = invalid = overflow = number = string = (0, 0)
+        seen = set()
+
+        def add(sum_, original):
+            return sum_[0] + 1, sum_[1] + count[original]
+
+        for original in range(size) if members is None else members:
+            code = codes[original]
+            if code == -1:
+                missing = add(missing, original)
+            elif code == -3:
+                invalid = add(invalid, original)
+            else:
+                with_value = add(with_value, original)
+                if code == -2:
+                    overflow = add(overflow, original)
+                else:
+                    seen.add(code)
+                    if NUMBER.match(value_text[field][code].strip()):
+                        number = add(number, original)
+                    else:
+                        string = add(string, original)
+        return {"with_value": pair(*with_value), "missing": pair(*missing),
+                "invalid": pair(*invalid), "overflow": pair(*overflow),
+                "types": {"number": pair(*number), "string": pair(*string)},
+                "distinct_values": len(seen), "exact": overflow[1] == 0}
+
+    def first_page(field, members=None, occurrences_of=None):
+        """The first page of values: most occurrences first, then value ascending. A
+        text-derived value is the same for every occurrence of an original, so an
+        original counts once with all its counted occurrences."""
+        codes = values_of[field]
+        per = {}
+        for original in range(size) if members is None else members:
+            code = codes[original]
+            if code < 0:
+                continue
+            counted = count[original] if occurrences_of is None else occurrences_of[original]
+            originals, occurrences = per.get(code, (0, 0))
+            per[code] = (originals + 1, occurrences + counted)
+        ranked = sorted(per.items(), key=lambda item: (-item[1][1], value_text[field][item[0]]))
+        return {"values_total": len(per),
+                "rows": [{"value": value_text[field][code], **pair(*figures)}
+                         for code, figures in ranked[:PAGE]]}
+
+    # The snapshot: every field, the first pages and the entries.
+    out = {
+        "source": {"zip": args.zip.name, "entries": patterns,
+                   "max_record_bytes": args.max_record_bytes},
+        "counts": {**report, "occurrences": total},
+        "fields": {field: summary(field) for field in FIELDS},
+        "pages": {field: first_page(field) for field in FIELDS},
+    }
+    entries_seen = {}
+    last_entry = array.array("h", [-1]) * size
+    for at, original in enumerate(occ_original):
+        entry = occ_entry[at]
+        figures = entries_seen.setdefault(entry, [0, 0])
+        figures[1] += 1
+        if last_entry[original] != entry:
+            last_entry[original] = entry
+            figures[0] += 1
+    out["entries"] = [{"entry": names[entry], "entry_index": entry, **pair(*entries_seen[entry])}
+                      for entry in sorted(entries_seen)]
+    out["source_field"] = {"distinct_values": len(entries_seen)}
+
+    # Drill 1: the occurrences of one entry, the time bin of the fixture.
+    day = next(entry for entry, name in names.items() if name == "logs/day-03.log")
+    in_day = array.array("L", [0]) * size
+    for at, original in enumerate(occ_original):
+        if occ_entry[at] == day:
+            in_day[original] += 1
+    members = [original for original in range(size) if in_day[original]]
+    out["drill_day"] = {
+        "entry": "logs/day-03.log",
+        "counts_in": len(members),
+        "occurrence_counts_in": sum(count[original] for original in members),
+        "matching_in": sum(in_day[original] for original in members),
+        "matching_parent": total,
+        "user_page": first_page("user", members, in_day),
+        "user_summary_counted": pair(len(members), sum(in_day[o] for o in members)),
+    }
+    # Drill 2, below it: the most frequent user of the day.
+    top_user = out["drill_day"]["user_page"]["rows"][0]["value"]
+    code = ids["user"][top_user]
+    nested = [original for original in members if values_of["user"][original] == code]
+    out["drill_day_user"] = {
+        "user": top_user,
+        "counts_in": len(nested),
+        "counts_parent": len(members),
+        "matching_in": sum(in_day[original] for original in nested),
+        "matching_parent": out["drill_day"]["matching_in"],
+    }
+    # Drill 3: a host of the snapshot.
+    host = ids["host"]["h042"]
+    hosted = [original for original in range(size) if values_of["host"][original] == host]
+    out["drill_host"] = {"host": "h042", "counts_in": len(hosted),
+                         "matching_in": sum(count[original] for original in hosted)}
+    # The evidence of one repeated original of the day: every occurrence by position.
+    repeated = next(original for original in members if count[original] >= 3
+                    and in_day[original] < count[original])
+    positions = []
+    for at, original in enumerate(occ_original):
+        if original == repeated:
+            positions.append(occ_entry[at])
+    out["evidence"] = {"id": record_id(first[repeated]), "total": count[repeated],
+                       "in_view": in_day[repeated],
+                       "entries": [names[entry] for entry in positions]}
+    # The re-scan: the field the first projection does not declare.
+    out["rescan"] = {"field": RESCAN_FIELD, "summary": summary(RESCAN_FIELD),
+                     "page": first_page(RESCAN_FIELD)}
+    out["oracle_seconds"] = round(time.monotonic() - started, 1)
+    args.out.write_text(json.dumps(out, indent=1) + "\n")
+    print(json.dumps({"counts": out["counts"], "drill_day": {
+        key: out["drill_day"][key] for key in ("counts_in", "matching_in")},
+        "seconds": out["oracle_seconds"]}))
+    return 0
+
+
+# --- Triager task 3.1, round 2: the timestamped fixture (`generate.py --timestamps`) ---
+#
+# `python oracle.py time --zip fixture.zip --out time.json` computes the histogram of
+# the records' leading timestamps and of the entries' days, the drills of the scale leg
+# and their counts in both units, from the archive alone. A record's timestamp is the
+# leading `YYYY-MM-DDTHH:MM:SSZ` token; one that begins like a date and is not that is
+# invalid (the generator writes `YYYY-MM-DD HH:MM:SS` without a zone), any other record
+# has none. An entry's day is the `YYYY-MM-DD` of its name; `logs/late.log` has none.
+
+TIME_MISSING = -(1 << 62)
+TIME_INVALID = TIME_MISSING + 1
+WIDTHS = (1, 60, 300, 900, 3_600, 21_600, 86_400, 604_800, 2_592_000, 31_536_000)
+STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z(?: |$)")
+DATED = re.compile(r"\d{4}-")
+ENTRY_DAY = re.compile(r"(\d{4})-(\d{2})-(\d{2})\.log$")
+
+
+def leading_time(text: str) -> int:
+    if not DATED.match(text):
+        return TIME_MISSING
+    found = STAMP.match(text)
+    if not found:
+        return TIME_INVALID
+    return calendar.timegm(tuple(int(part) for part in found.groups()))
+
+
+def iso(seconds: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def histogram(times, count, selected, width):
+    """Buckets of `width` over the originals `selected`: a timestamp read from the text
+    is the same for every occurrence of an original, so an original falls in one bucket
+    with all its occurrences."""
+    valid = [o for o in selected if times[o] > TIME_INVALID]
+    low = min(times[o] for o in valid)
+    high = max(times[o] for o in valid)
+    first = low // width * width
+    buckets = high // width - low // width + 1
+    originals = [0] * buckets
+    occurrences = [0] * buckets
+    for o in valid:
+        at = (times[o] - first) // width
+        originals[at] += 1
+        occurrences[at] += count[o]
+    return {"bucket_seconds": width,
+            "range": {"start": iso(first), "end": iso(first + buckets * width)},
+            "observed": {"earliest": iso(low), "latest": iso(high)},
+            "buckets": [{"start": iso(first + at * width), "distinct_originals": originals[at],
+                         "occurrences": occurrences[at]} for at in range(buckets)]}
+
+
+def auto_width(low, high):
+    return next(width for width in WIDTHS if high // width - low // width + 1 <= 100)
+
+
+def time_main(argv) -> int:
+    parser = argparse.ArgumentParser(prog="oracle.py time")
+    parser.add_argument("--zip", required=True, type=Path)
+    parser.add_argument("--entry", action="append", default=None)
+    parser.add_argument("--max-record-bytes", type=int, default=4096)
+    parser.add_argument("--out", required=True, type=Path)
+    args = parser.parse_args(argv)
+    patterns = args.entry or ["*.log"]
+    started = time.monotonic()
+    times = array.array("q")
+    first, count, occ_original, occ_entry, names, ids, values_of, report = read_occurrences(
+        args.zip, patterns, args.max_record_bytes, times)
+    size = len(first)
+    total = len(occ_original)
+    user_text = {code: value for value, code in ids["user"].items()}
+    every = range(size)
+
+    def classes(selected):
+        figures = {"with_time": [0, 0], "missing_time": [0, 0], "invalid_time": [0, 0]}
+        for o in selected:
+            when = times[o]
+            name = ("missing_time" if when == TIME_MISSING
+                    else "invalid_time" if when == TIME_INVALID else "with_time")
+            figures[name][0] += 1
+            figures[name][1] += count[o]
+        return {name: pair(*value) for name, value in figures.items()}
+
+    valid = [times[o] for o in every if times[o] > TIME_INVALID]
+    width = auto_width(min(valid), max(valid))
+    del valid
+    out = {"source": {"zip": args.zip.name, "entries": patterns,
+                      "max_record_bytes": args.max_record_bytes},
+           "counts": {**report, "occurrences": total},
+           "text": {"auto": histogram(times, count, every, width),
+                    "day": histogram(times, count, every, 86_400), **classes(every)}}
+    # The bucket drill: the bucket of the automatic width with the most occurrences, the
+    # earliest of them; then the most frequent user in it, and the records without time.
+    buckets = out["text"]["auto"]["buckets"]
+    chosen = max(range(len(buckets)), key=lambda at: (buckets[at]["occurrences"], -at))
+    start = calendar.timegm(time.strptime(buckets[chosen]["start"], "%Y-%m-%dT%H:%M:%SZ"))
+    end = start + width
+    inside = [o for o in every if start <= times[o] < end]
+    per_user = {}
+    for o in inside:
+        code = values_of["user"][o]
+        if code >= 0:
+            originals, occurrences = per_user.get(code, (0, 0))
+            per_user[code] = (originals + 1, occurrences + count[o])
+    ranked = sorted(per_user.items(), key=lambda item: (-item[1][1], user_text[item[0]]))
+    top_code = ranked[0][0]
+    nested = [o for o in inside if values_of["user"][o] == top_code]
+    untimed = [o for o in every if times[o] <= TIME_INVALID]
+    inside_occurrences = sum(count[o] for o in inside)
+    out["drill_bucket"] = {
+        "start": iso(start), "end": iso(end), "counts_in": len(inside),
+        "occurrence_counts_in": inside_occurrences,
+        "matching_in": inside_occurrences, "matching_parent": total,
+        "hourly": histogram(times, count, inside, 3_600)["buckets"],
+        "user_page": [{"value": user_text[code], **pair(*figures)}
+                      for code, figures in ranked[:PAGE]],
+    }
+    out["drill_bucket_user"] = {"user": user_text[top_code], "counts_in": len(nested),
+                                "counts_parent": len(inside),
+                                "matching_in": sum(count[o] for o in nested),
+                                "matching_parent": inside_occurrences}
+    out["drill_no_time"] = {"counts_in": len(untimed),
+                            "matching_in": sum(count[o] for o in untimed)}
+    # The entries' days: a time of every occurrence, so a repeated original falls on
+    # several days. Every dated entry is one day, so a day's figures are its entry's.
+    day_of = {}
+    for entry, name in names.items():
+        found = ENTRY_DAY.search(name)
+        day_of[entry] = (calendar.timegm((*(int(part) for part in found.groups()), 0, 0, 0))
+                         if found else TIME_MISSING)
+    per_entry = {entry: [0, 0] for entry in names}
+    last = array.array("h", [-1]) * size
+    days_seen = array.array("B", [0]) * size
+    for at in range(total):
+        o, entry = occ_original[at], occ_entry[at]
+        figures = per_entry[entry]
+        figures[1] += 1
+        if last[o] != entry:
+            last[o] = entry
+            figures[0] += 1
+            if day_of[entry] != TIME_MISSING and days_seen[o] < 255:
+                days_seen[o] += 1
+    dated = sorted(entry for entry in names if day_of[entry] != TIME_MISSING)
+    low, high = day_of[dated[0]], day_of[dated[-1]]
+    days = {"bucket_seconds": 86_400,
+            "range": {"start": iso(low), "end": iso(high + 86_400)},
+            "buckets": []}
+    for day in range(low, high + 86_400, 86_400):
+        entry = next((e for e in dated if day_of[e] == day), None)
+        figures = per_entry[entry] if entry is not None else [0, 0]
+        days["buckets"].append({"start": iso(day), **pair(*figures)})
+    late = [entry for entry in names if day_of[entry] == TIME_MISSING]
+    days["missing_time"] = pair(sum(per_entry[e][0] for e in late),
+                                sum(per_entry[e][1] for e in late))
+    # Entries are read in order and each dated one is its own day, so an original read
+    # from two dated entries is on two days.
+    days["originals_on_several_days"] = sum(1 for o in every if days_seen[o] >= 2)
+    # What a day histogram counts beyond the originals with a day: one more for every
+    # further day an original is read on.
+    days["extra_day_counts"] = sum(days_seen[o] - 1 for o in every if days_seen[o] >= 2)
+    out["entry_days"] = days
+    # The day drill: the busiest day, its occurrences and their distinct originals.
+    rows = days["buckets"]
+    busiest = max(range(len(rows)), key=lambda at: (rows[at]["occurrences"], -at))
+    entry = next(e for e in dated if iso(day_of[e]) == rows[busiest]["start"])
+    members = {occ_original[at] for at in range(total) if occ_entry[at] == entry}
+    out["drill_day"] = {"start": rows[busiest]["start"],
+                        "end": iso(day_of[entry] + 86_400),
+                        "counts_in": len(members), "matching_in": rows[busiest]["occurrences"],
+                        "occurrence_counts_in": sum(count[o] for o in members)}
+    out["oracle_seconds"] = round(time.monotonic() - started, 1)
+    args.out.write_text(json.dumps(out, indent=1) + "\n")
+    print(json.dumps({"counts": out["counts"], "auto_width": width,
+                      "text_classes": {key: out["text"][key] for key in
+                                       ("with_time", "missing_time", "invalid_time")},
+                      "drill_bucket": out["drill_bucket"]["counts_in"],
+                      "several_days": days["originals_on_several_days"],
+                      "seconds": out["oracle_seconds"]}))
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "facets":
+        sys.exit(facets_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "time":
+        sys.exit(time_main(sys.argv[2:]))
     sys.exit(main())

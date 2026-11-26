@@ -9,7 +9,7 @@
 //! and ordering commands refuse them. The query is compiled once per drill and
 //! every allocation made while it runs is checked against the memory budget.
 mod eval;
-mod field;
+pub(crate) mod field;
 mod search;
 
 use std::{borrow::Cow, cmp::Ordering, collections::HashMap, mem::size_of, net::IpAddr};

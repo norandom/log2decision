@@ -999,6 +999,7 @@ impl ZipInput {
             merge: None,
             readers: None,
             reading: None,
+            observer: None,
         }
     }
 
@@ -1901,6 +1902,10 @@ impl Iterator for OccurrenceCounts<'_> {
 
 // --- The batches ---------------------------------------------------------------------------
 
+/// What [`ZipBatches::observe`] calls with the packed position and the text of every
+/// accepted record.
+pub type Observer<'a> = dyn FnMut(u64, &str) -> Result<(), L2dError> + 'a;
+
 /// The batches of an archive: see [`ZipInput::batches`].
 pub struct ZipBatches<'a> {
     input: &'a mut ZipInput,
@@ -1920,6 +1925,8 @@ pub struct ZipBatches<'a> {
     readers: Option<Readers>,
     /// The entry whose lines are being taken from a reader thread.
     reading: Option<Reading>,
+    /// Called with every accepted record before it is deduplicated ([`ZipBatches::observe`]).
+    observer: Option<&'a mut Observer<'a>>,
 }
 
 /// The entry whose lines are being taken from a reader thread, and how far.
@@ -1966,7 +1973,7 @@ impl Iterator for ZipBatches<'_> {
     }
 }
 
-impl ZipBatches<'_> {
+impl<'a> ZipBatches<'a> {
     /// The path of the entry with the index `entry` in the directory, as a position
     /// names it ([`ArchivePosition::entry`]).
     pub fn entry_path(&self, entry: u32) -> Option<&str> {
@@ -1992,6 +1999,18 @@ impl ZipBatches<'_> {
     /// the read has gone on on disk (triager task 1.2).
     pub fn disk_dedup(&self) -> Option<DiskDedup> {
         self.input.disk_dedup()
+    }
+
+    /// Calls `observer` with the packed position ([`ArchivePosition`]) and the text of
+    /// every accepted record, repeats included, in the order the records are read: entry
+    /// by entry in directory order and line by line, whatever the batch size, the number
+    /// of entries read at once or the placement of deduplication. Skipped records are not
+    /// observed. An error of `observer` ends the read as any other error does. For a
+    /// caller that projects every occurrence of an original while the batches carry only
+    /// its first position and its count (triager task 3.1). The observer allocates
+    /// nothing here; what it keeps is the caller's to hold.
+    pub fn observe(&mut self, observer: &'a mut Observer<'a>) {
+        self.observer = Some(observer);
     }
 
     /// Reads on until a batch with new texts is complete; `None` at the end of the
@@ -2187,6 +2206,12 @@ impl ZipBatches<'_> {
                 source_bytes
             }
             Judged::Text(digest) => {
+                if let Some(observer) = self.observer.as_mut() {
+                    let text = std::str::from_utf8(text).map_err(|_| L2dError::Runtime {
+                        detail: "an accepted record of an archive is not valid UTF-8".into(),
+                    })?;
+                    observer(position, text)?;
+                }
                 self.accepted.record(position, digest, Label::Unknown);
                 self.accepted.push_raw(text);
                 // Polars removes one carriage return before the line feed. A text

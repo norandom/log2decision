@@ -56,6 +56,21 @@ fn key(record: &[u8]) -> u64 {
     u64::from_le_bytes(first)
 }
 
+/// What a record is ordered by: its key and, for a record of at least 16 bytes, its
+/// next eight bytes as a little-endian number after it. Records of one key are so put
+/// in a stated order by their second eight bytes (the occurrences of one original by
+/// their position, triager task 3.1); for every caller the order by the key is the same.
+fn order_key(record: &[u8], width: usize) -> u128 {
+    let second = if width >= 16 {
+        let mut next = [0u8; 8];
+        next.copy_from_slice(&record[8..16]);
+        u64::from_le_bytes(next)
+    } else {
+        0
+    };
+    (u128::from(key(record)) << 64) | u128::from(second)
+}
+
 /// The run files of one sort; removed with it, however it ends.
 struct Runs {
     dir: PathBuf,
@@ -116,8 +131,9 @@ pub(crate) struct Sorted {
 }
 
 /// Writes the `records` records of `width` bytes in `input` to `output`, ordered by
-/// their first eight bytes as a little-endian number. Records of one key keep no
-/// stated order. Run files are written into `dir` and removed again.
+/// their first eight bytes as a little-endian number, and records of one key by their
+/// next eight bytes when they have them ([`order_key`]). Run files are written into
+/// `dir` and removed again.
 ///
 /// `memory` is what the caller asked the budget for; the sort allocates no more.
 /// [`L2dError::Refused`] with the figures when the records need more runs than
@@ -190,7 +206,7 @@ pub(crate) fn sort_file(
             left -= now as u64;
             order.clear();
             order.extend(0..now as u32);
-            order.sort_unstable_by_key(|at| key(&data[*at as usize * width..]));
+            order.sort_unstable_by_key(|at| order_key(&data[*at as usize * width..], width));
             let path = if run_count == 1 {
                 output.to_path_buf()
             } else {
@@ -218,7 +234,7 @@ pub(crate) fn sort_file(
     }
     // The merge: every run with its buffer, the lowest key of each in a heap.
     let mut open: Vec<Run> = Vec::with_capacity(runs.count);
-    let mut heads: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::with_capacity(runs.count);
+    let mut heads: BinaryHeap<Reverse<(u128, usize)>> = BinaryHeap::with_capacity(runs.count);
     for run in 0..runs.count {
         let path = runs.path(run);
         let file = File::open(&path).map_err(|error| failed("opening", &path, &error))?;
@@ -241,7 +257,7 @@ pub(crate) fn sort_file(
     for (run, state) in open.iter_mut().enumerate() {
         let path = runs.path(run);
         if let Some(record) = state.next(width, &path)? {
-            heads.push(Reverse((key(record), run)));
+            heads.push(Reverse((order_key(record, width), run)));
             pending[run] = Some((state.at - width, state.at));
         }
     }
@@ -253,7 +269,7 @@ pub(crate) fn sort_file(
             .write_all(&state.buffer[from..to])
             .map_err(|error| failed("writing", output, &error))?;
         if let Some(record) = state.next(width, &path)? {
-            heads.push(Reverse((key(record), run)));
+            heads.push(Reverse((order_key(record, width), run)));
             pending[run] = Some((state.at - width, state.at));
         }
     }
@@ -320,6 +336,31 @@ mod tests {
         // Many runs with small buffers: 100 runs of 2,000 records, 17 buffered of each.
         let many = check(200_000, 16, IO_BYTES + SORT_FIXED_BYTES + 40_000);
         assert_eq!(many.runs, 100);
+    }
+
+    #[test]
+    fn records_of_one_key_are_ordered_by_their_second_eight_bytes() {
+        // 30,000 records of 24 bytes in 4 runs: 100 keys, each with 300 second words
+        // written in descending order, as the occurrences of one original are.
+        let (count, width) = (30_000u64, 24usize);
+        let dir = tempfile::tempdir().unwrap();
+        let (input, output) = (dir.path().join("in.bin"), dir.path().join("out.bin"));
+        let mut data = Vec::new();
+        for at in 0..count {
+            data.extend_from_slice(&(at % 100).to_le_bytes());
+            data.extend_from_slice(&(count - at).to_le_bytes());
+            data.extend_from_slice(&at.to_le_bytes());
+        }
+        fs::write(&input, data).unwrap();
+        let sorted = sort_file(&input, &output, dir.path(), width, count, MIN_SORT_BYTES).unwrap();
+        assert!(sorted.runs > 1, "{sorted:?}");
+        let data = fs::read(&output).unwrap();
+        let keys: Vec<u128> = data
+            .chunks(width)
+            .map(|record| order_key(record, width))
+            .collect();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(key(&data[..8]), 0);
     }
 
     #[test]

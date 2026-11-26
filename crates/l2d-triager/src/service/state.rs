@@ -131,6 +131,12 @@ pub(crate) enum Producer {
     Allocation {
         spec: Value,
     },
+    /// A field or time view (task 3.1): the members of its parent with at least one
+    /// occurrence that passes `filter`, the clauses of every drill that made it.
+    Occurrence {
+        described: Value,
+        filter: Arc<super::project::Filter>,
+    },
     /// A set reopened from a receipt: the producer as the receipt states it, and what
     /// kind of producer that was.
     Retained {
@@ -175,15 +181,23 @@ impl Judged {
 /// What kind of producer made a set a receipt retained: what its explanation reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Origin {
-    Score { scorer_revision: String },
+    Score {
+        scorer_revision: String,
+    },
     Filter,
     Membership,
-    Pattern { pattern: u64 },
+    Pattern {
+        pattern: u64,
+    },
     Neighbours,
-    Venn { scorer_revision: String },
+    Venn {
+        scorer_revision: String,
+    },
     Issued,
     Expression,
     Allocation,
+    /// A field or time view.
+    Occurrence,
 }
 
 impl Origin {
@@ -205,6 +219,7 @@ impl Origin {
             Producer::Issued { .. } => Origin::Issued,
             Producer::Expression { .. } => Origin::Expression,
             Producer::Allocation { .. } => Origin::Allocation,
+            Producer::Occurrence { .. } => Origin::Occurrence,
             Producer::Retained { origin, .. } => origin.clone(),
         }
     }
@@ -220,6 +235,7 @@ impl Origin {
             Origin::Issued => "issued_batch",
             Origin::Expression => "expression",
             Origin::Allocation => "allocation",
+            Origin::Occurrence => "occurrence",
         }
     }
 
@@ -253,6 +269,7 @@ impl Origin {
             "issued_batch" => Origin::Issued,
             "expression" => Origin::Expression,
             "allocation" => Origin::Allocation,
+            "occurrence" => Origin::Occurrence,
             _ => return None,
         })
     }
@@ -330,7 +347,8 @@ impl Producer {
             }),
             Producer::Neighbours { described }
             | Producer::Venn { described, .. }
-            | Producer::Issued { described, .. } => described.clone(),
+            | Producer::Issued { described, .. }
+            | Producer::Occurrence { described, .. } => described.clone(),
             Producer::Allocation { spec } => {
                 let mut described = spec.clone();
                 described["kind"] = json!("allocation");
@@ -370,6 +388,9 @@ impl Producer {
                 scorer_revision,
             } => 16 * described.to_string().len() + scorer_revision.capacity(),
             Producer::Allocation { spec } => 16 * spec.to_string().len(),
+            Producer::Occurrence { described, filter } => {
+                16 * described.to_string().len() + filter.held_bytes() as usize
+            }
             Producer::Retained {
                 described,
                 origin,
@@ -637,9 +658,32 @@ pub(crate) struct Registry {
     refinements: HashMap<String, Arc<Refinement>>,
     /// Runs by their own handle and by the handle of every batch they issued.
     runs: HashMap<String, Arc<Run>>,
+    /// Occurrence projections in the order they were committed.
+    projections: Vec<Arc<super::project::Projection>>,
 }
 
 impl Registry {
+    pub fn projection(&self, handle: &str) -> Option<Arc<super::project::Projection>> {
+        self.projections
+            .iter()
+            .find(|projection| projection.handle == handle)
+            .cloned()
+    }
+
+    /// The projection of `snapshot` committed last; it declares all the earlier ones
+    /// did.
+    pub fn latest_projection(&self, snapshot: &str) -> Option<Arc<super::project::Projection>> {
+        self.projections
+            .iter()
+            .rev()
+            .find(|projection| projection.snapshot.handle == snapshot)
+            .cloned()
+    }
+
+    pub fn insert_projection(&mut self, projection: Arc<super::project::Projection>) {
+        self.projections.push(projection);
+    }
+
     pub fn refinement(&self, handle: &str) -> Option<Arc<Refinement>> {
         self.refinements.get(handle).cloned()
     }
@@ -703,6 +747,7 @@ impl Registry {
         self.runs.clear();
         self.refinements.clear();
         self.sets.clear();
+        self.projections.clear();
         self.snapshots.clear();
     }
 
@@ -771,16 +816,28 @@ pub(crate) enum Task {
     Allocate(super::allocate::AllocateTask),
     Save(super::receipt::SaveTask),
     Reopen(super::receipt::ReopenTask),
+    /// An occurrence projection: with an open of its source, or a re-scan. The new
+    /// tasks are boxed so that a job's record, which keeps its task, stays the size it was.
+    Project(Box<super::project::ProjectTask>),
+    /// The fields or the histogram of a population.
+    Facets(Box<super::facets::FacetTask>),
+    /// A drill into a field value or a time bucket.
+    Drill(Box<super::facets::DrillTask>),
 }
 
 impl Task {
     /// Whether the task reads a source or runs one of the project's heavy operations
     /// and so takes the host lease. Composing a view, allocating, saving or reopening a
-    /// receipt and taking or collecting the submissions of a run read committed state
-    /// or a receipt only.
+    /// receipt, taking or collecting the submissions of a run and the field and time
+    /// views read committed state or a receipt only.
     pub fn reads_source(&self) -> bool {
         match self {
-            Task::Compose(_) | Task::Allocate(_) | Task::Save(_) | Task::Reopen(_) => false,
+            Task::Compose(_)
+            | Task::Allocate(_)
+            | Task::Save(_)
+            | Task::Reopen(_)
+            | Task::Facets(_)
+            | Task::Drill(_) => false,
             Task::Recommend(task) => task.reads_source(),
             _ => true,
         }

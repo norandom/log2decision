@@ -102,13 +102,51 @@ pub(crate) fn tools() -> Value {
          A large scan returns a job. With `receipt` instead of `source`, reopens a saved \
          candidate view or final work set without its source: a retained snapshot with \
          every set the receipt retained, their lineage, coverage, ordering and reasons; \
-         nothing is read from the archive, scored or inferred.",
+         nothing is read from the archive, scored or inferred. With `projections`, the same \
+         job also reads the declared timestamp and field values of every occurrence (one \
+         more read of the source); with `snapshot` and `projections` instead of `source`, it \
+         is an explicit re-scan of an open snapshot that keeps every earlier declaration.",
         json!({
             "type": "object",
             "additionalProperties": false,
             "required": ["v"],
             "properties": {
                 "v": version(),
+                "snapshot": {"type": "string",
+                             "description": "An explicit re-scan: the open snapshot to project; exclusive with `source` and `receipt`."},
+                "projections": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Occurrence projections: fields from `kv` (the record's key=value, keyed by the name) or `entry` (with `capture`, a regex over the entry path), and a timestamp from `text` (the leading one), `kv` (with `key`) or `entry` (with `capture`), read as `iso8601` with Z or an offset or as a `date` at 00:00 UTC. `source` is built in.",
+                    "properties": {
+                        "fields": {
+                            "type": "array", "maxItems": 8,
+                            "items": {
+                                "type": "object", "additionalProperties": false,
+                                "required": ["name", "from"],
+                                "properties": {
+                                    "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+                                    "from": {"enum": ["kv", "entry"]},
+                                    "capture": {"type": "string", "minLength": 1, "maxLength": 256}
+                                }
+                            }
+                        },
+                        "time": {
+                            "type": "object", "additionalProperties": false,
+                            "required": ["from"],
+                            "properties": {
+                                "from": {"enum": ["text", "kv", "entry"]},
+                                "key": {"type": "string"},
+                                "capture": {"type": "string", "minLength": 1, "maxLength": 256},
+                                "format": {"enum": ["iso8601", "date"], "default": "iso8601"},
+                                "timezone": {"const": "UTC"}
+                            }
+                        },
+                        "max_values": {"type": "integer", "minimum": 1, "maximum": 100_000,
+                                       "default": 10_000,
+                                       "description": "Values a field retains in read order; the rest are counted as overflow."}
+                    }
+                },
                 "receipt": {"type": "string", "pattern": "^rcpt-[0-9a-f]{32}$",
                             "description": "A receipt `triager_save` returned; exclusive with `source`."},
                 "source": {
@@ -155,6 +193,12 @@ pub(crate) fn tools() -> Value {
                 "origin": {"type": "object"},
                 "lineage": {"type": "object"},
                 "recipe": {"type": "object"},
+                "projection": {"type": ["object", "string"],
+                               "description": "projections: the projection with its revision, declarations and table; a re-scan returns its handle here."},
+                "declared": {"type": "object"},
+                "previous": {"type": ["string", "null"]},
+                "fields": {"type": "object"},
+                "time": {"type": ["object", "null"]},
                 "cost": {"type": "object"}
             }),
         ),
@@ -317,7 +361,7 @@ pub(crate) fn tools() -> Value {
     );
     let refine = tool(
         "triager_refine",
-        "Drill into patterns and neighbours",
+        "Drill into patterns, neighbours, field values and time buckets",
         "Group the members of a filter selection into patterns and refine them. `patterns` \
          (with `set`) builds the project's pattern catalogue for a literal, glob or regex \
          selection over a whole snapshot and returns a refinement revision with its groups. \
@@ -327,14 +371,20 @@ pub(crate) fn tools() -> Value {
          among the members of a pattern and among the other members; `neighbours` returns \
          the selection of the members nearest to an exemplar, within its refinement or, \
          with `target`, also within the refinement of a wider selection. A pattern becomes a \
-         set through `triager_select` with the filter syntax `pattern`.",
+         set through `triager_select` with the filter syntax `pattern`. `field` and `time` \
+         take `set` (a snapshot, selection or view) and make a child view of its members \
+         with an occurrence that has a field value (`value`, or `missing: true`; the field \
+         `source` is the archive entry) or falls in a time bucket (`start` and `end` as the \
+         histogram states them, or `no_time: true`); they read the snapshot's occurrence \
+         projection, never the source, and count matching occurrences apart from all \
+         occurrences of the members (`matching_occurrences`).",
         json!({
             "type": "object",
             "additionalProperties": false,
             "required": ["v", "action"],
             "properties": {
                 "v": version(),
-                "set": handle("patterns: the filter selection to group."),
+                "set": handle("patterns: the filter selection to group; field and time: the snapshot, selection or view to drill into."),
                 "refinement": handle("Every other action: a refinement revision."),
                 "action": {
                     "type": "object",
@@ -342,7 +392,19 @@ pub(crate) fn tools() -> Value {
                     "required": ["kind"],
                     "properties": {
                         "kind": {"enum": ["patterns", "list", "split", "merge", "preview",
-                                          "neighbours"]},
+                                          "neighbours", "field", "time"]},
+                        "field": {"type": "string", "minLength": 1, "maxLength": 64,
+                                  "description": "field: a projected field, or `source`."},
+                        "value": {"type": "string", "maxLength": 1024,
+                                  "description": "field: a value the fields view listed; at most 256 bytes for a declared field (`value_too_long`), 1,024 for `source`."},
+                        "missing": {"type": "boolean",
+                                    "description": "field: the occurrences without a value."},
+                        "start": {"type": "string",
+                                  "description": "time: ISO 8601 with Z or an offset, inclusive."},
+                        "end": {"type": "string",
+                                "description": "time: ISO 8601 with Z or an offset, exclusive."},
+                        "no_time": {"type": "boolean",
+                                    "description": "time: the occurrences without a valid timestamp."},
                         "after": {"type": "integer", "minimum": 0,
                                   "description": "list: from `page.next_after`."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ROWS,
@@ -384,6 +446,16 @@ pub(crate) fn tools() -> Value {
                 "preview": {"type": "object"},
                 "neighbours": {"type": "object"},
                 "producer": {"type": "object"},
+                "view": {"type": "string", "description": "field and time: the child view."},
+                "operation": {"type": "object"},
+                "matching_occurrences": {
+                    "type": "object",
+                    "description": "field and time: the parent's counted occurrences that pass \
+                                    the drill (parent, in, out, retained_share)."
+                },
+                "occurrence_filter": {"type": "array"},
+                "complete": {"type": "boolean"},
+                "root": {"type": "object"},
                 "counts": counts("distinct_originals"),
                 "occurrence_counts": counts("occurrences"),
                 "coverage": {"type": "object"},
@@ -542,8 +614,17 @@ pub(crate) fn tools() -> Value {
          server did so far; `regions` counts every combination of up to three named sets \
          in both units, known and not evaluated apart; `records` pages members by record \
          ID with an opaque cursor; `evidence` explains one record and, when `excerpt` is \
-         projected, reads its text from the source as a job. Results state the snapshot, \
-         revision, units, coverage, the applied limits, clipping and the page.",
+         projected, reads its text from the source as a job, and lists every occurrence of \
+         the record once the snapshot is projected. `fields` counts the projected fields of \
+         the population (typed counts, missing, invalid and overflowing values), or with \
+         `field` its values a page at a time; `histogram` draws the timestamp in at most 100 \
+         buckets with its field, zone, range and width and the occurrences without a time, or \
+         returns `time_unavailable` with the occurrences by archive entry as a labelled \
+         alternative. Both count occurrences and their distinct originals, run as jobs over \
+         the occurrence projection and read no source; a field or timestamp no projection \
+         declares returns `projection_missing` with the scan that would provide it and the \
+         request that runs it. Results state the snapshot, revision, units, coverage, the \
+         applied limits, clipping and the page.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -551,8 +632,14 @@ pub(crate) fn tools() -> Value {
             "properties": {
                 "v": version(),
                 "handle": handle("Snapshot, selection or view."),
-                "view": {"enum": ["overview", "regions", "records", "evidence"]},
+                "view": {"enum": ["overview", "regions", "records", "evidence", "fields",
+                                  "histogram"]},
                 "sets": sets("Named sets: the regions to count, or the membership columns."),
+                "field": {"type": "string", "minLength": 1, "maxLength": 64,
+                          "description": "fields: the field whose values are paged, or `source`."},
+                "bucket_seconds": {"enum": [1, 60, 300, 900, 3600, 21600, 86400, 604800,
+                                            2592000, 31536000],
+                                   "description": "histogram: the bucket width; without it the smallest that draws the range in 100 buckets."},
                 "projection": {
                     "type": "array", "uniqueItems": true, "minItems": 1,
                     "items": {"enum": ["id", "locator", "occurrences", "membership",
@@ -574,7 +661,13 @@ pub(crate) fn tools() -> Value {
             }
         }),
         output(
-            &job_statuses,
+            &[
+                "ready",
+                "running",
+                "error",
+                "time_unavailable",
+                "projection_missing",
+            ],
             json!({
                 "view": {"type": "string"},
                 "handle": {"type": "string"},
@@ -618,6 +711,22 @@ pub(crate) fn tools() -> Value {
                     "description": "overview of a set: whether its membership and scores \
                                     are kept on disk, and what they take."
                 },
+                "occurrences": {"type": "object",
+                                "description": "overview of a field or time view: its matching occurrences and its occurrence filter."},
+                "projection": {"type": "object"},
+                "population": {"type": "object",
+                               "description": "fields and histogram: the members and the occurrences counted."},
+                "fields": {"type": "array"},
+                "field": {"type": "object"},
+                "time": {"type": "object"},
+                "alternative": {"type": "object",
+                                "description": "time_unavailable: the occurrences by archive entry, labelled as not time."},
+                "missing": {"type": "object"},
+                "projections": {"type": ["object", "null"]},
+                "estimate": {"type": "object",
+                             "description": "projection_missing: the scan that would provide it; nothing is scheduled."},
+                "rescan": {"type": "object"},
+                "unit": {"type": "string"},
                 "cost": {"type": "object"}
             }),
         ),

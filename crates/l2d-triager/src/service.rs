@@ -55,21 +55,34 @@
 //! directory, atomically, and `triager_open` with `receipt` reopens it in this or
 //! another server without its source ([`receipt`]).
 //!
+//! # Field, time and record views (task 3.1)
+//!
+//! `triager_open` with `projections`, or with `snapshot` and `projections` as an
+//! explicit re-scan, reads the source once more and keeps the declared timestamp and
+//! field values of every occurrence ([`project`]). `triager_inspect` views `fields` and
+//! `histogram` count them for any population, and `triager_refine` actions `field` and
+//! `time` drill into a value or a bucket as a child view on the same snapshot
+//! ([`facets`]); none of these reads the source. A field or timestamp no projection
+//! declares is answered with what is missing, the scan that would provide it and the
+//! request that runs it (`projection_missing`).
+//!
 //! # Scope of this revision
 //!
 //! Sources are ZIP archives. A selection is a score, a filter, a membership file the
 //! host registered ([`MembershipRef`]), a pattern, a neighbourhood or a
-//! recommendation. Occurrence projections (field and time drill-down), lineage views
-//! and inference by a generative model on the host (`recommend` with the method
-//! `local_model`) are refused by name (`unsupported_operation`); they belong to later
-//! tasks of the plan or need a provider this build does not have. A snapshot reopened
-//! from a receipt has no source: what reads one is refused (`source_not_retained`).
+//! recommendation. Lineage views, the refine action `region` and inference by a
+//! generative model on the host (`recommend` with the method `local_model`) are refused
+//! by name (`unsupported_operation`); they belong to later tasks of the plan or need a
+//! provider this build does not have. A snapshot reopened from a receipt has no source:
+//! what reads one is refused (`source_not_retained`).
 
 mod allocate;
+mod facets;
 mod inspect;
 mod membership;
 mod ops;
 mod process;
+mod project;
 mod receipt;
 mod recommend;
 mod refine;
@@ -114,6 +127,8 @@ pub const ADAPTER_FIXED_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The blocks a call reads committed tables through are a small part of that share.
 const _: () = assert!(inspect::READ_BLOCK_BYTES * 16 <= ADAPTER_FIXED_BYTES);
+/// And so is the block an evidence result lists the occurrences of a record through.
+const _: () = assert!(facets::LISTING_BYTES * 16 <= ADAPTER_FIXED_BYTES);
 
 /// The most bytes the entry patterns of one open take together.
 pub const MAX_ENTRY_PATTERN_BYTES: usize = 1024;
@@ -539,7 +554,7 @@ impl Service {
             }
             "triager_refine" => {
                 let (task, key) = self.parse_refine(&args)?;
-                self.start_job("triager_refine", Task::Refine(task), key)
+                self.start_job("triager_refine", task, key)
             }
             "triager_compose" => {
                 let (task, key) = self.parse_compose(&args)?;
@@ -573,8 +588,35 @@ impl Service {
             };
             return Ok((Task::Reopen(task), args.key("triager_open")?));
         }
+        if args.has("snapshot") {
+            // An explicit re-scan: the occurrence projection of a snapshot that is open.
+            args.only(&["v", "snapshot", "projections", "idempotency_key"])?;
+            let snapshot = self
+                .registry()
+                .require_snapshot(args.required_text("snapshot")?)?;
+            state::source_not_retained(&snapshot, "an occurrence projection")?;
+            let spec = project::Spec::parse(args.required("projections")?)?;
+            let task = project::ProjectTask {
+                source: project::ProjectSource::Snapshot(snapshot),
+                spec,
+            };
+            return Ok((Task::Project(Box::new(task)), args.key("triager_open")?));
+        }
+        let projections = args
+            .get("projections")
+            .map(project::Spec::parse)
+            .transpose()?;
         let (task, key) = self.parse_source(args)?;
-        Ok((Task::Open(task), key))
+        match projections {
+            None => Ok((Task::Open(task), key)),
+            Some(spec) => Ok((
+                Task::Project(Box::new(project::ProjectTask {
+                    source: project::ProjectSource::Open(task),
+                    spec,
+                })),
+                key,
+            )),
+        }
     }
 
     /// `triager_save`: a candidate view or a final work set, with an optional
@@ -637,7 +679,7 @@ impl Service {
     }
 
     fn parse_source(&self, args: &Args<'_>) -> Result<(OpenTask, Option<(String, String)>), Fault> {
-        args.only(&["v", "source", "idempotency_key"])?;
+        args.only(&["v", "source", "projections", "idempotency_key"])?;
         let source = Args::of(args.required("source")?, "source")?;
         if let Some(adapter) = source.text("adapter")?
             && adapter != "zip"
@@ -1223,25 +1265,24 @@ impl Service {
         }
     }
 
-    fn parse_refine(
-        &self,
-        args: &Args<'_>,
-    ) -> Result<(RefineTask, Option<(String, String)>), Fault> {
+    fn parse_refine(&self, args: &Args<'_>) -> Result<(Task, Option<(String, String)>), Fault> {
         args.only(&["v", "set", "refinement", "action", "idempotency_key"])?;
         let action = Args::of(args.required("action")?, "action")?;
         let kind = action.required_text("kind")?;
-        if let Some(later) = ["region", "field", "time"]
-            .iter()
-            .find(|later| **later == kind)
-        {
-            return Err(Fault::unsupported(format!(
-                "the refine action `{later}` is not served by this revision: a region is \
-                 composed with `triager_compose`, and field and time drill-down need \
-                 occurrence projections (task 3.1); the actions are `patterns`, `list`, \
-                 `split`, `merge`, `preview` and `neighbours`"
-            )));
+        if kind == "region" {
+            return Err(Fault::unsupported(
+                "the refine action `region` is not served by this revision: a region is \
+                 composed with `triager_compose`; the actions are `patterns`, `list`, `split`, \
+                 `merge`, `preview`, `neighbours`, `field` and `time`",
+            ));
         }
         let key = args.key("triager_refine")?;
+        if kind == "field" || kind == "time" {
+            return Ok((
+                Task::Drill(Box::new(self.parse_drill(args, &action, kind)?)),
+                key,
+            ));
+        }
         if kind == "patterns" {
             action.only(&["kind"])?;
             if args.has("refinement") {
@@ -1251,7 +1292,7 @@ impl Service {
             }
             let set = self.registry().require_set(args.required_text("set")?)?;
             state::source_not_retained(&set.snapshot, "a pattern catalogue")?;
-            return Ok((RefineTask::Patterns { set }, key));
+            return Ok((Task::Refine(RefineTask::Patterns { set }), key));
         }
         if args.has("set") {
             return Err(Fault::invalid(
@@ -1409,7 +1450,166 @@ impl Service {
                 ));
             }
         };
-        Ok((task, key))
+        Ok((Task::Refine(task), key))
+    }
+
+    /// The refusal of a drill, or a view, that needs what no projection of the snapshot
+    /// declares: what it would take, with the request that `triager_inspect` states.
+    fn projection_missing(population: &state::Population, what: &str) -> Fault {
+        let snapshot = population.snapshot();
+        let completeness = snapshot.scope.completeness();
+        let selected = snapshot.scope.selected_bytes().unwrap_or_default();
+        Fault::new(
+            "projection_missing",
+            format!(
+                "{what} is not declared by an occurrence projection of `{}`: projecting it takes \
+                 one admitted read of the source as a job ({} records, {} bytes unpacked, {} \
+                 occurrences); `triager_inspect` with view `fields` or `histogram` states the \
+                 missing coverage, the estimate and the `triager_open` request that runs it. \
+                 Nothing was scheduled",
+                snapshot.handle,
+                completeness.records_scanned,
+                selected.unpacked,
+                snapshot.scope.occurrences()
+            ),
+        )
+    }
+
+    /// `triager_refine` with `field` or `time`: a child view of the members of `set` (a
+    /// snapshot, selection or view) with an occurrence that has the value or falls in
+    /// the bucket.
+    fn parse_drill(
+        &self,
+        args: &Args<'_>,
+        action: &Args<'_>,
+        kind: &str,
+    ) -> Result<facets::DrillTask, Fault> {
+        if args.has("refinement") {
+            return Err(Fault::invalid(
+                "a field or time drill works on a snapshot, a selection or a view: give `set`, \
+                 not `refinement`",
+            ));
+        }
+        let population = self
+            .registry()
+            .require_population(args.required_text("set")?)?;
+        let snapshot = population.snapshot().clone();
+        state::source_not_retained(&snapshot, "a field or time drill")?;
+        let latest = self.registry().latest_projection(&snapshot.handle);
+        let clause = if kind == "field" {
+            action.only(&["kind", "field", "value", "missing"])?;
+            let name = action.required_text("field")?;
+            let missing = match action.get("missing") {
+                None | Some(Value::Bool(false)) => false,
+                Some(Value::Bool(true)) => true,
+                Some(_) => return Err(Fault::invalid("`action.missing` is true or false")),
+            };
+            let value = action.text("value")?;
+            if missing == value.is_some() {
+                return Err(Fault::invalid(
+                    "a field drill takes either `value` (a value the fields view listed) or \
+                     `missing: true`",
+                ));
+            }
+            if value.is_some_and(|value| value.len() > project::MAX_VALUE_BYTES * 4) {
+                return Err(Fault::invalid("`action.value` is at most 1,024 bytes"));
+            }
+            // A declared field keeps values of at most 256 bytes and counts a longer one
+            // as invalid, never as a value: a drill into one is refused by name rather
+            // than answered with an empty view. An entry path (`source`) may be longer.
+            if name != project::SOURCE_FIELD
+                && value.is_some_and(|value| value.len() > project::MAX_VALUE_BYTES)
+            {
+                return Err(Fault::new(
+                    "value_too_long",
+                    format!(
+                        "a projected field keeps values of at most {} bytes and counts a longer \
+                         one as `invalid`, so no occurrence holds this value of {} bytes; the \
+                         fields view states the invalid occurrences",
+                        project::MAX_VALUE_BYTES,
+                        value.map_or(0, str::len)
+                    ),
+                ));
+            }
+            if name == project::SOURCE_FIELD {
+                let Some(value) = value else {
+                    return Err(Fault::invalid(
+                        "every occurrence has a `source`: drill into one with `value`",
+                    ));
+                };
+                if latest.is_none() {
+                    return Err(Self::projection_missing(&population, "the field `source`"));
+                }
+                project::Clause::Source {
+                    value: value.to_string(),
+                }
+            } else {
+                let field = latest
+                    .as_ref()
+                    .and_then(|projection| {
+                        projection
+                            .spec
+                            .field(name)
+                            .map(|at| projection.spec.fields[at].clone())
+                    })
+                    .ok_or_else(|| {
+                        Self::projection_missing(
+                            &population,
+                            &format!("the field `{}`", wire::clip(name, 64).0),
+                        )
+                    })?;
+                project::Clause::Field {
+                    field,
+                    value: value.map(str::to_string),
+                }
+            }
+        } else {
+            action.only(&["kind", "start", "end", "no_time"])?;
+            let time = latest
+                .as_ref()
+                .and_then(|projection| projection.spec.time.clone())
+                .ok_or_else(|| Self::projection_missing(&population, "a timestamp"))?;
+            match action.get("no_time") {
+                Some(Value::Bool(true)) => {
+                    if action.has("start") || action.has("end") {
+                        return Err(Fault::invalid(
+                            "a time drill takes either `start` and `end` or `no_time: true`",
+                        ));
+                    }
+                    project::Clause::NoTime { time }
+                }
+                None | Some(Value::Bool(false)) => {
+                    let instant = |field: &str| -> Result<i64, Fault> {
+                        project::parse_instant(action.required_text(field)?).ok_or_else(|| {
+                            Fault::invalid(format!(
+                                "`action.{field}` is an ISO 8601 time with `Z` or an offset, \
+                                 such as a bucket's `start` in the histogram"
+                            ))
+                        })
+                    };
+                    let (start, end) = (instant("start")?, instant("end")?);
+                    if start >= end {
+                        return Err(Fault::invalid("`action.start` is before `action.end`"));
+                    }
+                    project::Clause::Time { time, start, end }
+                }
+                Some(_) => return Err(Fault::invalid("`action.no_time` is true or false")),
+            }
+        };
+        let mut needs = project::Filter::of(&population).needs();
+        let one = project::Filter {
+            clauses: vec![clause.clone()],
+        }
+        .needs();
+        needs.fields.extend(one.fields);
+        needs.time = needs.time.or(one.time);
+        let projection = project::covering(&self.shared, &snapshot, &needs)
+            .ok_or_else(|| Self::projection_missing(&population, "what this view filters on"))?;
+        Ok(facets::DrillTask {
+            population,
+            projection,
+            clause,
+        })
     }
 
     /// The named sets of a request, each a selection or view of `snapshot`.
@@ -1558,21 +1758,19 @@ impl Service {
 
     fn inspect(&self, args: &Args<'_>) -> Result<Reply, Fault> {
         let view = args.required_text("view")?;
-        if let Some(later) = ["histogram", "fields", "lineage"]
-            .iter()
-            .find(|later| **later == view)
-        {
-            return Err(Fault::unsupported(format!(
-                "the view `{later}` is not served by this revision (occurrence projections \
-                 and lineage are task 3.1; a receipt states its lineage when it is reopened); \
-                 the views are `overview`, `regions`, `records` and `evidence`"
-            )));
+        if view == "lineage" {
+            return Err(Fault::unsupported(
+                "the view `lineage` is not served by this revision (a receipt states its lineage \
+                 when it is reopened); the views are `overview`, `regions`, `records`, \
+                 `evidence`, `fields` and `histogram`",
+            ));
         }
         let population = self
             .registry()
             .require_population(args.required_text("handle")?)?;
         let snapshot = population.snapshot().handle.clone();
         match view {
+            "fields" | "histogram" => self.facets(args, view, population),
             "overview" => {
                 args.only(&["v", "handle", "view"])?;
                 inspect::overview(&self.shared, &population).map(Reply::ok)
@@ -1650,11 +1848,18 @@ impl Service {
                     "idempotency_key",
                 ])?;
                 let row = inspect::find_record(&population, args.required_text("record")?)?;
+                // Every occurrence of the original, when the snapshot is projected: the
+                // drill-back from a field or time view to the original in the wider scope.
+                let filter = project::Filter::of(&population);
+                let occurrences =
+                    project::covering(&self.shared, population.snapshot(), &filter.needs())
+                        .map(|projection| (projection, filter));
                 let task = EvidenceTask {
                     sets: self.named_sets(args, &snapshot, MAX_SETS)?,
                     projection: Self::projection(args, &EVIDENCE_FIELDS, &EVIDENCE_DEFAULT)?,
                     population,
                     row,
+                    occurrences,
                 };
                 let key = args.key("triager_inspect")?;
                 // What the service keeps of the record, built now: the whole answer
@@ -1692,9 +1897,154 @@ impl Service {
                 })
             }
             _ => Err(Fault::invalid(
-                "`view` is `overview`, `regions`, `records` or `evidence`",
+                "`view` is `overview`, `regions`, `records`, `evidence`, `fields` or `histogram`",
             )),
         }
+    }
+
+    /// The views `fields` and `histogram`: a job that reads the snapshot's occurrence
+    /// projection, or, when no projection declares what the view needs, what is
+    /// missing with the scan that would provide it.
+    fn facets(
+        &self,
+        args: &Args<'_>,
+        view: &str,
+        population: state::Population,
+    ) -> Result<Reply, Fault> {
+        let snapshot = population.snapshot().clone();
+        state::source_not_retained(&snapshot, "a field or time view")?;
+        let page_limit = match args.get("limit") {
+            None => DEFAULT_ROWS,
+            Some(_) => args.whole("limit", 1, MAX_ROWS as u64)? as usize,
+        };
+        let cursor = args.text("cursor")?.map(str::to_string);
+        let mut needs = project::Filter::of(&population).needs();
+        let latest = self.registry().latest_projection(&snapshot.handle);
+        let kind = if view == "fields" {
+            args.only(&[
+                "v",
+                "handle",
+                "view",
+                "field",
+                "limit",
+                "cursor",
+                "idempotency_key",
+            ])?;
+            match args.text("field")? {
+                None => {
+                    if args.has("limit") || cursor.is_some() {
+                        return Err(Fault::invalid(
+                            "`limit` and `cursor` page the values of one `field`",
+                        ));
+                    }
+                    if latest.is_none() {
+                        return project::missing(&self.shared, &population, view, &needs)
+                            .map(Reply::ok);
+                    }
+                    facets::FacetKind::Summary
+                }
+                Some(name) if name == project::SOURCE_FIELD => {
+                    if latest.is_none() {
+                        return project::missing(&self.shared, &population, view, &needs)
+                            .map(Reply::ok);
+                    }
+                    facets::FacetKind::Values {
+                        field: facets::Named::Source,
+                        limit: page_limit,
+                        cursor,
+                    }
+                }
+                Some(name) => {
+                    let declared = latest.as_ref().and_then(|projection| {
+                        projection
+                            .spec
+                            .field(name)
+                            .map(|at| (at, projection.spec.fields[at].clone()))
+                    });
+                    let Some((at, field)) = declared else {
+                        // What the estimate asks for: the field by its `key=value`.
+                        let usable = !name.is_empty()
+                            && name.len() <= 64
+                            && name.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+                            });
+                        if !usable {
+                            return Err(Fault::invalid(
+                                "`field` is a field name: 1 to 64 letters, digits, '_', '.' or '-'",
+                            ));
+                        }
+                        needs.fields.push(project::FieldSpec {
+                            name: name.to_string(),
+                            from: project::FieldFrom::Kv,
+                        });
+                        return project::missing(&self.shared, &population, view, &needs)
+                            .map(Reply::ok);
+                    };
+                    needs.fields.push(field);
+                    facets::FacetKind::Values {
+                        field: facets::Named::Field(at),
+                        limit: page_limit,
+                        cursor,
+                    }
+                }
+            }
+        } else {
+            args.only(&[
+                "v",
+                "handle",
+                "view",
+                "bucket_seconds",
+                "limit",
+                "cursor",
+                "idempotency_key",
+            ])?;
+            let bucket_seconds = match args.get("bucket_seconds") {
+                None => None,
+                Some(width) => Some(
+                    width
+                        .as_i64()
+                        .filter(|width| facets::BUCKET_WIDTHS.contains(width))
+                        .ok_or_else(|| {
+                            Fault::invalid(format!(
+                                "`bucket_seconds` is one of {:?}",
+                                facets::BUCKET_WIDTHS
+                            ))
+                        })?,
+                ),
+            };
+            // No projection, or one that declares no timestamp: what is missing, with
+            // the scan that would provide it (the leading timestamp of each record, as
+            // the estimate asks for it). `time_unavailable` is for a declared timestamp
+            // that no counted occurrence has a valid value of.
+            let declared = latest
+                .as_ref()
+                .and_then(|projection| projection.spec.time.clone());
+            if declared.is_none() {
+                needs.time = Some(project::TimeSpec {
+                    from: project::TimeFrom::Text,
+                    format: project::TimeFormat::Iso8601,
+                });
+                return project::missing(&self.shared, &population, view, &needs).map(Reply::ok);
+            }
+            facets::FacetKind::Histogram {
+                bucket_seconds,
+                limit: page_limit,
+                cursor,
+            }
+        };
+        let Some(projection) = project::covering(&self.shared, &snapshot, &needs) else {
+            return project::missing(&self.shared, &population, view, &needs).map(Reply::ok);
+        };
+        let task = facets::FacetTask {
+            population,
+            projection,
+            kind,
+        };
+        self.start_job(
+            "triager_inspect",
+            Task::Facets(Box::new(task)),
+            args.key("triager_inspect")?,
+        )
     }
 
     fn job(&self, args: &Args<'_>) -> Result<Reply, Fault> {
@@ -1890,6 +2240,9 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Allocate(_) => "allocating a review budget",
                 Task::Save(_) => "saving a receipt",
                 Task::Reopen(_) => "reopening a receipt",
+                Task::Project(_) => "projecting the occurrences of the source",
+                Task::Facets(_) => "counting fields or times of occurrences",
+                Task::Drill(_) => "drilling into a field value or a time bucket",
             };
         }
         shared.changed.notify_all();
@@ -1915,6 +2268,9 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 Task::Allocate(task) => allocate::allocate(&mut worker, task),
                 Task::Save(task) => receipt::save(&mut worker, task),
                 Task::Reopen(task) => receipt::reopen(&mut worker, task),
+                Task::Project(task) => project::run(&mut worker, task),
+                Task::Facets(task) => facets::run(&mut worker, task),
+                Task::Drill(task) => facets::drill(&mut worker, task),
                 Task::Evidence(task) => {
                     inspect::evidence_with_excerpt(&mut worker, task).map(|result| ops::Done {
                         result,
@@ -1932,6 +2288,9 @@ fn work(shared: &Shared, mut budget: MemoryBudget, scorers: &dyn ScorerSource) {
                 | Task::Allocate(_)
                 | Task::Save(_)
                 | Task::Reopen(_)
+                | Task::Project(_)
+                | Task::Facets(_)
+                | Task::Drill(_)
         );
         let ran = match ran {
             Ok(Err(mut fault)) if scrubbed => {

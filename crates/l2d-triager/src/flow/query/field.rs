@@ -57,7 +57,7 @@ impl<'a> Value<'a> {
     }
 }
 
-pub(super) fn parse_number(text: &str) -> Option<f64> {
+pub(crate) fn parse_number(text: &str) -> Option<f64> {
     let text = text.trim();
     let first = text.chars().next()?;
     if !(first.is_ascii_digit() || matches!(first, '-' | '+' | '.')) {
@@ -437,7 +437,7 @@ pub(super) fn term_in(pieces: &[Piece], text: &str, insensitive: bool, major_onl
 /// Splunk-style automatic extraction (`KV_MODE = auto`): the first `key=value`
 /// in `_raw` whose key is not part of a longer key. A value is a quoted string
 /// or runs to whitespace, `,`, `;`, `&` or `"`.
-pub(super) fn kv_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn kv_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     if key.is_empty() {
         return None;
     }
@@ -529,7 +529,7 @@ fn digits(text: &str, len: usize) -> Option<(i64, &str)> {
 }
 
 /// `YYYY-MM-DDTHH:MM[:SS[.fff]]` followed by `Z` or `±HH:MM`, as epoch seconds.
-pub(super) fn parse_iso(text: &str) -> Option<f64> {
+pub(crate) fn parse_iso(text: &str) -> Option<f64> {
     let (year, rest) = digits(text, 4)?;
     let (month, rest) = digits(rest.strip_prefix('-')?, 2)?;
     let (day, rest) = digits(rest.strip_prefix('-')?, 2)?;

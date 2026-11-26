@@ -768,9 +768,9 @@ fn requests_are_validated_before_anything_is_scheduled() {
         ),
         (
             "triager_inspect",
-            json!({"v": 1, "handle": handle, "view": "histogram"}),
+            json!({"v": 1, "handle": handle, "view": "lineage"}),
             "unsupported_operation",
-            "histogram",
+            "lineage",
         ),
         (
             "triager_inspect",
@@ -804,9 +804,9 @@ fn requests_are_validated_before_anything_is_scheduled() {
         ),
         (
             "triager_refine",
-            json!({"v": 1, "set": handle, "action": {"kind": "field"}}),
+            json!({"v": 1, "set": handle, "action": {"kind": "region"}}),
             "unsupported_operation",
-            "field",
+            "region",
         ),
         (
             "triager_save",

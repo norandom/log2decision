@@ -86,16 +86,37 @@ was committed.
    `dependencies`.
 6. **Patterns before rows.** `triager_refine {"set": B, "action": {"kind":
    "patterns"}}` groups a filter selection; `split`, `merge`, `preview` and
-   `neighbours` refine it. Field and time slices are not served yet (task 3.1):
-   say so instead of approximating them from a page.
-7. **Inspect evidence sparingly.** `records` pages at most 100 rows (default 25) by an
+   `neighbours` refine it.
+7. **Field and time slices from a projection.** Declare what to project when opening
+   (`triager_open {"source": ..., "projections": {"fields": [{"name": "user", "from":
+   "kv"}, {"name": "host", "from": "entry", "capture": "^gather/([^/]+)/"}], "time":
+   {"from": "text"}}}`) or later as an explicit re-scan (`triager_open {"snapshot": S,
+   "projections": {...}}`); either is one more admitted read of the source. Then
+   `triager_inspect {"view": "fields", "handle": H}` (with `"field": F` for its values,
+   paged) and `{"view": "histogram", "handle": H}` count occurrences and their distinct
+   originals of any snapshot, selection or view, with missing, invalid and overflowing
+   values apart and `source` (the archive entry) built in. A timestamp needs `Z` or an
+   offset. A projection without a declared timestamp gives `projection_missing` for
+   the histogram; a declared one with no valid value gives `time_unavailable`, which
+   offers the occurrences by entry as a labelled alternative that is not time.
+   `triager_refine
+   {"set": H, "action": {"kind": "field", "field": F, "value": V}}` or `{"kind": "time",
+   "start": ..., "end": ...}` makes a child view: report its `counts` (originals) and
+   its `matching_occurrences` (the occurrences that pass) apart. A field nobody
+   projected returns `projection_missing` with the estimate and the exact `rescan`
+   request: show the cost before running it. A value beyond the retained `max_values`
+   is `value_not_retained`, one longer than 256 bytes `value_too_long`; with overflow
+   a page of values ranks among retained values only (`ranking_exact: false`). None of
+   these views reads the source; `evidence` under a field or time view lists every
+   occurrence of the record with `in_view`.
+8. **Inspect evidence sparingly.** `records` pages at most 100 rows (default 25) by an
    opaque cursor; `evidence` explains one record: its memberships, the producer's
    reason, a score and rank, a Venn route. An excerpt (`"projection": [..,
    "excerpt"]`) is one admitted re-read of the source and counts against the evidence
    allowance under the public-development profile. Never infer a total from a page.
-8. **Siblings.** Compare `D ∩ C` (recommended) with `D ∩ state(c, not_evaluated)`
+9. **Siblings.** Compare `D ∩ C` (recommended) with `D ∩ state(c, not_evaluated)`
    (unknown) under `scope: D`; both are children of D and keep their own handles.
-9. **Allocate once.** `triager_compose {"mode": "allocate", "snapshot": S, "sets":
+10. **Allocate once.** `triager_compose {"mode": "allocate", "snapshot": S, "sets":
    {"d": D, "c": C}, "expr": {"intersection": ["d", "c"]}, "budget": {"total": 24,
    "duplicate_rule": "first_pool_wins", "shortfall": "leave_unfilled", "pools": [
    {"name": "general", "limit": 18, "from": {"intersection": ["d", "c"]}, "order":
@@ -110,7 +131,7 @@ was committed.
    drawn outside the candidate expression. `records` of the final set page its slots
    in order with their pool; `evidence` of a member says why its slot was filled, and
    evidence under D with `"sets": {"f": F}` says why another original was deferred.
-10. **Save and hand off.** `triager_save {"handle": D or F, "sets": {"c": C}}` writes a
+11. **Save and hand off.** `triager_save {"handle": D or F, "sets": {"c": C}}` writes a
     receipt atomically, named by its content. Pass in `sets` what the next client must
     drill into that is not part of the saved set's lineage (such as C). The receipt
     states what it `contains` and `excludes`: no source text, and no host path except
@@ -124,7 +145,7 @@ was committed.
     that needs the source (select, refine, excerpts) is refused with
     `source_not_retained`. Reopening reads nothing of the archive and scores nothing:
     check `activity` in the overview.
-11. **Replay.** `l2d mcp --replay R` (or the calls in the reopen result's
+12. **Replay.** `l2d mcp --replay R` (or the calls in the reopen result's
     `recipe.calls`, with `parent_receipt: R` on the save) runs the recipe against the
     registered source. The same input gives the same `content_sha256`; a changed source
     gives a new revision whose lineage names R.
@@ -134,9 +155,9 @@ was committed.
 At each step report the parent, in, out and not-evaluated counts in both units, the
 retained share with its denominator, and the cost. Name the refusal code and figures
 when a call is refused (`refused`, `disclosure_refused`, `source_not_retained`,
-`unsupported_operation`), and do not retry an `unsupported_operation`. Keep the
-distinction between a suggested priority (recommendation, allocation) and a reviewed
-outcome.
+`projection_missing`, `value_not_retained`, `unsupported_operation`), and do not
+retry an `unsupported_operation`. Keep the distinction between a suggested priority
+(recommendation, allocation) and a reviewed outcome.
 
 ## Limits worth remembering
 
@@ -145,5 +166,10 @@ outcome.
 - At most 8 named sets per request, 3 for regions; 64 expression nodes, depth 8.
 - A budget has at most 10,000 slots and 8 pools; a receipt at most 16 sets and
   1,000,000 retained originals.
-- `local_model` recommendations, field and time drill-down, histograms and lineage
-  views are refused by name in this revision.
+- A projection declares at most 8 fields and 4 expressions over entry paths; a field
+  retains 10,000 values by default and at most 100,000 (`max_values`); a value of more
+  than 256 bytes is invalid; a histogram has at most 100 buckets.
+- `local_model` recommendations, the refine action `region` and lineage views are
+  refused by name in this revision. A field or time view saved in a receipt reopens
+  with its members, but its occurrences are not retained: its fields and histogram are
+  `source_not_retained`, and its recipe step is not replayable.
