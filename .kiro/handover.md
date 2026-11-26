@@ -1,5 +1,42 @@
 # Handover: npu-log-decision
 
+## Triager service, tasks 1.1–2.2, 25 November
+
+The service milestone named under "Triager workflow, 18 November" is done. `l2d mcp` is a local stdio MCP server with no network crates, and `--requests FILE` runs the same calls as a recipe. It does the following:
+- binds score, filter, membership and recommendation sets to one scoped source;
+- reduces them as three-valued A/B/C sets;
+- drills into patterns, neighbours and a third set;
+- saves and reopens hunts as content-addressed receipts;
+- allocates a review budget into named reserve and audit pools, using the `l2d_decide::policy` rules.
+
+Tools: `triager_open`, `triager_select`, `triager_compose`, `triager_inspect`, `triager_job`, `triager_refine`, `triager_save`. Membership files are JSON lines, one `{"id","state"}` object per line, and TSV is refused. A reopened receipt reads no source and runs no inference; it refuses excerpts with `source_not_retained` until task 3.2 checks the source hash again. The project skill `triager` (`.claude/skills/triager/SKILL.md`) walks an agent through the recipe.
+
+All four tasks were reviewed and approved, then merged to `main` without pushing (2.2: `eefaaf1`, merge `db55163`). The last workspace run had 1,124 passed, 0 failed and 58 ignored. Scale evidence:
+- **Fixture:** the 4.4 M-record fixture (seed 20261125) matches an independent oracle for reduction, allocation and reopen in the streamed, spill and tight legs.
+- **Cold run:** a cold run on the public archive `russellmitchell.zip` held 512 MB. It filled general 18/18, unfamiliar 4/4 and audit 2/2, and both audit slots fell outside the candidate.
+- **Third set (C):** C needs its own server at 1,536 MB, because the 2.1 pattern catalogue deduplicates in memory and is refused at 512 MB on the full archive.
+- **Warm reopen:** 17 ms, with all work counters at 0.
+
+[Triager tasks with records, deviations and test gaps](specs/triager/tasks.md) · evidence in `D:\BuildArtifacts\log2decision\triager-1.3\`, `triager-2.1\` and `triager-2.2\`
+
+Owner decisions of 25 November:
+- Keep `l2d mcp`, its host options and the request limits: 64 KiB and 1,024 JSON values per line; 64 entry patterns and 1,024 bytes.
+- Membership files become JSON lines (done in 2.2).
+- The model judge for `recommend` moves to the new task 3.3, with its open questions. Do not start it until a comparison shows value. A selected external provider is acceptable, but only with small data and bounded cost, both stated before any run. Do not call a model or start Ollama for triage until then.
+
+Next, only when the owner asks: task 3.1 (occurrence-aware field, time and record views), then 3.2 (the TUI over the service, excerpts after reopen, and the MCP and terminal audit keys, which still differ: 64-bit and 32-bit FNV-1a).
+
+Decisions waiting for the owner:
+- push `main`, which is 15 commits ahead of `origin`;
+- delete the merged branches `triager-1.1` to `triager-2.2` and the old `codex/*` branches;
+- plain-file and store sources have no task;
+- set tables stay in the placement they were first given.
+
+Things that will bite:
+- The test `service_drill_round2::listed_selections_on_disk…` fails about one run in three, because its Venn allocation follows IDs derived from the tempdir path.
+- The Cargo target is at 27.5 GiB of 30. Clean with `cargo clean --profile dev` on the shared target before the next release build.
+- An AIT run takes about 10 to 15 minutes per leg; timings are system-related.
+
 ## Task 2.25, 23 November
 
 Score order with reserved slots for unsupported records was not shown to help on the last fresh fold-zero panel, and the planned arm could have gained at most three positives. An encoder-free control was not distinguishable from it. Unsupported and off-endpoint records are nearly the same set, so whether the vectors add to ranking stays undecided on this fold. The policy was never ahead of score alone on either panel. Both first report drafts of 2.24 and 2.25 overstated their findings and were rejected in review: state what a test could have shown before reading its result. Fold zero is used up for low-share panels (180 fresh good records left); more ranking evidence needs data where endpoint and outcome are not tied, such as a second dataset or the protected cohort of 2.22. Automation stays parked. [Report](../docs/2026-11-23-score-with-unsupported-reserve.md) · evidence in `D:\BuildArtifacts\log2decision\task-2.25\`
