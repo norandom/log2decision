@@ -37,6 +37,23 @@ enum Disclosure {
 
 #[derive(Debug, Args)]
 pub struct McpArgs {
+    #[command(flatten)]
+    pub host: HostArgs,
+    /// Run the tool calls of this file, one JSON object {"tool","args","bind"} per line,
+    /// write one {"tool","result"} per line and end; every call waits for its job
+    #[arg(long, value_name = "FILE", conflicts_with = "replay")]
+    requests: Option<PathBuf>,
+    /// Run the recipe a saved receipt retains, as --requests runs a file, against the
+    /// sources registered now; the receipt it saves names this one as its parent
+    #[arg(long, value_name = "RECEIPT")]
+    replay: Option<String>,
+}
+
+/// What the host configures for the triager service: the options `l2d mcp` and the
+/// workbench of `l2d tui` share (triager task 3.2), none of which a tool argument
+/// changes.
+#[derive(Debug, Args)]
+pub struct HostArgs {
     /// Register a local ZIP archive under a name; private evidence. May be given several times
     #[arg(long = "source", value_name = "NAME=PATH")]
     sources: Vec<String>,
@@ -46,19 +63,20 @@ pub struct McpArgs {
     /// A directory below which a client may name an archive by its path. May be given several times
     #[arg(long = "allow-path", value_name = "DIR")]
     allow_paths: Vec<PathBuf>,
-    /// Who the client is, for what may be shown of the evidence
-    #[arg(long, value_enum, default_value = "private-local")]
-    disclosure: Disclosure,
-    /// public-development: the excerpt bytes one session may be shown
-    #[arg(long, value_name = "BYTES", default_value_t = 262_144)]
-    evidence_allowance_bytes: u64,
+    /// Who the client is, for what may be shown of the evidence [default: private-local]
+    #[arg(long, value_enum)]
+    disclosure: Option<Disclosure>,
+    /// public-development: the excerpt bytes one session may be shown [default: 262144]
+    #[arg(long, value_name = "BYTES")]
+    evidence_allowance_bytes: Option<u64>,
     /// The directory snapshots and reads spill into; empty or absent
     /// [default: work/triager-<process>-<time>/ below the project]
     #[arg(long, value_name = "DIR")]
     work_dir: Option<PathBuf>,
-    /// How long a call waits for its job before it returns the job to poll
-    #[arg(long, value_name = "MS", default_value_t = 2_000)]
-    inline_wait_ms: u64,
+    /// How long a call waits for its job before it returns the job to poll (the
+    /// workbench of `l2d tui` waits 50 ms and polls, so Esc can cancel) [default: 2000]
+    #[arg(long, value_name = "MS")]
+    inline_wait_ms: Option<u64>,
     /// The most distinct texts deduplication keeps in memory before it goes on on disk
     /// [default: what the memory limit allows]
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
@@ -83,25 +101,47 @@ pub struct McpArgs {
     #[arg(long, value_name = "DIR")]
     npu_profile_dir: Option<PathBuf>,
     /// The most patterns of a catalogue `triager_refine` builds, as
-    /// `l2d discover search --max-patterns`
-    #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u64).range(1..=4096))]
-    max_patterns: u64,
+    /// `l2d discover search --max-patterns` [default: 256]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..=4096))]
+    max_patterns: Option<u64>,
     /// The most bytes of a text such a catalogue groups, as
-    /// `l2d discover search --max-text-bytes`
-    #[arg(long, value_name = "BYTES", default_value_t = 4096, value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
-    max_text_bytes: u64,
-    /// Run the tool calls of this file, one JSON object {"tool","args","bind"} per line,
-    /// write one {"tool","result"} per line and end; every call waits for its job
-    #[arg(long, value_name = "FILE", conflicts_with = "replay")]
-    requests: Option<PathBuf>,
+    /// `l2d discover search --max-text-bytes` [default: 4096]
+    #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
+    max_text_bytes: Option<u64>,
     /// The directory receipts are saved in and reopened from; it outlives the work
     /// directory [default: receipts/ below the project]
     #[arg(long, value_name = "DIR")]
     receipts: Option<PathBuf>,
-    /// Run the recipe a saved receipt retains, as --requests runs a file, against the
-    /// sources registered now; the receipt it saves names this one as its parent
-    #[arg(long, value_name = "RECEIPT")]
-    replay: Option<String>,
+}
+
+impl HostArgs {
+    /// The host options given on the command line, by their names: what a command that
+    /// starts no service refuses rather than ignores.
+    pub fn given(&self) -> Vec<&'static str> {
+        [
+            ("--source", !self.sources.is_empty()),
+            ("--public-fixture", !self.public_fixtures.is_empty()),
+            ("--allow-path", !self.allow_paths.is_empty()),
+            ("--disclosure", self.disclosure.is_some()),
+            (
+                "--evidence-allowance-bytes",
+                self.evidence_allowance_bytes.is_some(),
+            ),
+            ("--work-dir", self.work_dir.is_some()),
+            ("--inline-wait-ms", self.inline_wait_ms.is_some()),
+            ("--dedup-set-texts", self.dedup_set_texts.is_some()),
+            ("--tables-on-disk", self.tables_on_disk),
+            ("--membership", !self.memberships.is_empty()),
+            ("--policy", !self.policies.is_empty()),
+            ("--npu-profile-dir", self.npu_profile_dir.is_some()),
+            ("--max-patterns", self.max_patterns.is_some()),
+            ("--max-text-bytes", self.max_text_bytes.is_some()),
+            ("--receipts", self.receipts.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect()
+    }
 }
 
 fn invalid(detail: String) -> L2dError {
@@ -234,6 +274,42 @@ fn sources(given: &[String], public_fixture: bool) -> Result<Vec<SourceRef>, L2d
 }
 
 pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
+    // A recipe has nobody to poll: every call waits for its job.
+    let inline_wait = match (&args.requests, &args.replay) {
+        (None, None) => Some(Duration::from_millis(
+            args.host.inline_wait_ms.unwrap_or(2_000),
+        )),
+        _ => None,
+    };
+    let service = start_service(context, &args.host, inline_wait)?;
+    let output = io::stdout().lock();
+    if let Some(receipt) = &args.replay {
+        return mcp::run_recipe(&service, receipt, output);
+    }
+    match &args.requests {
+        Some(path) => {
+            let recipe = std::fs::File::open(path).map_err(|_| L2dError::Missing {
+                item: "recipe of tool calls (`--requests`)".into(),
+                expected_at: path.clone(),
+            })?;
+            mcp::run_requests(&service, recipe, output)
+        }
+        None => {
+            mcp::serve(&service, io::stdin().lock(), output).map_err(|error| L2dError::Runtime {
+                detail: format!("serving MCP on the standard streams failed: {error}"),
+            })
+        }
+    }
+}
+
+/// Starts the triager service the host options describe, with the project's fitted
+/// baseline scorers; a job-starting call waits `inline_wait` for its job (`None`:
+/// to its end).
+pub fn start_service(
+    context: &Context,
+    args: &HostArgs,
+    inline_wait: Option<Duration>,
+) -> Result<Service, L2dError> {
     let paths = context.paths()?;
     let budget = context.budget()?;
     let project = paths.work_dir();
@@ -253,16 +329,12 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
         work_root,
         sources: registered,
         allowed_roots: args.allow_paths.clone(),
-        profile: match args.disclosure {
+        profile: match args.disclosure.unwrap_or(Disclosure::PrivateLocal) {
             Disclosure::PrivateLocal => DisclosureProfile::PrivateLocal,
             Disclosure::PublicDevelopment => DisclosureProfile::PublicDevelopment,
         },
-        evidence_allowance_bytes: args.evidence_allowance_bytes,
-        // A recipe has nobody to poll: every call waits for its job.
-        inline_wait: match (&args.requests, &args.replay) {
-            (None, None) => Some(Duration::from_millis(args.inline_wait_ms)),
-            _ => None,
-        },
+        evidence_allowance_bytes: args.evidence_allowance_bytes.unwrap_or(262_144),
+        inline_wait,
         busy: l2d_core::resource::busy_choice(),
         dedup_set_texts: args.dedup_set_texts,
         index: if args.tables_on_disk {
@@ -294,8 +366,8 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
             .map(|(name, path)| PolicyRef { name, path })
             .collect(),
         patterns: l2d_triager::service::PatternLimits {
-            max_patterns: args.max_patterns as usize,
-            max_text_bytes: args.max_text_bytes as usize,
+            max_patterns: args.max_patterns.unwrap_or(256) as usize,
+            max_text_bytes: args.max_text_bytes.unwrap_or(4096) as usize,
         },
         encoder: args.npu_profile_dir.as_ref().map(|profile| {
             Encoders(std::sync::Arc::new(NpuEncoder {
@@ -314,23 +386,5 @@ pub fn run(context: &Context, args: &McpArgs) -> Result<(), L2dError> {
                 .unwrap_or_else(|| project.join("receipts")),
         ),
     };
-    let service = Service::start(config, budget, Box::new(ProjectScorers { paths }))?;
-    let output = io::stdout().lock();
-    if let Some(receipt) = &args.replay {
-        return mcp::run_recipe(&service, receipt, output);
-    }
-    match &args.requests {
-        Some(path) => {
-            let recipe = std::fs::File::open(path).map_err(|_| L2dError::Missing {
-                item: "recipe of tool calls (`--requests`)".into(),
-                expected_at: path.clone(),
-            })?;
-            mcp::run_requests(&service, recipe, output)
-        }
-        None => {
-            mcp::serve(&service, io::stdin().lock(), output).map_err(|error| L2dError::Runtime {
-                detail: format!("serving MCP on the standard streams failed: {error}"),
-            })
-        }
-    }
+    Service::start(config, budget, Box::new(ProjectScorers { paths }))
 }

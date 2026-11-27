@@ -646,6 +646,18 @@ pub(crate) fn scan_with(
     worker.budget.hold(held);
     let mut input = ZipInput::open(&snapshot.path, &snapshot.zip, worker.budget)?;
     if input.content_sha256() != snapshot.content_sha256() {
+        if let Some(retained) = &snapshot.retained {
+            return Err(L2dError::Refused {
+                reason: format!(
+                    "the source registered for the receipt `{}` is not the archive the receipt \
+                     was saved from: it has the SHA-256 {}, and the receipt binds {}; nothing \
+                     of it was used",
+                    retained.receipt,
+                    input.content_sha256(),
+                    snapshot.content_sha256()
+                ),
+            });
+        }
         return Err(L2dError::Refused {
             reason: format!(
                 "the archive {} changed since the snapshot was opened: it now has the \

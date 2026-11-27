@@ -106,9 +106,41 @@ pub fn free_disk_bytes(dir: &Path) -> Result<u64, L2dError> {
     }
 }
 
+/// The free space of the volume that holds `dir`, in bytes, as far as this user may
+/// use it (`statvfs`: the blocks available to an unprivileged user times the fragment
+/// size). `dir` must exist. Added with triager task 3.2, whose SSH acceptance runs on
+/// a Linux host.
+#[cfg(unix)]
+pub fn free_disk_bytes(dir: &Path) -> Result<u64, L2dError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
+        failed(
+            "reading the free disk space of",
+            dir,
+            &"the path holds a NUL byte",
+        )
+    })?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string that lives through the call, and
+    // `stat` is valid, writable memory of the structure `statvfs` fills.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(failed(
+            "reading the free disk space of",
+            dir,
+            &std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `statvfs` returned 0, so it filled the whole structure.
+    let stat = unsafe { stat.assume_init() };
+    #[allow(clippy::useless_conversion)]
+    let (available, fragment) = (u64::from(stat.f_bavail), u64::from(stat.f_frsize));
+    Ok(available.saturating_mul(fragment))
+}
+
 /// Not available on this operating system: the caller must supply the figure
 /// ([`WorkDir::require_free_of`]).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn free_disk_bytes(dir: &Path) -> Result<u64, L2dError> {
     Err(L2dError::Runtime {
         detail: format!(

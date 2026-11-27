@@ -1,5 +1,6 @@
 //! Set reduction over retained evidence, with an interactive terminal client.
 
+pub mod bench;
 mod extsort;
 pub mod flow;
 pub mod input;

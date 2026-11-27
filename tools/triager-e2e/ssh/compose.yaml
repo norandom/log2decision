@@ -1,0 +1,29 @@
+# The SSH analysis host of the triager acceptance (task 3.2). Linux dependencies and
+# build output stay in named volumes inside Docker's Linux filesystem; the source is
+# mounted read-only. The client key directory and the data directory are given by the
+# driver's environment:
+#   TRIAGER_SSH_CLIENT  directory with id_ed25519.pub (a test key, not a personal one)
+#   TRIAGER_SSH_DATA    host directory with the fixtures, mounted read-only at /fixtures
+name: triager-ssh
+services:
+  host:
+    build: .
+    image: triager-ssh:3.2
+    ports:
+      - "127.0.0.1:2222:22"
+    volumes:
+      - ../../..:/src:ro
+      - ${TRIAGER_SSH_CLIENT:?set TRIAGER_SSH_CLIENT}:/client:ro
+      - ${TRIAGER_SSH_DATA:?set TRIAGER_SSH_DATA}:/fixtures:ro
+      - keys:/keys
+      - cargo-home:/usr/local/cargo/registry
+      - target:/target
+      - data:/data
+    environment:
+      CARGO_TARGET_DIR: /target
+    mem_limit: 6g
+volumes:
+  keys:
+  cargo-home:
+  target:
+  data:

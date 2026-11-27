@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 
 const MAX_VIEWS: usize = 128;
 const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
-const RECEIPT_VERSION: u32 = 1;
+/// Version 2 (triager task 3.2): audit pools order by the policy's 64-bit audit key.
+/// Version 1 used a 32-bit key over "seed/id" and is refused by name.
+const RECEIPT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Dataset {
@@ -514,13 +516,10 @@ fn score_order(a: &Record, b: &Record) -> Ordering {
         .then_with(|| a.id.cmp(&b.id))
 }
 
-fn audit_key(seed: u64, id: &str) -> u32 {
-    // FNV-1a, same seeded key as the fixture's ordered audit pool.
-    format!("{seed}/{id}")
-        .encode_utf16()
-        .fold(2166136261, |hash, unit| {
-            (hash ^ u32::from(unit)).wrapping_mul(16777619)
-        })
+/// The audit order of the parent policy and of the service's `seeded_hash` pools
+/// (requirement 5.4): FNV-1a 64-bit over the record ID, offset basis XOR seed.
+fn audit_key(seed: u64, id: &str) -> u64 {
+    l2d_decide::policy::audit_key(id, seed)
 }
 
 fn allocate(data: &Dataset, parent: &View, budget: &Budget) -> Result<Vec<Member>, String> {
@@ -1012,6 +1011,14 @@ impl Workflow {
         receipt: &Receipt,
         memory: MemoryBudget,
     ) -> Result<Self, String> {
+        if receipt.version == 1 {
+            return Err(
+                "this native receipt is version 1, whose audit pool used a 32-bit key \
+                        that the service never used; open the source again and save a new \
+                        receipt"
+                    .into(),
+            );
+        }
         if receipt.version != RECEIPT_VERSION {
             return Err("unsupported native receipt version".into());
         }
@@ -1057,6 +1064,53 @@ mod tests {
 
     fn memory() -> MemoryBudget {
         MemoryBudget::observe_with(&MemorySettings::default(), || Ok(4_u64 << 30)).unwrap()
+    }
+
+    /// Requirement 5.4: the audit pool orders by the policy's 64-bit key, as the
+    /// service's `seeded_hash` pools and the walkthrough oracle do; a receipt of the
+    /// earlier 32-bit key is refused by name.
+    #[test]
+    fn the_audit_pool_uses_the_policy_key_of_the_service() {
+        let mut flow = Workflow::with_budget(
+            crate::input::demo(),
+            8,
+            Search {
+                kind: SearchKind::Glob,
+                query: "*login*".into(),
+            },
+            memory(),
+        )
+        .unwrap();
+        flow.drill(Step::Region(Region::AOnly)).unwrap();
+        flow.drill(Step::Allocate(Budget {
+            general: 2,
+            unfamiliar: 1,
+            audit: 1,
+            ..Default::default()
+        }))
+        .unwrap();
+        let ordered: Vec<_> = flow
+            .view()
+            .members
+            .iter()
+            .map(|m| (flow.dataset().records[m.record].id.as_str(), m.allocation))
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                ("R03", Some(Pool::General)),
+                ("R04", Some(Pool::General)),
+                ("R08", Some(Pool::Unfamiliar)),
+                ("R06", Some(Pool::Audit)),
+            ]
+        );
+        assert!(l2d_decide::policy::audit_key("R06", 5) < l2d_decide::policy::audit_key("R07", 5));
+        let mut receipt = flow.receipt();
+        receipt.version = 1;
+        let refused = Workflow::reopen_with_budget(crate::input::demo(), &receipt, memory())
+            .err()
+            .unwrap();
+        assert!(refused.contains("32-bit key"), "{refused}");
     }
 
     fn location(host: &str, hour: &str, count: u64) -> Occurrence {

@@ -42,6 +42,27 @@ pub(crate) struct Retained {
     pub origin: String,
     pub origin_originals: u64,
     pub origin_occurrences: u64,
+    /// The registered source an excerpt reads (task 3.2): `ref NAME` or `path`, when
+    /// the host registers the source the receipt names. The read checks the archive's
+    /// SHA-256 against the receipt's before it uses a byte.
+    pub attached: Option<String>,
+}
+
+/// The refusal of an excerpt of a snapshot reopened from a receipt whose source this
+/// host does not register.
+pub(crate) fn excerpt_source(snapshot: &Snapshot) -> Result<(), Fault> {
+    match &snapshot.retained {
+        Some(retained) if retained.attached.is_none() => Err(Fault::new(
+            "source_not_retained",
+            format!(
+                "an excerpt reads the source, and `{}` was reopened from the receipt `{}`, \
+                 whose source this host does not register; register it under the name the \
+                 receipt states (`source.ref` of the reopen result) and reopen the receipt",
+                snapshot.handle, retained.receipt
+            ),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The refusal of an operation that reads the source or a host file of a snapshot

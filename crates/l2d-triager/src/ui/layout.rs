@@ -2,7 +2,7 @@ use ratatui::layout::Rect;
 use taffy::prelude::{AvailableSpace, FlexDirection, Size, Style, TaffyTree, auto, length};
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct Panes {
+pub(crate) struct Panes {
     pub header: Rect,
     pub search: Rect,
     pub time: Rect,
@@ -90,5 +90,47 @@ impl Panes {
             results: rect(results, body)?,
             status: rect(status, area)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 3.2: the solved edges become clipped cell rectangles whose shared edges
+    /// meet on the same cell, at every frame size and pane setting the keys reach. The
+    /// rectangles are the ones drawing and hit testing use.
+    #[test]
+    fn shared_pane_edges_meet_on_one_cell_at_every_size() {
+        for width in 32..=220u16 {
+            for height in [8u16, 9, 12, 17, 18, 24, 36, 60, 120] {
+                for (sidebar, search) in [(20u16, 3u16), (34, 3), (38, 4), (50, 10), (68, 10)] {
+                    let area = Rect::new(0, 0, width, height);
+                    let p = Panes::solve(area, sidebar, search).unwrap();
+                    let all = [p.header, p.search, p.time, p.fields, p.results, p.status];
+                    for pane in all {
+                        assert_eq!(pane.intersection(area), pane, "{width}x{height}: {pane:?}");
+                    }
+                    assert_eq!(p.header.y, 0);
+                    assert_eq!(p.search.y, p.header.bottom());
+                    assert_eq!(p.time.y, p.search.bottom());
+                    assert_eq!(p.results.y, p.time.bottom(), "{width}x{height}");
+                    assert_eq!(p.status.y, p.results.bottom(), "{width}x{height}");
+                    assert_eq!(p.status.bottom(), height, "{width}x{height}");
+                    assert_eq!(p.results.right(), width);
+                    if p.fields.width > 0 {
+                        assert_eq!(p.fields.y, p.results.y);
+                        assert_eq!(p.fields.height, p.results.height);
+                        assert_eq!(p.fields.right(), p.results.x, "{width}x{height}");
+                        assert!(p.fields.width <= width / 2);
+                    } else {
+                        assert_eq!(p.results.x, 0);
+                        assert!(width < 78);
+                    }
+                    let covered: u32 = all.iter().map(|pane| pane.area()).sum();
+                    assert_eq!(covered, u32::from(width) * u32::from(height));
+                }
+            }
+        }
     }
 }

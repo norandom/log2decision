@@ -1,6 +1,6 @@
 //! Keyboard and terminal adapter over the same immutable views used for receipts.
-mod draw;
-mod layout;
+pub(crate) mod draw;
+pub(crate) mod layout;
 mod raw;
 
 use std::{
@@ -466,7 +466,7 @@ impl App {
     }
 }
 
-fn motion(code: KeyCode) -> Option<isize> {
+pub(crate) fn motion(code: KeyCode) -> Option<isize> {
     Some(match code {
         KeyCode::Down | KeyCode::Char('j') => 1,
         KeyCode::Up | KeyCode::Char('k') => -1,
@@ -489,12 +489,18 @@ fn search_kind(index: usize) -> SearchKind {
     SEARCH_MODES[index]
 }
 
-fn edit(input: &mut String, key: KeyEvent) {
+pub(crate) fn edit(input: &mut String, key: KeyEvent) {
+    let chord = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match key.code {
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => input.clear(),
-        KeyCode::Backspace => {
+        KeyCode::Char('u') if chord => input.clear(),
+        // Many terminals send Ctrl+H (0x08) for Backspace, as an SSH PTY may.
+        KeyCode::Backspace | KeyCode::Char('h') if key.code == KeyCode::Backspace || chord => {
             input.pop();
         }
+        // Any other chord is a command, not text.
+        KeyCode::Char(_) if chord => {}
         KeyCode::Char(ch) if !ch.is_control() && input.len() + ch.len_utf8() <= 4096 => {
             input.push(ch)
         }
@@ -503,7 +509,7 @@ fn edit(input: &mut String, key: KeyEvent) {
 }
 
 // A failed initialization, draw, read or unwind still releases terminal ownership.
-struct RawTerminal {
+pub(crate) struct RawTerminal {
     #[cfg(not(windows))]
     restore_cooked: bool,
     #[cfg(windows)]
@@ -511,7 +517,7 @@ struct RawTerminal {
 }
 
 impl RawTerminal {
-    fn capture() -> io::Result<Self> {
+    pub(crate) fn capture() -> io::Result<Self> {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;

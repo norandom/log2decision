@@ -103,6 +103,11 @@ tempfile = "3"
 # requirement 13.11). The crate is already in the dependency tree through Polars; no
 # other feature is enabled here.
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_Storage_FileSystem"] }
+# The same reading of a volume's free space on Unix: `statvfs` only (`l2d-core`,
+# `parts.rs`, triager task 3.2). The crate was in `Cargo.lock` already (0.2.191, through
+# Polars, Crossterm and others); this entry adds no package and no feature beyond the
+# default `std`. It is compiled for Unix targets only and opens no network connection.
+libc = "0.2"
 # Zip archives as input (requirement 13, task 1.16).
 #
 # What the tool links for it (normal dependencies of `l2d-core`, `zip_input.rs` and

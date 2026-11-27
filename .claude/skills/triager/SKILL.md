@@ -141,10 +141,14 @@ was committed.
     routes and reasons, distances, pattern membership and the model judgments of
     issued batches (outcome, reason, caller-reported model and prompt revision). Another
     client reopens it with `triager_open {"receipt": R}`: a retained snapshot with every
-    saved set; regions, records, evidence, compose, allocate and save work; anything
-    that needs the source (select, refine, excerpts) is refused with
-    `source_not_retained`. Reopening reads nothing of the archive and scores nothing:
-    check `activity` in the overview.
+    saved set; regions, records, evidence, compose, allocate and save work; select and
+    refine are refused with `source_not_retained`. Reopening reads nothing of the archive
+    and scores nothing: check `activity` in the overview. When the host registers the
+    source under the name the receipt states, `source.attached` says so and an excerpt
+    is one read of that archive, refused when its SHA-256 is not the receipt's;
+    otherwise excerpts are `source_not_retained` too.
+    An analyst at a terminal can reopen the same receipt with `l2d tui --receipt R` and
+    the host options of `l2d mcp`: the workbench makes these same calls.
 12. **Replay.** `l2d mcp --replay R` (or the calls in the reopen result's
     `recipe.calls`, with `parent_receipt: R` on the save) runs the recipe against the
     registered source. The same input gives the same `content_sha256`; a changed source

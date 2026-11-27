@@ -27,7 +27,7 @@ fn block(title: &str, focus: bool) -> Block<'_> {
 }
 
 // Escape terminal commands and bidi overrides in source material, including titles and filenames.
-pub(super) fn safe(value: &str) -> String {
+pub(crate) fn safe(value: &str) -> String {
     let mut s = String::new();
     for ch in value.chars() {
         if l2d_core::terminal_text::is_invisible_or_control(ch) {
@@ -39,7 +39,7 @@ pub(super) fn safe(value: &str) -> String {
     s
 }
 
-pub(super) fn excerpt(value: &str, limit: usize) -> String {
+pub(crate) fn excerpt(value: &str, limit: usize) -> String {
     let end = value
         .char_indices()
         .nth(limit)

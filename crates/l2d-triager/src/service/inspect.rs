@@ -1060,13 +1060,33 @@ pub(crate) fn evidence(
             cost = excerpt.cost;
             cost["index_rows_read"] = json!(index_rows_read);
         }
-        None if snapshot.retained.is_some() => {
+        None if snapshot
+            .retained
+            .as_ref()
+            .is_some_and(|retained| retained.attached.is_none()) =>
+        {
             result.insert(
                 "excerpt_estimate".into(),
                 json!({
-                    "requires": "the source, which a reopened receipt does not retain: open \
-                                 the source and replay the receipt's recipe",
+                    "requires": "the source, which a reopened receipt does not retain and this \
+                                 host does not register: register it under the name the receipt \
+                                 states, or open the source and replay the receipt's recipe",
                     "archive_scans": Value::Null,
+                }),
+            );
+        }
+        None if snapshot.retained.is_some() => {
+            // The registered source of a reopened receipt (task 3.2): its record count
+            // and size are not retained, so the bound is the archive's own size.
+            result.insert(
+                "excerpt_estimate".into(),
+                json!({
+                    "requires": "one read of the registered source up to the record, refused \
+                                 when the archive's SHA-256 is not the receipt's",
+                    "archive_scans": 1,
+                    "records_at_most": Value::Null,
+                    "bytes_packed_at_most": std::fs::metadata(&snapshot.path)
+                        .map_or(Value::Null, |meta| json!(meta.len())),
                 }),
             );
         }
