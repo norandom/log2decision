@@ -1,5 +1,24 @@
 # Handover: npu-log-decision
 
+## Triager task 3.2, 27 November
+
+`l2d tui` now also runs over the triager service:
+- **Start.** `l2d tui --requests FILE` (a recipe of MCP tool calls) or `--receipt R` takes the host options of `l2d mcp` and makes the same tool calls on a service in its own process. Its views, allocation and receipts are an MCP client's. On every host the receipt saved by keys was the MCP receipt itself, with the same content address. The code is `crates/l2d-triager/src/bench.rs` and `bench/draw.rs`.
+- **Keys.** `1`–`4` and `i` `o` `u` choose regions; `/` searches; Tab and Enter drill regions and fields; `t` drills time; Enter shows evidence and `x` an excerpt; `f` allocates and `s` saves. Esc cancels a running job, and `r` loads again what was cancelled. A view that ends after the analyst moved on is kept and announced, never switched to. `[ ] - +` and the mouse resize the panes; `w` reads the work counters. `--trace` records layout, drawing and call times apart, with the service's own time of each job. `--demo` and `--report` refuse the service options by name.
+- **SSH.** The SSH analysis host is a Debian container (`tools/triager-e2e/ssh/`, `docker compose`). The driver is `tools/triager-e2e/service.py`. It passed locally (ConPTY) and over SSH, on the small fixture and on the 4.4 M-record timestamped fixture of 3.1, with a cancelled search at full scale. The demo and report drivers passed too.
+- **Audit key.** Requirement 5.4 is settled on the policy's 64-bit key: the demo's audit slot is now R06, and native receipts are version 2.
+- **Reopened receipts** read excerpts from the source registered under the receipt's name; the archive's SHA-256 is checked first.
+- **Linux.** `l2d-core` had no Linux free-disk-space reading, so the service could not open a snapshot there. It now uses `statvfs` (a cross-spec fix, recorded in the 3.2 record).
+
+Workspace: 1,155 passed, 0 failed, 58 ignored. Clippy (warnings denied, and on Linux for `l2d-core`, `l2d-triager` and `l2d-cli`) and fmt are clean. Review round 1 was rejected (stuck panes after a cancel, silently ignored options, untested time drill, polling-dominated job times, no RED evidence), and so was round 2 (a job ending after the analyst moved on took over the view and typed input; `--inline-wait-ms` ignored; stored drill costs counted as service time). Both were fixed; the acceptance runs were repeated in `round3\`, and round 3 was approved by a fresh reviewer. [Task 3.2 record with measurements and deviations](specs/triager/tasks.md) · evidence in `D:\BuildArtifacts\log2decision\triager-3.2\`
+
+What to know before building on it:
+- **Recipe bindings:** a recipe's bound handles are read by prefix (`snap-`, `set-`, `view-`, `final-`). Name the sets a, b and c for the quick keys and the allocation.
+- **Cross-platform receipts:** the Linux fit of the same `labelled.csv` gives another scorer revision than Windows, so receipts differ across platforms.
+- **SSH host:** the container keeps its build, keys and data in Docker volumes. Its test key and `ssh -F` config are in `D:\BuildArtifacts\log2decision\triager-3.2\ssh\`; it was left running.
+
+Next, only when the owner asks: task 3.4, re-placing committed tables. Task 3.3 stays deferred. The flaky `service_drill_round2::listed_selections_on_disk…` passed in this task's workspace run.
+
 ## Triager task 3.1, 26 November
 
 `l2d mcp` now serves occurrence-aware field and time views:

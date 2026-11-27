@@ -469,7 +469,9 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
         "triager_inspect",
         json!({"v": 1, "handle": sets.snapshot, "view": "overview"}),
     );
-    assert_eq!(opened["source"], opened_here["artifact"]["source"]);
+    let mut source_there = opened["source"].clone();
+    source_there.as_object_mut().unwrap().remove("attached");
+    assert_eq!(source_there, opened_here["artifact"]["source"]);
     assert_eq!(
         opened["origin"]["revision"],
         opened_here["artifact"]["revision"]
@@ -525,7 +527,7 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
     let records_there = second.all_records(&d, renamed.clone(), 5);
     assert_eq!(records_there, records_here);
     // The evidence the receipt retains: the score and its producer, a membership not
-    // evaluated with its reason; no excerpt.
+    // evaluated with its reason; an excerpt only from the registered source (3.2).
     let row = &records_here[0]["id"];
     let evidence = second.ok(
         "triager_inspect",
@@ -538,8 +540,35 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
         evidence["excerpt_estimate"]["requires"]
             .as_str()
             .unwrap()
-            .contains("does not retain")
+            .contains("registered source"),
+        "{evidence}"
     );
+    assert_eq!(
+        opened["source"]["attached"]["as"], "ref private",
+        "{opened}"
+    );
+    assert_eq!(opened["capabilities"]["excerpts"], true);
+    // The excerpt of the reopened record is the one the first server reads: one read
+    // of the registered archive, checked against the receipt's SHA-256.
+    let excerpt_here = first.ok(
+        "triager_inspect",
+        json!({"v": 1, "handle": sets.d, "view": "evidence", "record": row,
+               "projection": ["id", "excerpt"]}),
+    );
+    let excerpt_there = second.ok(
+        "triager_inspect",
+        json!({"v": 1, "handle": d, "view": "evidence", "record": row,
+               "projection": ["id", "excerpt"]}),
+    );
+    assert_eq!(
+        excerpt_there["excerpt"], excerpt_here["excerpt"],
+        "{excerpt_there}"
+    );
+    assert!(
+        excerpt_there["excerpt"]["text"].is_string(),
+        "{excerpt_there}"
+    );
+    assert_eq!(second.activity(&snapshot)["archive_scans"], 1);
     // The sibling views under the reopened D: recommended and unknown, as here.
     let recommended = sibling(&second, &snapshot, &d, &c, json!("c"));
     let unknown = sibling(
@@ -570,11 +599,6 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
             json!({"v": 1, "scope": snapshot, "producer": {"kind": "membership", "ref": "c"}}),
         ),
         (
-            "triager_inspect",
-            json!({"v": 1, "handle": d, "view": "evidence", "record": row,
-                   "projection": ["id", "excerpt"]}),
-        ),
-        (
             "triager_refine",
             json!({"v": 1, "set": b, "action": {"kind": "patterns"}}),
         ),
@@ -583,7 +607,7 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
         assert_eq!(code, "source_not_retained", "{tool}: {message}");
         assert!(message.contains(&receipt), "{message}");
     }
-    assert_eq!(second.activity(&snapshot)["archive_scans"], 0);
+    assert_eq!(second.activity(&snapshot)["archive_scans"], 1);
 
     // The final work set saved by the second server reopens in a third one: the same
     // ordered IDs, slots, reasons and deferred counts.
@@ -614,6 +638,200 @@ fn a_saved_candidate_reopens_in_another_server_and_allocates_there_as_here() {
 /// A third session, as [`second`].
 fn second_of(first: &Host, options: &HostOptions) -> Host {
     second(first, options)
+}
+
+/// A second server of the same project whose registered `private` source is `path`,
+/// or which registers no source at all.
+fn second_with_source(first: &Host, options: &HostOptions, path: Option<&std::path::Path>) -> Host {
+    let work = tempfile::tempdir().unwrap();
+    let mut config = config(first.dir.path(), "project-one", options);
+    config.work_root = work.path().join("work");
+    match path {
+        Some(path) => config.sources[0].path = path.to_path_buf(),
+        None => config.sources.clear(),
+    }
+    let service = Service::start(
+        config,
+        budget(options),
+        Box::new(support::TestScorers {
+            delay: options.delay,
+        }),
+    )
+    .unwrap();
+    Host { dir: work, service }
+}
+
+/// Saves a view of the records of `snapshot` that match `*login*` and returns the
+/// receipt and one record of it.
+fn saved_view(host: &Host, snapshot: &str) -> (String, Value) {
+    let set = host.select_filter(snapshot, "glob", "*login*")["set"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let view = host.ok(
+        "triager_compose",
+        json!({"v": 1, "mode": "view", "snapshot": snapshot, "sets": {"s": set}, "expr": "s"}),
+    )["view"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = host.all_records(&view, json!({"s": set}), 5)[0]["id"].clone();
+    let receipt = host.ok("triager_save", json!({"v": 1, "handle": view}))["receipt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (receipt, row)
+}
+
+#[test]
+fn a_path_source_attaches_under_private_local_and_a_public_receipt_only_a_public_one() {
+    let entries = auth_entries();
+    let universe = oracle(&entries, ".log");
+    let options = options(&universe);
+    let first = Host::new(&entries, options.clone());
+    let excerpt = |host: &Host, view: &str, row: &Value| {
+        host.reply(
+            "triager_inspect",
+            json!({"v": 1, "handle": view, "view": "evidence", "record": row,
+                   "projection": ["id", "excerpt"]}),
+        )
+    };
+
+    // A source opened by its path below an allowed directory, under private-local: the
+    // receipt keeps the path, and a second server reads excerpts from it.
+    let path = first.dir.path().join("allowed").join("mine.zip");
+    let by_path = first.ok(
+        "triager_open",
+        json!({"v": 1, "source": {"path": path, "entries": ["*.log"]}}),
+    )["snapshot"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (receipt, row) = saved_view(&first, &by_path);
+    let second = second_of(&first, &options);
+    let opened = second.ok("triager_open", json!({"v": 1, "receipt": receipt}));
+    assert_eq!(opened["source"]["attached"]["as"], "path", "{opened}");
+    let view = opened["set"].as_str().unwrap();
+    let read = excerpt(&second, view, &row);
+    let value: Value = serde_json::from_str(&read.json).unwrap();
+    let value = if value["status"] == "running" {
+        second.wait(value["job"].as_str().unwrap())
+    } else {
+        value
+    };
+    assert!(value["excerpt"]["text"].is_string(), "{value}");
+
+    // A public receipt on a host that registers the same name as a private source:
+    // nothing is attached, and the excerpt is refused by name.
+    let public = first.open("public-fixture")["snapshot"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (receipt, row) = saved_view(&first, &public);
+    let work = tempfile::tempdir().unwrap();
+    let mut config = config(first.dir.path(), "project-one", &options);
+    config.work_root = work.path().join("work");
+    for source in &mut config.sources {
+        source.public_fixture = false;
+    }
+    let private_host = Host {
+        service: Service::start(
+            config,
+            budget(&options),
+            Box::new(support::TestScorers {
+                delay: options.delay,
+            }),
+        )
+        .unwrap(),
+        dir: work,
+    };
+    let opened = private_host.ok("triager_open", json!({"v": 1, "receipt": receipt}));
+    assert_eq!(opened["source"]["attached"], Value::Null, "{opened}");
+    assert_eq!(opened["capabilities"]["excerpts"], false);
+    let (code, message) = private_host.err(
+        "triager_inspect",
+        json!({"v": 1, "handle": opened["set"], "view": "evidence", "record": row,
+               "projection": ["id", "excerpt"]}),
+    );
+    assert_eq!(code, "source_not_retained", "{message}");
+    // The same receipt on a host that registers it public reads the excerpt.
+    let public_host = second_of(&first, &options);
+    let opened = public_host.ok("triager_open", json!({"v": 1, "receipt": receipt}));
+    assert_eq!(opened["source"]["attached"]["as"], "ref public-fixture");
+    assert_eq!(opened["capabilities"]["excerpts"], true);
+}
+
+#[test]
+fn a_reopened_receipt_reads_excerpts_only_from_the_archive_it_was_saved_from() {
+    let entries = auth_entries();
+    let universe = oracle(&entries, ".log");
+    let options = options(&universe);
+    let first = Host::new(&entries, options.clone());
+    let sets = reduce(&first);
+    let receipt = first.ok("triager_save", json!({"v": 1, "handle": sets.d}))["receipt"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = first.all_records(&sets.d, json!({"a": sets.a, "b": sets.b}), 5)[0]["id"].clone();
+    let excerpt = |host: &Host, snapshot: &str, d: &str| {
+        host.reply(
+            "triager_inspect",
+            json!({"v": 1, "handle": d, "view": "evidence", "record": row,
+                   "projection": ["id", "excerpt"]}),
+        );
+        host.activity(snapshot)
+    };
+    let reopen = |host: &Host| {
+        let opened = host.ok("triager_open", json!({"v": 1, "receipt": receipt}));
+        (
+            opened["snapshot"].as_str().unwrap().to_string(),
+            opened["set"].as_str().unwrap().to_string(),
+            opened,
+        )
+    };
+
+    // A host that registers no source: refused by name before anything is read.
+    let bare = second_with_source(&first, &options, None);
+    let (snapshot, d, opened) = reopen(&bare);
+    assert_eq!(opened["source"]["attached"], Value::Null, "{opened}");
+    assert_eq!(opened["capabilities"]["excerpts"], false);
+    let (code, message) = bare.err(
+        "triager_inspect",
+        json!({"v": 1, "handle": d, "view": "evidence", "record": row,
+               "projection": ["id", "excerpt"]}),
+    );
+    assert_eq!(code, "source_not_retained", "{message}");
+    assert!(message.contains("does not register"), "{message}");
+    assert_eq!(excerpt(&bare, &snapshot, &d)["archive_scans"], 0);
+
+    // A host whose `private` is another archive: the read compares the SHA-256 with
+    // the receipt's and refuses, showing no text and no host path.
+    let mut changed = entries.clone();
+    changed[0]
+        .1
+        .push("a line the saved archive did not have".into());
+    let other = first.dir.path().join("other.zip");
+    support::write_archive(&other, &changed);
+    let elsewhere = second_with_source(&first, &options, Some(&other));
+    let (snapshot, d, opened) = reopen(&elsewhere);
+    assert_eq!(opened["source"]["attached"]["as"], "ref private");
+    let reply = elsewhere.reply(
+        "triager_inspect",
+        json!({"v": 1, "handle": d, "view": "evidence", "record": row,
+               "projection": ["id", "excerpt"]}),
+    );
+    let value: Value = serde_json::from_str(&reply.json).unwrap();
+    let status = if value["status"] == "running" {
+        elsewhere.wait_status(value["job"].as_str().unwrap())
+    } else {
+        value
+    };
+    let shown = status.to_string();
+    assert!(shown.contains("is not the archive the receipt"), "{shown}");
+    assert!(!shown.contains("other.zip"), "{shown}");
+    assert!(status["result"]["excerpt"].is_null(), "{shown}");
+    let activity = elsewhere.activity(&snapshot);
+    assert_eq!(activity["evidence_bytes_disclosed"], 0, "{activity}");
 }
 
 #[test]

@@ -1875,7 +1875,7 @@ impl Service {
                     }
                     return Ok(Reply::ok(retained));
                 }
-                state::source_not_retained(task.population.snapshot(), "an excerpt")?;
+                state::excerpt_source(task.population.snapshot())?;
                 if transport_bytes(&retained) + inspect::EXCERPT_TRANSPORT_BYTES
                     > wire::PAYLOAD_TRANSPORT_BYTES
                 {

@@ -33,3 +33,8 @@ zip.workspace = true
 # free space of a volume (`GetDiskFreeSpaceExW`), for the work directory.
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+# The free space of a volume on Linux and other Unix systems (`statvfs`), for the work
+# directory (triager task 3.2).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -68,7 +68,120 @@ Use the [shared end-to-end cases](../../../docs/qualification/triager-e2e.md) to
   - _Depends: 1.3_
   - _Requirements: 1.3, 2.4, 4.3, 5.2, 6.1, 6.3, 6.4_
 
-- [ ] 3.2 Complete SSH, MCP interoperability and scale acceptance for the terminal workflow.
+- [x] 3.2 Complete SSH, MCP interoperability and scale acceptance for the terminal workflow.
+  - Implemented 2026-11-27 in `crates/l2d-triager/src/bench.rs` and `bench/draw.rs`, with `l2d tui --requests FILE | --receipt R [--trace FILE]` in `crates/l2d-cli/src/cmd/tui.rs`. The command takes the host options of `l2d mcp` (`HostArgs` and `start_service` in `cmd/mcp.rs`). `--demo` and `--report` refuse `--trace` and every host option by name (`HostArgs::given`); the options that had defaults are optional now, with the same defaults. The workbench makes the MCP tool calls on a `Service` in its own process. It starts from a recipe or from a receipt:
+    - A recipe goes through `mcp::run_requests_bound`. The snapshot bound last is the root, bound selections are named sets, and the view bound last opens first.
+    - A receipt starts with its named sets.
+  - Views come from:
+    - `state` intersections: keys `1`–`4`, `i` `o` `u` and the regions table;
+    - a scoped filter selection plus its overlap (`/`);
+    - field and time refines (the sidebar's values, `t`);
+    - evidence and an excerpt (Enter, `x`);
+    - one allocation with the skill's pools (`f`), and `triager_save` (`s`).
+  - Jobs:
+    - A call waits inline for 50 ms. The workbench then polls the job, at first every 5 ms and at most every 100 ms. `--inline-wait-ms` is refused by name with `--requests` and `--receipt`.
+    - Esc cancels a running job through `triager_job cancel`. A cancelled or failed job drops nothing else queued. A cancelled pane shows "cancelled · r loads it".
+    - Revisiting the view or pressing `r` loads every cancelled or refused pane.
+    - A view or values page that ends after the analyst moved on does not take over. If the analyst left the view the job was started from, or is typing a search or budget, reading evidence or in a menu, the new view is kept, a notice says it is ready, and `v` lists it.
+  - Drawing reads only returned results. Records are virtualized to the 25-row page and paged by cursor. The Taffy rectangles of `ui/layout.rs` are the ones drawing and hit testing use, including dragging both pane edges. The screen is cleared when the workbench starts. The header shows the counts before the path, so a narrow terminal clips the path first.
+  - `--trace` writes calls, operations, keys, resizes and frames, with layout and draw time apart. An operation states the client-observed time and the service's own `elapsed_ms` and `queue_ms` where its result has them. A trace write error ends tracing, shows a notice and fails the session.
+  - `--json` prints the first view. The workbench holds at most 256 views, each with one 25-row page, the regions of three sets, at most 8 field rows and 100 buckets. That is a few MB outside the service budget; the trace streams to disk.
+  - Also in this task:
+    1. **Requirement 5.4 is settled on the parent policy's 64-bit FNV-1a key.** `flow.rs` audit pools use `l2d_decide::policy::audit_key`. Native receipts are version 2, and version 1 is refused by name. The demo's audit slot is now R06 (nine occurrences) instead of R07. The prototype oracle (`workflow.js`, with a BigInt key), `walkthrough.json`, `run.py` and the e2e doc changed with it.
+    2. **Excerpts after reopen.** A reopened receipt attaches the source the host registers under the receipt's `source.ref`. Under private-local, it also attaches a retained path that is still below an allowed root. The read is refused before use when the archive's SHA-256 is not the receipt's. A public receipt attaches only a public registration. The result states `source.attached` and `capabilities.excerpts` (`attach_source` in `receipt.rs`, `excerpt_source` in `state.rs`).
+    3. `mcp::settle` lets a recipe run on a service that has an inline wait.
+    4. `ui::edit` treats Ctrl+H as Backspace and ignores other Ctrl and Alt chords. An SSH PTY sent `\b`, which was typed as `h`.
+    5. **Cross-spec fix in `l2d-core`.** `parts::free_disk_bytes` had only a Windows implementation, so every snapshot open failed on Linux. It now uses `statvfs` through `libc`, which was already in `Cargo.lock`; the lock gains one dependency line and no package.
+  - Tests:
+    - `tests/bench.rs` drives the workbench by keys in-process. A − B, the siblings, a search, a field drill, a time-bucket drill and an allocation give the handles, counts and ordered IDs of the same calls made as an MCP client.
+    - Drawing at other sizes and resizing the panes makes no call. Between two overview reads the session counts only the second, and the work counters are equal.
+    - Evidence and an excerpt cost one archive scan.
+    - A receipt saved by keys reopens in a second server with the same IDs, and with an excerpt from the registered source.
+    - Esc cancels a search job that waits behind another client's job. It opens no view and leaves that job unaffected. The same search made afterwards as an MCP client scans the archive and reuses nothing.
+    - A fields job cancelled while the histogram is queued leaves no pane loading, and `r` loads both.
+    - A drill that ends after the analyst pressed `b` keeps the parent active. A drill that ends while a search is typed leaves the search draft and mode intact, so no typed letter becomes a command.
+    - `l2d-cli/tests/tui_options.rs` checks the refusal of eight options with `--demo`, and of `--inline-wait-ms` with `--requests` before the recipe is read.
+    - `ui/layout.rs` checks shared edges at 189 widths × 9 heights × 5 pane settings.
+    - `service_receipts.rs` covers excerpts after reopen. They are refused without a registration, and refused for another archive with no text or path shown. A path source attaches under private-local, and a public receipt with a private registration attaches nothing.
+    - `flow.rs` pins the demo allocation to the oracle.
+  - Gates and review:
+    - Workspace: 1,155 passed, 0 failed, 58 ignored.
+    - Clippy with warnings denied is clean, on Windows and on Linux for `l2d-core`, `l2d-triager` and `l2d-cli`; fmt is clean.
+    - Independent review, round 1: REJECTED. Its findings: a cancelled or failed job left the view's panes loading for good; `--demo` silently ignored `--trace` and the host options; the time drill and a field or time drill in the warm phase were untested; job times mostly measured the polling; RED evidence was missing.
+    - Round 2: REJECTED by a fresh reviewer. A job that ended after the analyst moved on pulled them into its view and out of a search being typed; `rzno0vgd` failed that way and had not been recorded. `--inline-wait-ms` was ignored with `--requests`. Repeated drills reported the stored cost of the first computation as service time. The driver could match a screen drawn before a key took effect.
+    - Round 3 fixed these. The driver now waits for the expected text, for the absence of the text it replaces, and for an idle status line.
+    - Round 3: APPROVED by a fresh reviewer. Its own local ConPTY run gave the same receipt (`review-3.2-r3\service-pty-97d_jlal`). It made two suggestions, not taken: Esc in a search or budget input while a job runs cancels the job first, and a second Esc leaves the input; a values page that ends after the analyst moved on is not kept, so Enter on the field asks again. The stored-result rule of the driver's summary is a heuristic: a stated time above the client's means stored.
+  - RED evidence is in `round2\` and `round3\` of the evidence directory:
+    - `red-head-lib.txt` and `red-head-receipts.txt`: the audit-key, Ctrl+H and three receipt tests fail on the code before the change, in a worktree at `29c3530`.
+    - `red-bench.txt`: the stuck-pane test fails before its fix.
+    - `red-tui-options.txt`: `--demo --trace` was accepted.
+    - `round3\red-takeover.txt`: the finished drill pulled the analyst back. `round3\red-inline-wait.txt`: `--inline-wait-ms` was taken and the recipe read.
+  - Acceptance:
+    - **Where.** Evidence is under `D:\BuildArtifacts\log2decision\triager-3.2\`. The SSH host is a Debian container (`tools/triager-e2e/ssh/`, Rust 1.98.1, release `l2d`) with key login through a test key and a known host key. The Windows OpenSSH client drove it through ConPTY. The driver is `tools/triager-e2e/service.py`.
+    - **What each run does.** The same recipe runs through `l2d mcp --requests` and by keys. By keys it does:
+      - A − B, then a sibling-and-back loop of four drills, five times;
+      - paging forward and back, a field-value drill and a time-bucket drill (46 warm interactions);
+      - an excerpt, the keys `]]][++-`, 80×24 and back, and a mouse drag of the fields edge (sidebar 50 in the trace on both hosts);
+      - at full scale with `--cancel`, a cancelled whole-snapshot search;
+      - an 18 + 4 + 2 allocation and a save;
+      - then the MCP receipt reopened by keys, with an excerpt, `b`, `1` and `i`.
+    - **Results.** Every cited run passed:
+      - The terminal's receipt was the MCP receipt itself, with the same content address: `rcpt-8c479f2a…` locally on the small fixture, `rcpt-e02d1abf…` over SSH on the small fixture, `rcpt-4bac3957…` over SSH at full scale and `rcpt-a1384ccf…` on Windows at full scale.
+      - The ordered IDs of both receipts, read with `--json --receipt`, were equal.
+      - The resizes, the drag and the warm phase left archive scans, bytes unpacked and rows scored, encoded or submitted unchanged, and the trace shows zero calls from the first resize key to the next counter read. Field values shown count as disclosed evidence (200 bytes, task 3.1).
+      - The excerpt was one scan. The reopened receipt showed scans 0 and scored 0 before its excerpt, and one scan after it.
+      - Terminal modes were restored at both ends after every session.
+      - D had 1,882 of 2,200,002 originals and D ∩ C had 273, on both hosts.
+    - **Final runs, review round 3**, in `round3\`; each passed on its first attempt:
+      - `pty-local\service-pty-bhjslb0x`: ConPTY, debug build, small timestamped fixture with 12,002 originals.
+      - `pty-ssh\service-pty-05fwtp89`: SSH, small fixture.
+      - `pty-ssh-scale\service-pty-jubq3wij`: SSH, on the timestamped 4.4 M-record fixture of 3.1 (`E97EE2D9…`), Linux binary `4f796f87…`.
+      - `pty-local-scale\service-pty-sdnke54y`: ConPTY on Windows, same fixture, release `B205B9AF…` (copy in `round3\release\`).
+    - Earlier attempts are kept and none is cited as evidence. Passed but superseded: `pty-local\z8k5rxup`, `pty-ssh\5fxf8r5g` and `bc31ernk`, `pty-ssh-scale\1qgqlfdl`, `pty-local-scale\ojqvix5y`, and in `round2\` `pty-local\ti51n8x_` and `2lecrxd3`, `pty-ssh\3l3fi7o8`, `pty-ssh-scale\tuv2ffie`, `pty-local-scale\gfyll2mm`. Failed or empty, with the cause and the fix:
+      - `pty-local\_8_nt6s3`: the audit slots of the final set were below the visible rows, and the record handles were squeezed. Fixed with narrower slot columns and a clamp on the fields pane; the driver expects `general #1`.
+      - `pty-local\tv8_7e84`: the driver read a counter line that was not yet redrawn. Fixed by draining the screen.
+      - `pty-local\r1o7p11o`: the driver took the warm baseline before the excerpt. Fixed by moving the baseline.
+      - `pty-ssh\p7zyaqxx`, empty: `l2d-core` could not read free disk space on Linux. Fixed in `l2d-core`.
+      - `pty-ssh\u52pucm3`: over SSH, `\b` arrived as Ctrl+H and was typed as `h`. Fixed in `ui::edit`.
+      - `round2\pty-local\xjknu0d_`, `v8m405rm` and `bfan5cxt`: the recipe's stderr line showed through cells the first frame left empty, under the counts-first header. Fixed by clearing the screen at start.
+      - `round2\pty-local\11f2lwi1`: field values shown changed `evidence_bytes_disclosed` in the warm check. Fixed by comparing the work counters only and recording disclosure apart.
+      - `round2\pty-ssh\klr2e7zm` and `pty-ssh-scale\bow84nh5`, empty: ratatui's `clear` read the cursor position, which the far end did not answer. Fixed with a Crossterm clear.
+      - `round2\pty-ssh-scale\rzno0vgd`: the time drill was a job. The driver matched its status line and pressed `b` early, and the finished job pulled the workbench into the time view. The take-over was fixed in round 3, and the driver now waits for the view and an idle status.
+  - Measurements at full scale, from the round 3 runs. Values are SSH / Windows ConPTY; they are single runs, and timing on this laptop is system-related.
+
+    | What | SSH | Windows ConPTY |
+    |---|---|---|
+    | Layout, when solved (p50, p95) | 49, 69 µs | 68, 141 µs |
+    | Drawing a frame (p50, p95) | 0.77, 1.16 ms | 1.0, 1.7 ms |
+    | Records page, 31 pages (p50, p95) | 0.3, 1.3 ms | 0.4, 0.7 ms |
+    | Regions (p95) | 10 ms | 15 ms |
+    | Child view, 14 drills (p50, p95) | 0.3, 82 ms | 0.1, 100 ms |
+
+    - Inline reads (pages, regions) are measured at the call. For jobs, the client-observed time includes the 50 ms inline wait and the polling. The service's own time follows in brackets, p50 and p95 for repeated operations:
+      - drill, first computations only: [28, 75 / 31, 84 ms]. Nine of the 14 drills repeat an earlier drill, and the service returned them from store in 0.1–0.4 ms. Their stated cost is that of the first computation, and the summary counts them apart.
+      - fields: 65, 136 / 71, 175 ms [59, 131 / 65, 127 ms];
+      - histogram: 133, 213 / 171, 216 ms [117, 169 / 127, 174 ms];
+      - values page: 64 / 70 ms [59 / 64 ms];
+      - allocation: 212 / 218 ms [174 / 204 ms];
+      - save: 212 / 221 ms [198 / 207 ms];
+      - excerpt of an early record: 133 / 171 ms [129 / 134 ms].
+    - The reopened receipt's excerpt reads 470 MB unpacked up to its record: 4.0 / 4.3 s [3.9 / 4.2 s].
+    - The MCP recipe (open with projections, A, B, C, D, D ∩ C, allocate, save) took 53.5 / 50.5 s.
+    - The demo walkthrough (`run.py`) passed locally and over SSH: `demo-local\native-pty-ojo1_kcd` and `demo-ssh\native-pty-ec7bfx81`. `run.py` gained `--ssh-config`. The policy report replay (`report.py`) reproduced the 18 November figures (`report-local\policy-pty-8bosf952`). These two drivers ran on the round 1 binary. Rounds 2 and 3 changed only the workbench over the service and the options `l2d tui` refuses.
+  - Recorded deviations:
+    - The workbench over the service searches with the filter producer's literal, glob and regex. SPL stays in the retained-report workbench.
+    - The raw-text browser (`r` there) is not offered, because the service keeps no text. An excerpt is one admitted read, and `r` here reloads panes.
+    - Personal layout is not persisted between sessions.
+    - Set columns are the first eight named sets. Regions, the quick keys and allocation use the first three and a set named `c`.
+    - The pane layout is shared with the retained-report workbench. The fields pane is drawn narrower when it would leave the results fewer than 58 columns.
+    - A reopened receipt's fields, histogram, select and refine stay `source_not_retained`, and the panes show it.
+    - Recipes bind handles by prefix (`snap-`, `set-`, `view-`, `final-`).
+    - The Linux fit of the same `labelled.csv` gives another scorer revision than Windows (`e1467d2b…` against `90053d7c…`), so receipts differ across platforms. Each host's MCP and terminal receipts are identical.
+    - Not run: a Linux workspace test run (only `l2d-core` `result_parts` ran there), an independent non-Rust MCP client, AIT.
+  - Open test gaps:
+    - The trace's resize window starts at the first `]` key, not at the first resize event.
+    - Mouse support of terminal emulators other than ConPTY and OpenSSH through pyte is untested.
+    - Esc on a running excerpt is not covered by a PTY run; the in-process tests cover the same cancel path.
   - Build the selected Taffy layout, Ratatui widgets and Crossterm event loop against the typed service. Verify the conversion from rounded shared pane edges to clipped terminal rectangles and reuse those rectangles for drawing and hit testing. Implement search, histogram, fields, region selector, results, status and evidence.
   - Over a real SSH PTY, resize sidebar width and search height with the keyboard, shrink to 80×24 and expand again. Test optional pointer drag, backtracking, cancellation and terminal restoration. Reopen an MCP receipt and check identical ordered IDs, evidence and counts after filtering. Record layout and redraw time separately from indexed retrieval. Verify resize counters show zero archive re-reads, rescoring or model calls. [Renderer research](research.md) · [Performance gate](performance.md)
   - _Depends: 2.2, 3.1_
@@ -104,4 +217,5 @@ Use the [shared end-to-end cases](../../../docs/qualification/triager-e2e.md) to
 - 1.3: Set tables and scores are `Table`/`Scores` in `service/tables.rs` with a memory or disk placement, read in 16,384-row blocks; `extsort::sort_file` is the bounded external sort. A selection the read refuses in memory is read again onto disk (`read_again_for_disk`). Reuse is in `ops.rs::prepared` and is bound to snapshot, model, scorer revision, population and the membership file's content hash. `test_heap.rs` is the shared counting allocator for unit tests. The scale gate is run with `tools/triager-scale/run.py` against a fixture regenerated from `generate.py` (seed in `manifest.json`); `service_memory` now takes about 220 s.
 - 2.1: Refinements live in `service/refine.rs` and are files in the work directory; recommendation producers in `service/recommend.rs`. `issue` assembles the whole result and checks its fit before it asks the budget, spends the allowance, counts or changes the run; keep that order. Errors of refine and recommend jobs pass `Shared::scrub` in `service.rs` `work`. `HostConfig` gained `policies`, `encoder` and `patterns` (`PatternLimits`, CLI `--max-patterns`, `--max-text-bytes`); a refinement revision equals the `discover search` one only with the same limits. `test_heap` tests in `recommend.rs` measure the Venn read and the making of a batch against their charges.
 - 2.2: Allocation is `service/allocate.rs` (`parse_budget`, `allocate`, `Filler`, `Allocation::explain`, `final_result`); receipts are `service/receipt.rs` (`publish`, `save`, `reopen`, `recipe`, `recipe_of`, `lineage`). A receipt's handle is its file name and covers every byte before the trailer; anything added to a receipt must feed both the handle and, unless it is lineage, `content_sha256`, and must be charged before it is read on reopen. Reopened sets carry `Producer::Retained` (with `judged: Option<Arc<Judged>>` for issued batches) and count it in `held_bytes`. `Task::Allocate`, save and reopen are in the scrubbed set in `service.rs` `work`. Membership parsing borrows fields from the line and allocates nothing per line. The scale harness gained `tools/triager-scale/ait.py` and allocation/reopen legs in `oracle.py` and `run.py`; `oracle.py` computes allocation independently and must stay so.
+- 3.2: The workbench over the service is `bench.rs` (`Workbench`, `Start`, the `Op` queue and job polling) and `bench/draw.rs`; it must only read returned results while drawing. New service behaviour belongs in the service and reaches the terminal as tool calls. `mcp::run_requests_bound` returns a recipe's bindings in order, and `mcp::settle` waits for a running job. `tools/triager-e2e/service.py` is the PTY driver, locally or over SSH (`--ssh-config`); the SSH host is `tools/triager-e2e/ssh/` (`docker compose`, with `TRIAGER_SSH_CLIENT` and `TRIAGER_SSH_DATA` set). Linux builds and runs in it; `l2d-core` reads free disk space there through `statvfs`.
 - 3.1: Projections are `service/project.rs` (`Spec::parse`/`merged`, `build`, `Reader`, `resolve`, `missing`) and views `service/facets.rs` (`summary_for`, `values`, `histogram`/`alternative`, `drill`, `listing`). `ZipBatches::observe` in `l2d-core` is the hook that sees occurrences before deduplication; `Scope::row_of_text` ties them to originals. Anything read from a record's text is the same for every repeat of that text, so a per-occurrence field or time must come from the occurrence (entry path), not the text. The 2.1 drill-memory test (`service_drill_memory`) has an 89-byte margin at 16 MiB because the job-table copy of the open result is not counted as `unowned`; fix that accounting before adding anything to the open result.

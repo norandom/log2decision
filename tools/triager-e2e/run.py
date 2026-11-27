@@ -41,14 +41,16 @@ exit "$code"
 
 
 class Target:
-    def __init__(self, binary, directory, ssh_host=None):
+    def __init__(self, binary, directory, ssh_host=None, ssh_config=None):
         self.binary = str(binary)
         self.directory = directory
         self.ssh_host = ssh_host
+        self.ssh_config = ssh_config
 
     def ssh(self, argv, *, pty=False):
         transport = ["-tt"] if pty else ["-T", "-n"]
-        return ["ssh", *transport, "-e", "none", "-o", "BatchMode=yes",
+        config = ["-F", str(self.ssh_config)] if self.ssh_config else []
+        return ["ssh", *config, *transport, "-e", "none", "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10",
                 "--", self.ssh_host, shlex.join(argv)]
 
@@ -289,7 +291,7 @@ def verify(target, evidence):
         app.drive("j", "Original 3 of 4")
         app.expect("identity response format changed")
         app.drive("j", "Original 4 of 4")
-        app.expect("service account rotation complete")
+        app.expect("token refresh scheduled")
         app.drive("\x1b", "Regions & fields")
         app.expect("Analyst work set")
         app.quit()
@@ -310,6 +312,7 @@ def main():
     where.add_argument("--ssh-host", help="configured, known POSIX SSH host with matching l2d installed")
     parser.add_argument("--remote-binary", type=PurePosixPath, help="absolute path to installed remote l2d")
     parser.add_argument("--remote-dir", type=PurePosixPath, help="existing remote scratch directory")
+    parser.add_argument("--ssh-config", type=Path, help="ssh client configuration file (ssh -F) naming the host")
     parser.add_argument("--evidence", type=Path, required=True, help="directory for per-run synthetic test receipts")
     args = parser.parse_args()
     if args.ssh_host is not None:
@@ -328,7 +331,7 @@ def main():
         target = Target(args.binary.resolve(strict=True), run)
     else:
         remote_run = args.remote_dir / f"native-pty-{uuid.uuid4().hex}"
-        target = Target(args.remote_binary, remote_run, args.ssh_host)
+        target = Target(args.remote_binary, remote_run, args.ssh_host, args.ssh_config)
         # No -p: the operator's scratch directory must already exist.
         setup = ["sh", "-c", 'test -f "$1" && test -x "$1" && mkdir -m 700 "$2"',
                  "triager-setup", str(args.remote_binary), str(remote_run)]

@@ -127,7 +127,7 @@
       "name": "Allocate once from the three disjoint pools",
       "tool": "triager_compose",
       "args": {"v":1,"mode":"allocate","snapshot":"U","scope":"D","sets":{"d":"D","c":"C"},"expr":{"intersection":["d","c"]},"budget":{"total":4,"duplicate_rule":"first_pool_wins","shortfall":"leave_unfilled","pools":[{"name":"general","limit":2,"from":{"intersection":["d","c"]},"order":["score_desc","record_id_ascending"]},{"name":"unfamiliar","limit":1,"from":{"intersection":["d",{"state":{"set":"c","is":"not_evaluated"}}]},"order":["record_id_ascending"]},{"name":"audit","limit":1,"from":{"difference":["d","c"]},"order":["seeded_hash","record_id_ascending"],"seed":5}]}},
-      "expect": {"set":"F","ordered_ids":["R03","R04","R08","R07"],"occurrence_counts.in":8,"selected":4,"deferred":2}
+      "expect": {"set":"F","ordered_ids":["R03","R04","R08","R06"],"occurrence_counts.in":9,"selected":4,"deferred":2}
     },
     {
       "name": "Save the final work set",
@@ -146,7 +146,7 @@
       "name": "Read the original order and attribution",
       "tool": "triager_inspect",
       "args": {"v":1,"handle":"F","view":"records","projection":["id","allocation"]},
-      "expect": {"rows":[{"id":"R03","allocation":"general"},{"id":"R04","allocation":"general"},{"id":"R08","allocation":"unfamiliar"},{"id":"R07","allocation":"audit"}],"next_cursor":null}
+      "expect": {"rows":[{"id":"R03","allocation":"general"},{"id":"R04","allocation":"general"},{"id":"R08","allocation":"unfamiliar"},{"id":"R06","allocation":"audit"}],"next_cursor":null}
     }
   ]
 }

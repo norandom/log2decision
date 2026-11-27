@@ -46,10 +46,33 @@ The native importer admits reports up to 16 MiB and 25,000 distinct originals, s
 | Search to Venn | Search host, raw terms and score from the root. Three originals represent four matching occurrences. Select A − B, inspect R03’s two matching occurrences and reopen the saved result with identical membership. | [Native search walkthrough](../../tools/triager-e2e/run.py) |
 | Scoped evidence | Inside the six, C has three recommended, two assessed passes and one unknown. R03 has two occurrences at edge-01 and three in its parent. Returning to D and choosing unknown gives R08 with the abstention reason. An empty search under the 08:00 UTC bucket can be undone. | [Native PTY driver](../../tools/triager-e2e/run.py) and [flow implementation and tests](../../crates/l2d-triager/src/flow.rs) |
 | Raw logs | Open the second original in A − B, read adjacent originals and return to the same row. Reopen the final set and browse its four originals in allocation order. Verify long records can be read beyond the evidence excerpt, and terminal controls are displayed safely. | [Native PTY driver](../../tools/triager-e2e/run.py) and [raw browser tests](../../crates/l2d-triager/src/ui/raw.rs) |
-| Candidate and final handoff | Reopen the candidate in a fresh process with all seats available. Allocate 2 + 1 + 1 once. A second reader recovers R03 and R04 in general, R08 in the unassessed reserve and R07 in audit. Together they account for eight occurrences. | [Walkthrough allocation oracle](../../.kiro/specs/triager/prototype/walkthrough.json) and [PTY replay](../../tools/triager-e2e/run.py) |
+| Candidate and final handoff | Reopen the candidate in a fresh process with all seats available. Allocate 2 + 1 + 1 once. A second reader recovers R03 and R04 in general, R08 in the unassessed reserve and R06 in audit. Together they account for nine occurrences. Since task 3.2 the audit pool orders by the parent policy's 64-bit key, as the service does; until then it used a 32-bit key and drew R07. | [Walkthrough allocation oracle](../../.kiro/specs/triager/prototype/walkthrough.json) and [PTY replay](../../tools/triager-e2e/run.py) |
 | Parent producer to terminal | Fit the fixture scorer, run `triage --out` and open its three originals via `tui --json`. Compare IDs and digest against the producer, retain missing occurrence coverage, and compare opt-in C to the original policy routes. | [Parent CLI integration test](../../crates/l2d-cli/tests/mark.rs), `analyst_workflow_pins_rules_score_history_and_replays_policy` |
 | Retained policy replay | Open a real report in a PTY, choose the policy region, save, and reopen from a fresh process. C and ordered membership stay bound to that report. Altering its bytes must refuse reopen. | [Report PTY driver](../../tools/triager-e2e/report.py) |
 | Terminal behavior | Resize to 80×24 and expand again, change the pane dimensions and verify that the saved investigation is byte-identical. Leaving the workbench restores the parent terminal's input mode. | [PTY driver](../../tools/triager-e2e/run.py), [input-mode probe](../../tools/triager-e2e/probe.py) and [Rust UI tests](../../crates/l2d-triager/src/ui.rs) |
+
+## The workbench over the service
+
+`l2d tui --requests FILE` and `l2d tui --receipt R` open the workbench over the triager service (task 3.2). It takes the host options of `l2d mcp`, such as `--source`, `--membership`, `--policy` and `--receipts`, and makes the same tool calls on a service in its own process. A recipe's bindings name the start. The snapshot bound last is the root. Every bound selection becomes a named set with a membership column, named by its binding in lower case. The view or final set bound last opens first. A receipt opens at its saved set, and its named sets keep their names.
+
+| Key | What it does |
+|---|---|
+| `1` `2` `3` `4` | The first two named sets: a in and b out, both in, b in and a out, neither. Each composes a child view of the current one, as `triager_compose` with `state` selectors. |
+| `i` `o` `u` | The third named set in, out or not evaluated inside the current view. |
+| Tab, Enter | Focus the results, the regions table or the fields. Enter drills a region, opens a field's values (then a value or its missing occurrences) or opens a record's evidence. |
+| `t` | Time buckets of the histogram, and "no valid time". Enter drills one with `triager_refine` `time`. |
+| `/` | A filter selection scoped to the view (glob, literal or regex; Tab switches), then its overlap with the view. |
+| `x` | In the evidence, read the excerpt: one admitted read of the source. |
+| `f`, `s` | Allocate once from the view: general from view ∩ c by score, unfamiliar from c not evaluated, audit from view − c by the policy's seeded key. `s` saves a receipt of the current view. |
+| `v`, `b` | Every view of the session; back to the parent with its selection and search draft. |
+| `w` | Refresh the work counters on the status line: archive scans, bytes unpacked, rows scored or encoded, GenAI rows and excerpt bytes. |
+| `[` `]` `-` `+`, mouse | Narrow or widen the fields pane and shrink or grow the search pane. Dragging a pane edge does the same. |
+| Esc | Cancels a running job first. A cancelled job commits nothing, and what is queued behind it still loads. |
+| `r` | Loads again whatever pane of the view was cancelled or refused. |
+
+A view or values page that ends after the analyst has moved on, or while they type a search or budget, is kept and announced ("View ready … v lists it"), and nothing switches under them. A drawn frame reads only what earlier calls returned. Resizing, moving a divider or redrawing makes no call. `--trace FILE` writes every call, operation, key, resize and frame as JSON lines. Layout and drawing time are kept apart from call time. An operation states the time the workbench saw, which includes the polling of a job, and the service's own time of the work (`service_ms`) where its result states one. `--trace` and the host options are refused with `--demo` and `--report`. `l2d --json tui --requests FILE` or `--receipt R` prints the first view, its first page and its regions without a terminal.
+
+[Service PTY driver](../../tools/triager-e2e/service.py) runs one recipe twice: through `l2d mcp --requests`, which reduces, allocates 18 + 4 + 2 slots and saves, and in the terminal, where the keyboard does the same. The ordered IDs of both receipts, and of the MCP receipt reopened in the terminal, must be equal. The work counters read on screen before and after the resizes, the drag and 44 warm drills and pages must be equal too, apart from field values shown, which count as disclosed evidence. The warm phase also drills a field value and a time bucket and backs out. The driver checks the terminal modes after every session at both ends of an SSH connection. The SSH analysis host is a Debian container ([Dockerfile and compose file](../../tools/triager-e2e/ssh/)). The container builds `l2d` from the read-only source into a volume and accepts key login for one user.
 
 For a changed score, route or rendering rule, run the relevant parent and terminal case together. If results differ, identify the first divergent step and its source, denominator or producer. A deliberate contract change updates both specs and the independent expectation before accepting new results. A renderer fix must continue to satisfy the existing expectation.
 
@@ -80,11 +103,18 @@ To replay the synthetic walkthrough over SSH, use a Linux analysis host with the
 python tools/triager-e2e/run.py --ssh-host <ssh-alias> --remote-binary /path/to/l2d --remote-dir /path/to/test-output --evidence <local-test-output>
 ```
 
+The workbench over the service has its own driver. Locally it needs a project with a fitted baseline scorer and a fixture from `tools/triager-scale/generate.py` (`fixture.zip`, `membership-c.jsonl`). Over SSH the same paths exist on the analysis host. `--ssh-config` names an `ssh -F` file, and `--cancel` cancels a search, which needs an archive large enough for a scan to outlast a key press.
+
+```sh
+python tools/triager-e2e/service.py --binary <built-l2d> --project <project> --model <scorer> --fixture <fixture-dir> --timestamps --cancel --evidence <project-test-output>
+python tools/triager-e2e/service.py --ssh-config <file> --ssh-host <alias> --remote-binary /target/release/l2d --remote-project /data/project --remote-fixture /data/fixtures/<name> --remote-dir /data/runs --model <scorer> --timestamps --cancel --evidence <local-test-output>
+```
+
 ## Remaining design gates
 
 | Owner | Next end-to-end case | Evidence required to close it |
 |---|---|---|
 | Triager 1.1–1.3 and 3.1 | Open a multi-million-occurrence archive over real MCP stdio, derive the same A/B regions, drill into a repeated original and resume after spill. | Exact distinct and occurrence accounting, source identity, memory and disk costs, cold/warm times, and zero archive or inference repeats on prepared views. [Performance gate](../../.kiro/specs/triager/performance.md) |
 | Triager 2.1–2.2 | Start from a broad search, select a mined template or vector neighbourhood and collect recommendations on that branch. Reopen the candidate and final receipt from a different MCP/TUI client. | Explainable pattern exclusions, vector revision, explicit C coverage including abstentions and unissued records, identical parent counts and ordered IDs. |
-| Triager 3.2 | Replay the native walkthrough over an actual SSH connection, resize and cancel, then reopen an MCP-produced receipt. | Terminal restoration, stable counts/IDs, layout and redraw measurements, and unchanged producer counters. Local PTY evidence covers the renderer and native receipts. |
+| Triager 3.2 (done 27 November) | Replay the native walkthrough over an actual SSH connection, resize and cancel, then reopen an MCP-produced receipt. | Passed and reviewed: see "The workbench over the service" above and the task 3.2 record in the [triager plan](../../.kiro/specs/triager/tasks.md). |
 | Parent 2.22 | Freeze the rule and review budget, run future or held-out groups and obtain independent relevance outcomes. | Compare missed relevant cases and recovery at equal review capacity, including reserved and audit slots, against predeclared targets. [Parent qualification evidence](../2026-11-18-triage-workflow-comparison.md) |

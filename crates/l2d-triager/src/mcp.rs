@@ -327,8 +327,59 @@ pub fn run_requests(
     input: impl Read,
     output: impl Write,
 ) -> Result<(), L2dError> {
+    run_requests_bound(service, input, output).map(drop)
+}
+
+/// [`run_requests`], returning what the recipe bound: the terminal workbench opens
+/// at these handles (task 3.2). A call whose job outlasts the service's inline wait
+/// is polled to its end, so a service configured for interactive clients runs a
+/// recipe as one that waits.
+pub fn run_requests_bound(
+    service: &Service,
+    input: impl Read,
+    output: impl Write,
+) -> Result<Vec<(String, Value)>, L2dError> {
     let mut input = BufReader::with_capacity(8 * 1024, input);
     run_calls(service, &mut input, None, None, output)
+}
+
+/// The reply of a call, or, when it returned a running job, the job's committed
+/// result or its error once it has ended.
+pub fn settle(service: &Service, reply: crate::service::Reply) -> crate::service::Reply {
+    let payload: Value = match serde_json::from_str(&reply.json) {
+        Ok(payload) if !reply.is_error => payload,
+        _ => return reply,
+    };
+    let (Some("running"), Some(job)) = (payload["status"].as_str(), payload["job"].as_str()) else {
+        return reply;
+    };
+    let job = job.to_string();
+    loop {
+        let status = service.call(
+            "triager_job",
+            &json!({"v": 1, "job": job, "action": "status"}),
+        );
+        if status.is_error {
+            return status;
+        }
+        let value: Value = serde_json::from_str(&status.json).unwrap_or_default();
+        match value["status"].as_str() {
+            Some("completed") => {
+                return crate::service::Reply {
+                    json: value["result"].to_string(),
+                    is_error: false,
+                };
+            }
+            Some("failed" | "cancelled" | "interrupted") => {
+                return crate::service::Reply {
+                    json: json!({"v": 1, "status": "error", "error": value["error"].clone()})
+                        .to_string(),
+                    is_error: true,
+                };
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
 }
 
 /// Replays the recipe of the receipt `receipt` (task 2.2, requirement 3.3): its tool
@@ -338,7 +389,15 @@ pub fn run_requests(
 /// source it is a new revision with that lineage.
 pub fn run_recipe(service: &Service, receipt: &str, output: impl Write) -> Result<(), L2dError> {
     let (mut input, steps) = service.recipe(receipt)?;
-    run_calls(service, &mut input, Some(steps), Some(receipt), output)
+    run_calls(service, &mut input, Some(steps), Some(receipt), output).map(drop)
+}
+
+/// What a recipe bound, in the order the names were last bound.
+fn ordered(mut bound: BTreeMap<String, Value>, order: &[String]) -> Vec<(String, Value)> {
+    order
+        .iter()
+        .filter_map(|name| bound.remove(name).map(|value| (name.clone(), value)))
+        .collect()
 }
 
 /// The calls of `input`, at most `most` of them; with `parent`, a `triager_save`
@@ -349,20 +408,21 @@ fn run_calls(
     most: Option<usize>,
     parent: Option<&str>,
     mut output: impl Write,
-) -> Result<(), L2dError> {
+) -> Result<Vec<(String, Value)>, L2dError> {
     let failed = |error: io::Error| L2dError::Runtime {
         detail: format!("the recipe's input or output failed: {error}"),
     };
     let mut line = Vec::new();
     let mut bound: BTreeMap<String, Value> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
     let mut number = 0u64;
     loop {
         if most.is_some_and(|most| number as usize >= most) {
-            return Ok(());
+            return Ok(ordered(bound, &order));
         }
         number += 1;
         match read_line(input, &mut line).map_err(failed)? {
-            Line::End => return Ok(()),
+            Line::End => return Ok(ordered(bound, &order)),
             Line::TooLong => {
                 return Err(invalid(format!(
                     "line {number} of the recipe is longer than {MAX_REQUEST_BYTES} bytes"
@@ -426,7 +486,7 @@ fn run_calls(
         {
             fields.insert("parent_receipt".into(), json!(parent));
         }
-        let reply = service.call(&tool, &args);
+        let reply = settle(service, service.call(&tool, &args));
         if reply.is_error {
             writeln!(output, "{{\"tool\":\"{tool}\",\"error\":{}}}", reply.json).map_err(failed)?;
             let payload: Value = serde_json::from_str(&reply.json).unwrap_or_default();
@@ -473,6 +533,8 @@ fn run_calls(
                         "the recipe binds more than {MAX_BINDINGS} names"
                     )));
                 }
+                order.retain(|known| known != &name);
+                order.push(name.clone());
                 bound.insert(name, value.clone());
             }
         }

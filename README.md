@@ -92,8 +92,12 @@ Open the Rust triage workbench with `l2d tui --demo --session hunt.json`. Press 
 
 The demo has 20 occurrences across 12 distinct originals. To try the search bar, press `/` at the root, type `host=edge-01 (login OR challenge) score>=0.9` and press Enter. Three raw log rows represent four matching occurrences on that host. Press `1` from those results to see which high-scoring originals the saved filter missed. You can also open a search directly with `l2d tui --demo --query 'host=edge-01 (login OR challenge) score>=0.9'`. Searches use Splunk's language and can be piped, for example `fail* | sort - score | head 5`. [Search language reference](docs/2026-11-18-triager-search-language.md)
 
+For an archive, run the workbench over the triager service. It takes the host options of `l2d mcp` and starts from a recipe of tool calls or from a saved receipt, for example `l2d tui --requests hunt.jsonl --source logs=archive.zip --membership c=c.jsonl`, or `l2d tui --receipt rcpt-… --source logs=archive.zip`. The recipe binds the snapshot and the sets, such as `"bind": {"A": "set"}`; each bound set becomes a membership column. Press `1` for A − B, `i`, `o` or `u` for C's states inside it, Tab for the regions and fields, `t` for time buckets, Enter for evidence and `x` for an excerpt. Press `f` to allocate the review budget once and `s` to save a receipt that `l2d mcp` reopens unchanged. Esc cancels a running job. Over SSH, use `ssh -t`. [Keys and acceptance](docs/qualification/triager-e2e.md)
+
 You need Windows 11 and Rust 1.98 (the repository pins the toolchain). Linux
-should work for everything except the NPU, but has not been tested.
+should work for everything except the NPU. On 27 November the release build, the
+`l2d-core` result-part tests, `l2d mcp` and the terminal workbench over SSH ran in a
+Debian container (triager task 3.2); the rest has not been tested there.
 
 ```
 cargo build --release

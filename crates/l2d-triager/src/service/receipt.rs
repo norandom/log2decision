@@ -1324,6 +1324,44 @@ struct Described {
     judged: Option<Judged>,
 }
 
+/// The source a reopened receipt reads its excerpts from.
+struct AttachedSource {
+    path: PathBuf,
+    /// Whether the host declares it a public fixture.
+    public: bool,
+    /// How the receipt names it, for results and refusals: `ref NAME` or `path`.
+    named: String,
+}
+
+/// The source `source` (the receipt's header block) names, when this host registers
+/// it now: the registered source of the same `ref`, or, under private-local, the
+/// retained path of a source opened by path when it is still below an allowed
+/// directory. Whether it is the same archive is checked by the read itself.
+fn attach_source(config: &super::HostConfig, source: &Value) -> Option<AttachedSource> {
+    if let Some(name) = source["ref"].as_str() {
+        let registered = config.sources.iter().find(|known| known.name == name)?;
+        return Some(AttachedSource {
+            path: registered.path.clone(),
+            public: registered.public_fixture,
+            named: format!("ref {name}"),
+        });
+    }
+    let path = source["path"].as_str()?;
+    if config.profile != DisclosureProfile::PrivateLocal || path == "<not retained>" {
+        return None;
+    }
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let allowed = config
+        .allowed_roots
+        .iter()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|root| resolved.starts_with(root)));
+    (allowed && resolved.is_file()).then(|| AttachedSource {
+        path: resolved,
+        public: false,
+        named: "path".into(),
+    })
+}
+
 /// Reopens the receipt of `task` as a retained snapshot with every set it retained.
 pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done, Fault> {
     let started = Instant::now();
@@ -1423,6 +1461,12 @@ pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done,
         ));
     }
     let public = header["disclosure"]["source_class"] == "public_fixture";
+    // The source the receipt names, when this host registers it now (task 3.2): an
+    // excerpt reads it again, and that read compares the archive's SHA-256 with the
+    // receipt's before it uses a byte. A public receipt takes only a source the host
+    // declares public too; the receipt's class decides what may be shown.
+    let attached =
+        attach_source(config, &header["source"]).filter(|source| !public || source.public);
     if config.profile == DisclosureProfile::PublicDevelopment && !public {
         return Err(Fault::new(
             "disclosure_refused",
@@ -1888,6 +1932,7 @@ pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done,
         origin: origin["handle"].as_str().unwrap_or_default().to_string(),
         origin_originals: origin["distinct_originals"].as_u64().unwrap_or(0),
         origin_occurrences: origin["occurrences"].as_u64().unwrap_or(0),
+        attached: attached.as_ref().map(|source| source.named.clone()),
     };
     let max_record_bytes = header["source"]["max_record_bytes"]
         .as_u64()
@@ -1896,7 +1941,9 @@ pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done,
         handle: snapshot_handle,
         scope,
         summary,
-        path: PathBuf::new(),
+        path: attached
+            .as_ref()
+            .map_or_else(PathBuf::new, |source| source.path.clone()),
         zip: ZipInputSettings {
             entries: entry_patterns,
             max_record_bytes,
@@ -1948,7 +1995,43 @@ pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done,
             .set("output", rows)
             .set("tables_on_disk", on_disk)
             .set("index_on_disk", snapshot.scope.index_on_disk());
-        let source_block = header["source"].clone();
+        let mut source_block = header["source"].clone();
+        let capabilities = match &attached {
+            Some(source) => {
+                source_block["attached"] = json!({
+                    "as": source.named,
+                    "reads": ["evidence excerpt"],
+                    "verified": "an excerpt reads the archive again and is refused when its \
+                                 SHA-256 is not the receipt's `content_sha256`",
+                });
+                json!({
+                    "compose_modes": ["view", "allocate"],
+                    "operators": ["union", "intersection", "difference", "complement", "state"],
+                    "inspect_views": ["overview", "regions", "records", "evidence"],
+                    "save": true,
+                    "excerpts": true,
+                    "not_supported": ["triager_select", "triager_refine"],
+                    "why": "a reopened receipt retains the saved originals, not the whole \
+                            snapshot; the registered source supplies excerpts of them, and \
+                            selecting or refining needs the source opened again",
+                })
+            }
+            None => {
+                source_block["attached"] = Value::Null;
+                json!({
+                    "compose_modes": ["view", "allocate"],
+                    "operators": ["union", "intersection", "difference", "complement", "state"],
+                    "inspect_views": ["overview", "regions", "records", "evidence"],
+                    "save": true,
+                    "excerpts": false,
+                    "not_supported": ["triager_select", "triager_refine", "evidence excerpt"],
+                    "why": "a reopened receipt retains no source text, and this host registers \
+                            no source the receipt names; register it under the same name for \
+                            excerpts, or open the source and replay the recipe to select or \
+                            refine",
+                })
+            }
+        };
         let result = wire::with_response_bytes(json!({
             "v": VERSION,
             "status": "ready",
@@ -1982,15 +2065,7 @@ pub(crate) fn reopen(worker: &mut Worker<'_>, task: &ReopenTask) -> Result<Done,
                 "listed": !recipe_shown.is_empty(),
                 "replay": "l2d mcp --replay RECEIPT runs it against the registered source",
             },
-            "capabilities": {
-                "compose_modes": ["view", "allocate"],
-                "operators": ["union", "intersection", "difference", "complement", "state"],
-                "inspect_views": ["overview", "regions", "records", "evidence"],
-                "save": true,
-                "not_supported": ["triager_select", "triager_refine", "evidence excerpt"],
-                "why": "a reopened receipt retains no source text; open the source and replay \
-                        the recipe to select, refine or read an excerpt",
-            },
+            "capabilities": capabilities,
             "disclosure": shared.disclosure(&snapshot),
             "cost": cost.finish(worker),
         }));

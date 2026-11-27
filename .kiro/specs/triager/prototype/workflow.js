@@ -72,10 +72,14 @@ const TriagerDemo = (() => {
     }
     return previous[text.length];
   }
+  // The parent policy's audit key (l2d_decide::policy::audit_key): FNV-1a 64-bit over
+  // the record ID's UTF-8 bytes, offset basis XOR seed. The service and the terminal
+  // use the same key since triager task 3.2 (requirement 5.4).
   function seededKey(id, seed) {
-    let value = 2166136261;
-    for (const ch of seed+"/"+id) value = Math.imul(value ^ ch.charCodeAt(0),16777619);
-    return value >>> 0;
+    const mask = (1n << 64n) - 1n;
+    let value = 0xcbf29ce484222325n ^ BigInt(seed);
+    for (const byte of new TextEncoder().encode(id)) value = ((value ^ BigInt(byte)) * 0x100000001b3n) & mask;
+    return value;
   }
   function frequencies(occurrences, key) {
     const buckets = new Map();
@@ -198,7 +202,10 @@ const TriagerDemo = (() => {
           const candidates=rows.filter(r=>events.some((e,i)=>e.id===r.id && parent.mask[i]===IN && evaluate(pool.from,args.sets,i)===IN));
           candidates.sort((a,b)=>{
             if (pool.order[0]==="score_desc") return b.score-a.score || a.id.localeCompare(b.id);
-            if (pool.order[0]==="seeded_hash") return seededKey(a.id,pool.seed)-seededKey(b.id,pool.seed) || a.id.localeCompare(b.id);
+            if (pool.order[0]==="seeded_hash") {
+              const left=seededKey(a.id,pool.seed), right=seededKey(b.id,pool.seed);
+              return left < right ? -1 : left > right ? 1 : a.id.localeCompare(b.id);
+            }
             return a.id.localeCompare(b.id);
           });
           const added=candidates.filter(r=>!allocations[r.id]).slice(0,pool.limit);
