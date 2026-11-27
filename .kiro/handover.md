@@ -17,7 +17,13 @@ What to know before building on it:
 - **Cross-platform receipts:** the Linux fit of the same `labelled.csv` gives another scorer revision than Windows, so receipts differ across platforms.
 - **SSH host:** the container keeps its build, keys and data in Docker volumes. Its test key and `ssh -F` config are in `D:\BuildArtifacts\log2decision\triager-3.2\ssh\`; it was left running.
 
-Next, only when the owner asks: task 3.4, re-placing committed tables. Task 3.3 stays deferred. The flaky `service_drill_round2::listed_selections_on_disk…` passed in this task's workspace run.
+Owner decisions of 27 November:
+- Push `main` (done after this handover was committed).
+- Stop the SSH container and keep its volumes (done). `docker compose -f tools/triager-e2e/ssh/compose.yaml start`, with `TRIAGER_SSH_CLIENT` and `TRIAGER_SSH_DATA` set, brings it back with its build, keys and fixtures.
+- Both review suggestions become task 3.5: Esc leaves an input before it cancels a job, and a late values page is kept.
+- The Linux scorer revision differing from Windows is recorded only; receipts are compared per host.
+
+Next, only when the owner asks: task 3.4 (re-placing committed tables) or 3.5. Task 3.3 stays deferred. The flaky `service_drill_round2::listed_selections_on_disk…` passed in this task's workspace run.
 
 ## Triager task 3.1, 26 November
 

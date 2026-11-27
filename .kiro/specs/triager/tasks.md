@@ -110,7 +110,7 @@ Use the [shared end-to-end cases](../../../docs/qualification/triager-e2e.md) to
     - Independent review, round 1: REJECTED. Its findings: a cancelled or failed job left the view's panes loading for good; `--demo` silently ignored `--trace` and the host options; the time drill and a field or time drill in the warm phase were untested; job times mostly measured the polling; RED evidence was missing.
     - Round 2: REJECTED by a fresh reviewer. A job that ended after the analyst moved on pulled them into its view and out of a search being typed; `rzno0vgd` failed that way and had not been recorded. `--inline-wait-ms` was ignored with `--requests`. Repeated drills reported the stored cost of the first computation as service time. The driver could match a screen drawn before a key took effect.
     - Round 3 fixed these. The driver now waits for the expected text, for the absence of the text it replaces, and for an idle status line.
-    - Round 3: APPROVED by a fresh reviewer. Its own local ConPTY run gave the same receipt (`review-3.2-r3\service-pty-97d_jlal`). It made two suggestions, not taken: Esc in a search or budget input while a job runs cancels the job first, and a second Esc leaves the input; a values page that ends after the analyst moved on is not kept, so Enter on the field asks again. The stored-result rule of the driver's summary is a heuristic: a stated time above the client's means stored.
+    - Round 3: APPROVED by a fresh reviewer. Its own local ConPTY run gave the same receipt (`review-3.2-r3\service-pty-97d_jlal`). It made two suggestions, which the owner made task 3.5 on 27 November: Esc in a search or budget input while a job runs cancels the job first, and a second Esc leaves the input; a values page that ends after the analyst moved on is not kept, so Enter on the field asks again. The stored-result rule of the driver's summary is a heuristic: a stated time above the client's means stored.
   - RED evidence is in `round2\` and `round3\` of the evidence directory:
     - `red-head-lib.txt` and `red-head-receipts.txt`: the audit-key, Ctrl+H and three receipt tests fail on the code before the change, in a worktree at `29c3530`.
     - `red-bench.txt`: the stuck-pane test fails before its fix.
@@ -209,6 +209,13 @@ Use the [shared end-to-end cases](../../../docs/qualification/triager-e2e.md) to
   - Owner decision 2026-11-26: plain-file and store sources (refused by name since 1.2) get no task for now and remain an accepted limit of this milestone.
   - _Depends: 1.3, 3.1_
   - _Requirements: 1.2, 6.2, 6.3_
+
+- [ ] 3.5 Make two workbench interactions less surprising (added by the owner, 2026-11-27, from the round 3 review of 3.2).
+  - Esc in an input (search, budget) while a job runs leaves the input first. A second Esc cancels the job. Today the first Esc cancels and the second leaves.
+  - A values page that ends after the analyst moved on is kept for its view. Enter on the field then shows it without a second `triager_inspect` call. Today it is dropped and asked again.
+  - Test both in `tests/bench.rs` with a slow job of another client, as in 3.2. Show that the kept page makes no call, and that no typed text becomes a command.
+  - _Depends: 3.2_
+  - _Requirements: 5.1, 5.3, 6.3_
 
 ## Implementation Notes
 
